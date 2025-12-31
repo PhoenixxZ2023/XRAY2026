@@ -1,5 +1,5 @@
 #!/bin/bash
-# menuxray.sh - Versão SUPREMA v4 (Link Corrigido: IP no Address + Fake SNI)
+# menuxray.sh - Versão V6.1 (Completa: Todas as Opções + Azion Fix)
 
 # --- CONFIGURAÇÃO AUTOMÁTICA ---
 DB_HOST="localhost"
@@ -59,14 +59,15 @@ func_check_cert() {
     return 0
 }
 
-# --- FUNÇÃO CERTIFICADO (SEM VERIFICAÇÃO DE IP) ---
+# --- FUNÇÃO CERTIFICADO (FLEXÍVEL / AZION) ---
 func_xray_cert() {
     local domain="$1"
     mkdir -p "$SSL_DIR"
-    echo "Gerando Certificado FAKE para: $domain..."
+    echo "Gerando Certificado para: $domain..."
     
+    # Gera certificado auto-assinado (Aceita Azion/Fake/Qualquer um)
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-        -subj "/C=BR/ST=SP/L=SaoPaulo/O=Supremo/OU=VPN/CN=$domain" \
+        -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$domain" \
         -keyout "$KEY_FILE" -out "$CRT_FILE" > /dev/null 2>&1
     
     chmod 755 "$SSL_DIR"; chmod 644 "$KEY_FILE"; chmod 644 "$CRT_FILE"
@@ -82,8 +83,11 @@ func_generate_config() {
     mkdir -p "$(dirname "$CONFIG_PATH")"
 
     local stream_settings=""
+    
+    # --- LOGICA DE PROTOCOLOS (TODOS MANTIDOS) ---
     if [ "$network" == "xhttp" ]; then
         if [ "$use_tls" = "true" ]; then
+            # CORREÇÃO PARA AZION: Adicionado ALPN h2/http1.1
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "xhttp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], alpn: ["h2", "http/1.1"]}, xhttpSettings: {path: "/", scMaxBufferedPosts: 30}}')
         else
             stream_settings=$(jq -n '{network: "xhttp", security: "none", xhttpSettings: {path: "/", scMaxBufferedPosts: 30}}')
@@ -103,6 +107,7 @@ func_generate_config() {
     elif [ "$network" == "vision" ]; then
         stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "tcp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], minVersion: "1.2", allowInsecure: true}, tcpSettings: {header: {type: "none"}}}')
     else 
+        # TCP Simples
         if [ "$use_tls" = "true" ]; then
              stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "tcp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}]}}')
         else
@@ -122,7 +127,7 @@ func_generate_config() {
     clear
     header_blue "STATUS DA INSTALAÇÃO"
     if systemctl is-active --quiet xray; then
-        echo -e "${TXT_GREEN}✅ Configuração SUPREMA Aplicada!${RESET}"
+        echo -e "${TXT_GREEN}✅ Configuração Aplicada!${RESET}"
     else
         echo -e "${TXT_RED}❌ Falha ao iniciar.${RESET}"
         journalctl -u xray -n 5 --no-pager
@@ -141,7 +146,6 @@ func_add_user_logic() {
     local port=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").port' "$CONFIG_PATH")
     local net=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.network' "$CONFIG_PATH")
     local sec=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.security' "$CONFIG_PATH")
-    # Pega o domínio do config (Pode ser o Fake)
     local domain=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.tlsSettings.serverName // empty' "$CONFIG_PATH")
     
     # PEGA O IP REAL DA VPS PARA O ENDEREÇO DO LINK
@@ -161,7 +165,7 @@ func_add_user_logic() {
     
     systemctl restart xray > /dev/null 2>&1
     
-    # --- GERADOR DE LINK INTELIGENTE (IP no Address + Domínio no SNI) ---
+    # --- GERADOR DE LINK (V4: IP no Address + Domínio no SNI) ---
     local link=""
     if [ "$net" == "grpc" ]; then
         local serviceName=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.grpcSettings.serviceName' "$CONFIG_PATH")
@@ -174,7 +178,7 @@ func_add_user_logic() {
         local path=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.xhttpSettings.path' "$CONFIG_PATH")
         [ "$path" == "/" ] && path="%2F"
         if [ "$sec" == "tls" ]; then
-            # AQUI ESTÁ A CORREÇÃO: @${vps_ip} no endereço, &sni=${domain} no host
+            # Para Azion/Supremo: IP no address, Domínio no SNI/Host
             link="vless://${uuid}@${vps_ip}:${port}?mode=auto&path=${path}&security=tls&encryption=none&host=${domain}&type=xhttp&sni=${domain}#${nick}"
         else
             link="vless://${uuid}@${vps_ip}:${port}?mode=auto&path=${path}&security=none&encryption=none&host=${domain}&type=xhttp#${nick}"
@@ -302,7 +306,7 @@ func_wizard_install() {
     # PASSO 2
     header_blue "CONFIGURAÇÃO (2/5)"
     echo "Deseja usar criptografia TLS/SSL (HTTPS)?"
-    echo "1) SIM - (MODO SUPREMO: Aceita qualquer domínio/Fake)"
+    echo "1) SIM - (SUPREMO/AZION: Aceita domínio Fake/Azion)"
     echo "2) NÃO - Conexão simples"
     read -rp "Opção [1/2]: " tls_opt
     local use_tls="false"
@@ -323,8 +327,8 @@ func_wizard_install() {
     local domain_val=""
     if [ "$use_tls" == "true" ]; then
         echo -e "${TXT_CYAN}MODO SUPREMO ATIVADO!${RESET}"
-        echo "Digite QUALQUER domínio que você quiser."
-        echo "Ex: www.batata.com, google.com, fake.net"
+        echo "Digite seu domínio Azion ou Domínio Fake."
+        echo "Ex: turbonet.azion.app ou www.batata.com"
         read -rp "Domínio: " domain_val
         func_xray_cert "$domain_val" 
     else
@@ -337,7 +341,7 @@ func_wizard_install() {
     header_blue "SELECIONE O PROTOCOLO"
     echo "1. ws (WebSocket)"
     echo "2. grpc (gRPC)"
-    echo "3. xhttp (HTTP/2)"
+    echo "3. xhttp (HTTP/2) - (Ideal para Azion/443)"
     echo "4. tcp (Simples)"
     echo "5. vision (XTLS-Vision) - 🚀"
     echo "0. Cancelar"
