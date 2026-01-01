@@ -1,5 +1,5 @@
 #!/bin/bash
-# menuxray.sh - Versão V6.4 (Lista Full UUID + Proteção de Erro)
+# menuxray.sh - Versão V6.5 (Anti-Colagem + Retorno Automático)
 
 # --- CONFIGURAÇÃO ---
 XRAY_BIN="/usr/local/bin/xray"
@@ -127,12 +127,12 @@ func_add_user_logic() {
     local uuid=$(uuidgen)
     local expiry=$(date -d "+$expiry_days days" +%F)
 
-    # Adiciona no JSON (Configuração Real)
+    # 1. Adiciona no JSON (Configuração Real)
     jq --arg uuid "$uuid" --arg nick_arg "$nick" \
        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) += [{"id": $uuid, "email": $nick_arg, "level": 0}]' \
        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
-    # Adiciona no ARQUIVO DE LISTA (O Caderninho)
+    # 2. Adiciona no ARQUIVO DE LISTA
     echo "$nick|$uuid|$expiry" >> "$USER_DB"
     
     systemctl restart xray > /dev/null 2>&1
@@ -199,29 +199,46 @@ func_remove_user_logic() {
 # --- PÁGINAS ---
 
 func_page_create_user() {
-    while true; do
-        header_blue "CRIAR USUÁRIO"
-        echo "⚠️  Use apenas letras e números. Sem espaços."
-        read -rp "Nome do usuário (0 p/ voltar): " raw_nick
-        
-        if [ "$raw_nick" == "0" ] || [ -z "$raw_nick" ]; then break; fi
+    # REMOVIDO O LOOP WHILE PARA EVITAR AVALANCHE DE COLAGEM
+    header_blue "CRIAR USUÁRIO"
+    echo "⚠️  Use apenas letras e números. Sem espaços."
+    read -rp "Nome do usuário (0 p/ voltar): " raw_nick
+    
+    if [ "$raw_nick" == "0" ] || [ -z "$raw_nick" ]; then return; fi
 
-        # SANITIZAÇÃO (LIMPEZA DO NOME)
-        # Remove tudo que não for letra ou número para evitar colar logs sem querer
-        nick=$(echo "$raw_nick" | sed 's/[^a-zA-Z0-9]//g')
+    # 1. VALIDAÇÃO DE TAMANHO (Bloqueia links colados)
+    local len=${#raw_nick}
+    if [ $len -gt 15 ]; then
+        echo -e "${TXT_RED}❌ Nome muito longo! (Máx 15 caracteres)${RESET}"
+        echo "Evite colar o link anterior aqui."
+        sleep 3
+        return
+    fi
+    
+    # 2. VALIDAÇÃO DE PALAVRAS PROIBIDAS (Lixo de colagem)
+    if [[ "$raw_nick" == *"vless"* ]] || [[ "$raw_nick" == *"http"* ]] || [[ "$raw_nick" == *"Link"* ]]; then
+        echo -e "${TXT_RED}❌ Entrada inválida detectada!${RESET}"
+        sleep 2
+        return
+    fi
 
-        if [ -z "$nick" ]; then
-            echo "❌ Nome inválido (caracteres proibidos)."
-            sleep 1; continue
-        fi
-        
-        if grep -q "$nick" "$USER_DB"; then echo "❌ Usuário já existe!"; sleep 1; continue; fi
-        
-        read -rp "Dias de validade (Padrão 30): " days
-        [ -z "$days" ] && days=30
-        func_add_user_logic "$nick" "$days"
-        read -rp "Pressione ENTER para continuar..."
-    done
+    # 3. SANITIZAÇÃO
+    nick=$(echo "$raw_nick" | sed 's/[^a-zA-Z0-9]//g')
+    
+    if grep -q "$nick" "$USER_DB"; then 
+        echo -e "${TXT_RED}❌ Usuário já existe!${RESET}"
+        sleep 2
+        return
+    fi
+    
+    read -rp "Dias de validade (Padrão 30): " days
+    [ -z "$days" ] && days=30
+    
+    func_add_user_logic "$nick" "$days"
+    
+    # PAUSA OBRIGATÓRIA ANTES DE VOLTAR AO MENU
+    # Isso impede que o script continue lendo o que foi colado
+    read -rp "Pressione ENTER para voltar ao menu..."
 }
 
 func_page_remove_user() {
@@ -233,22 +250,17 @@ func_page_remove_user() {
 
 func_page_list_users() {
     header_blue "LISTAR USUÁRIOS"
-    
-    # CABEÇALHO CORRIGIDO
     printf "%-15s | %-37s | %s\n" "USUÁRIO" "UUID" "VENCIMENTO"
     echo "------------------------------------------------------------------"
-    
     if [ -f "$USER_DB" ]; then
         while IFS='|' read -r nick uuid expiry; do
             if [ -n "$nick" ]; then
-                # MOSTRA UUID COMPLETO AGORA
                 printf "%-15s | %-37s | %s\n" "$nick" "$uuid" "$expiry"
             fi
         done < "$USER_DB"
     else
         echo "Nenhum usuário registrado."
     fi
-    
     echo ""
     read -rp "Pressione ENTER para voltar..."
 }
@@ -363,7 +375,7 @@ func_wizard_install() {
     func_generate_config "$pub_port" "$selected_net" "$domain_val" "$api_port" "$use_tls"
 }
 
-# --- MENU PRINCIPAL UI ---
+# --- MENU ---
 menu_display() {
     clear
     echo -e "${TITLE_BAR}        DRAGONCORE XRAY MANAGER        ${RESET}"
