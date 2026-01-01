@@ -1,5 +1,5 @@
 #!/bin/bash
-# menuxray.sh - Versão V6.1 (Completa: Todas as Opções + Azion Fix)
+# menuxray.sh - Versão V6.2 (Listagem Direta JSON + Azion Fix)
 
 # --- CONFIGURAÇÃO AUTOMÁTICA ---
 DB_HOST="localhost"
@@ -33,7 +33,7 @@ header_blue() {
     echo ""
 }
 
-# --- FUNÇÃO DE BANCO DE DADOS INTELIGENTE ---
+# --- FUNÇÃO DE BANCO DE DADOS (Mantida para compatibilidade) ---
 db_query() {
     local query="$1"
     local result=""
@@ -41,12 +41,10 @@ db_query() {
     if [ -z "$result" ]; then result=$(sudo -u postgres psql -d sshplus -t -A -c "$query" 2>/dev/null); fi
     if [ -z "$result" ]; then result=$(sudo -u postgres psql -d dtunnel -t -A -c "$query" 2>/dev/null); fi
     if [ -z "$result" ]; then result=$(sudo -u postgres psql -d xray -t -A -c "$query" 2>/dev/null); fi
-    if [ -z "$result" ]; then result=$(sudo -u postgres psql -d vpndb -t -A -c "$query" 2>/dev/null); fi
     echo "$result"
 }
 
-# --- DEMAIS FUNÇÕES ---
-
+# --- SISTEMA ---
 func_install_official_core() {
     header_blue "INSTALANDO XRAY CORE"
     echo "Aguarde..."
@@ -59,17 +57,13 @@ func_check_cert() {
     return 0
 }
 
-# --- FUNÇÃO CERTIFICADO (FLEXÍVEL / AZION) ---
 func_xray_cert() {
     local domain="$1"
     mkdir -p "$SSL_DIR"
     echo "Gerando Certificado para: $domain..."
-    
-    # Gera certificado auto-assinado (Aceita Azion/Fake/Qualquer um)
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
         -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$domain" \
         -keyout "$KEY_FILE" -out "$CRT_FILE" > /dev/null 2>&1
-    
     chmod 755 "$SSL_DIR"; chmod 644 "$KEY_FILE"; chmod 644 "$CRT_FILE"
 }
 
@@ -81,13 +75,11 @@ func_generate_config() {
     local use_tls="$5" 
     
     mkdir -p "$(dirname "$CONFIG_PATH")"
-
     local stream_settings=""
     
-    # --- LOGICA DE PROTOCOLOS (TODOS MANTIDOS) ---
+    # --- LOGICA DE PROTOCOLOS ---
     if [ "$network" == "xhttp" ]; then
         if [ "$use_tls" = "true" ]; then
-            # CORREÇÃO PARA AZION: Adicionado ALPN h2/http1.1
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "xhttp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], alpn: ["h2", "http/1.1"]}, xhttpSettings: {path: "/", scMaxBufferedPosts: 30}}')
         else
             stream_settings=$(jq -n '{network: "xhttp", security: "none", xhttpSettings: {path: "/", scMaxBufferedPosts: 30}}')
@@ -107,7 +99,6 @@ func_generate_config() {
     elif [ "$network" == "vision" ]; then
         stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "tcp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], minVersion: "1.2", allowInsecure: true}, tcpSettings: {header: {type: "none"}}}')
     else 
-        # TCP Simples
         if [ "$use_tls" = "true" ]; then
              stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "tcp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}]}}')
         else
@@ -139,7 +130,6 @@ func_generate_config() {
 func_add_user_logic() {
     local nick="$1"
     local expiry_days="$2"
-    
     if [ -z "$nick" ]; then return 1; fi
     if [ ! -f "$CONFIG_PATH" ]; then echo "❌ Xray não configurado."; return 1; fi
 
@@ -148,13 +138,13 @@ func_add_user_logic() {
     local sec=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.security' "$CONFIG_PATH")
     local domain=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.tlsSettings.serverName // empty' "$CONFIG_PATH")
     
-    # PEGA O IP REAL DA VPS PARA O ENDEREÇO DO LINK
     local vps_ip=$(curl -s icanhazip.com)
     if [ -z "$domain" ]; then domain=$vps_ip; fi
 
     local uuid=$(uuidgen)
     local expiry=$(date -d "+$expiry_days days" +%F)
 
+    # Tenta salvar no DB, mas não depende disso
     db_query "CREATE TABLE IF NOT EXISTS xray (id SERIAL PRIMARY KEY, uuid TEXT, nick TEXT, expiry DATE, protocol TEXT, domain TEXT);" > /dev/null 2>&1
 
     jq --arg uuid "$uuid" --arg nick_arg "$nick" \
@@ -165,7 +155,7 @@ func_add_user_logic() {
     
     systemctl restart xray > /dev/null 2>&1
     
-    # --- GERADOR DE LINK (V4: IP no Address + Domínio no SNI) ---
+    # --- GERADOR DE LINK ---
     local link=""
     if [ "$net" == "grpc" ]; then
         local serviceName=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.grpcSettings.serviceName' "$CONFIG_PATH")
@@ -178,7 +168,6 @@ func_add_user_logic() {
         local path=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.xhttpSettings.path' "$CONFIG_PATH")
         [ "$path" == "/" ] && path="%2F"
         if [ "$sec" == "tls" ]; then
-            # Para Azion/Supremo: IP no address, Domínio no SNI/Host
             link="vless://${uuid}@${vps_ip}:${port}?mode=auto&path=${path}&security=tls&encryption=none&host=${domain}&type=xhttp&sni=${domain}#${nick}"
         else
             link="vless://${uuid}@${vps_ip}:${port}?mode=auto&path=${path}&security=none&encryption=none&host=${domain}&type=xhttp#${nick}"
@@ -198,7 +187,6 @@ func_add_user_logic() {
     echo -e "${TXT_GREEN}✅ Usuário criado com sucesso!${RESET}"
     echo "-----------------------------------------"
     echo "👤 Usuário: $nick"
-    echo "📅 Expira:  $expiry"
     echo "🔑 UUID:    $uuid"
     echo "-----------------------------------------"
     echo -e "${TXT_BLUE}🔗 Link de Conexão:${RESET}"
@@ -207,18 +195,21 @@ func_add_user_logic() {
 }
 
 func_remove_user_logic() {
-    local identifier="$1"
-    local uuid=""
-    if [[ "$identifier" =~ ^[0-9]+$ ]]; then uuid=$(db_query "SELECT uuid FROM xray WHERE id = $identifier");
-    else uuid=$(db_query "SELECT uuid FROM xray WHERE uuid = '$identifier'"); fi
+    local identifier="$1" # Pode ser UUID ou NOME
     
-    if [ -z "$uuid" ]; then echo "❌ Usuário não encontrado."; sleep 1; return 1; fi
+    if [ ! -f "$CONFIG_PATH" ]; then echo "❌ Erro config."; return; fi
     
-    jq --arg uuid "$uuid" '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $uuid))' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
-    db_query "DELETE FROM xray WHERE uuid = '$uuid'"
+    # Remove pelo JSON (Infalível)
+    # Remove onde ID = identifier OU Email = identifier
+    jq --arg id "$identifier" \
+       '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id and .email != $id))' \
+       "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
+
+    # Tenta limpar do DB também só pra garantir
+    db_query "DELETE FROM xray WHERE uuid = '$identifier' OR nick = '$identifier'"
+    
     systemctl restart xray > /dev/null 2>&1
-    
-    echo -e "${TXT_GREEN}✅ Usuário removido com sucesso.${RESET}"
+    echo -e "${TXT_GREEN}✅ Usuário removido (se existia).${RESET}"
     sleep 1
 }
 
@@ -229,11 +220,11 @@ func_page_create_user() {
         header_blue "CRIAR USUÁRIO"
         read -rp "Nome do usuário (0 p/ voltar): " nick
         if [ "$nick" == "0" ] || [ -z "$nick" ]; then break; fi
-        check_exists=$(db_query "SELECT id FROM xray WHERE nick = '$nick' LIMIT 1")
-        if [ -n "$check_exists" ]; then echo "❌ Usuário já existe!"; sleep 1; continue; fi
+        # Verificação via JSON (Mais confiável que DB)
+        if grep -q "$nick" "$CONFIG_PATH"; then echo "❌ Usuário já existe!"; sleep 1; continue; fi
+        
         read -rp "Dias de validade (Padrão 30): " days
         [ -z "$days" ] && days=30
-        
         func_add_user_logic "$nick" "$days"
         read -rp "Pressione ENTER para continuar..."
     done
@@ -241,30 +232,38 @@ func_page_create_user() {
 
 func_page_remove_user() {
     header_blue "REMOVER USUÁRIO"
-    echo "Digite o ID ou UUID do usuário."
+    echo "Digite o Nome (nick) ou UUID para remover."
     read -rp "Identificador: " id_input
     if [ -n "$id_input" ]; then func_remove_user_logic "$id_input"; fi
 }
 
 func_page_list_users() {
     if [ ! -f "$CONFIG_PATH" ]; then echo "❌ Xray não configurado."; read -rp "Enter..."; return; fi
-    header_blue "LISTAR USUÁRIOS"
-    echo -e "ID   | USUÁRIO        | VENCIMENTO"
-    echo "----------------------------------"
-    while IFS='|' read -r id nick uuid expiry; do
-        printf "%-4s | %-14s | %s\n" "$id" "$nick" "$expiry"
-    done < <(db_query "SELECT id, nick, uuid, expiry FROM xray ORDER BY id")
+    header_blue "LISTAR USUÁRIOS (ARQUIVO REAL)"
+    
+    echo -e "USUÁRIO        | UUID"
+    echo "------------------------------------------------"
+    
+    # LÊ DIRETO DO ARQUIVO JSON (INFALÍVEL)
+    jq -r '.inbounds[] | select(.settings.clients != null) | .settings.clients[] | "\(.email) | \(.id)"' "$CONFIG_PATH" | while IFS='|' read -r nick uuid; do
+        if [ -n "$nick" ]; then
+            printf "%-14s | %s\n" "$nick" "$uuid"
+        fi
+    done
+    
+    echo ""
+    echo -e "${TXT_BLUE}ℹ️  Listagem direta do sistema (Config JSON).${RESET}"
     echo ""
     read -rp "Pressione ENTER para voltar..."
 }
 
 func_page_purge_expired() {
     header_blue "LIMPEZA DE EXPIRADOS"
+    echo "⚠️  Função depende do Banco de Dados."
     local today=$(date +%F)
-    echo "Buscando usuários vencidos antes de $today..."
     local expired_uuids=$(db_query "SELECT uuid FROM xray WHERE expiry < '$today'")
     if [ -z "$expired_uuids" ]; then 
-        echo "✅ Nenhum usuário expirado encontrado."
+        echo "✅ Nenhum usuário expirado (no banco de dados)."
     else
         for uuid in $expired_uuids; do func_remove_user_logic "$uuid"; done
         echo "✅ Limpeza concluída."
@@ -275,25 +274,15 @@ func_page_purge_expired() {
 func_page_uninstall() {
     header_blue "DESINSTALAR SISTEMA"
     echo "⚠️  ATENÇÃO: ISSO APAGARÁ TUDO!"
-    echo " - Xray Core e Configurações"
-    echo " - Banco de Dados e Usuários"
-    echo ""
-    
     read -rp "Deseja realmente desinstalar? [s/n]: " confirm
-    
     if [[ "$confirm" =~ ^[sS]$ ]]; then
         echo "🚀 Iniciando desinstalação..."
         systemctl stop xray > /dev/null 2>&1
         systemctl disable xray > /dev/null 2>&1
-        rm -f /usr/local/bin/xray; rm -rf /usr/local/etc/xray; rm -rf /usr/local/share/xray
-        rm -f /etc/systemd/system/xray.service; rm -f /etc/systemd/system/xray@.service; systemctl daemon-reload > /dev/null 2>&1
-        rm -rf "$XRAY_DIR"; rm -rf "$SSL_DIR"; rm -f /bin/xray-menu
+        rm -rf /usr/local/bin/xray /usr/local/etc/xray /usr/local/share/xray /etc/systemd/system/xray* "$XRAY_DIR" "$SSL_DIR" /bin/xray-menu
+        systemctl daemon-reload > /dev/null 2>&1
         sudo -u postgres psql -c "DROP DATABASE IF EXISTS $DB_NAME;" >/dev/null 2>&1
         echo "✅ Desinstalação Completa!"; exit 0
-    else
-        echo "❌ Operação Cancelada."
-        sleep 1
-        return
     fi
 }
 
@@ -379,8 +368,14 @@ menu_display() {
 
     local status_txt="${TXT_RED}DESATIVADO${RESET}"
     local proto_info="${TXT_RED}---${RESET}"
-    local users_count="0"
     
+    # Contagem via JSON (Mais precisa)
+    local users_count="0"
+    if [ -f "$CONFIG_PATH" ]; then
+        users_count=$(jq '.inbounds[] | select(.settings.clients != null) | .settings.clients | length' "$CONFIG_PATH")
+    fi
+    [ -z "$users_count" ] && users_count="0"
+
     if systemctl is-active --quiet xray; then
         status_txt="${TXT_GREEN}ATIVADO${RESET}"
         if [ -f "$CONFIG_PATH" ]; then
@@ -391,9 +386,6 @@ menu_display() {
             proto_info="${TXT_BLUE}${net^^} (Porta: $port)${RESET}"
         fi
     fi
-    
-    users_count=$(db_query "SELECT count(*) FROM xray")
-    [ -z "$users_count" ] && users_count="0"
 
     echo "-----------------------------------------"
     echo -e " Estado:    $status_txt"
