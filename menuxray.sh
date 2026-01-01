@@ -1,12 +1,7 @@
 #!/bin/bash
-# menuxray.sh - Versão V6.2 (Listagem Direta JSON + Azion Fix)
+# menuxray.sh - Versão V6.3 (Azion Fix + Lista Independente com Data)
 
-# --- CONFIGURAÇÃO AUTOMÁTICA ---
-DB_HOST="localhost"
-DB_NAME="sshplus" 
-DB_USER="root"
-DB_PASS="null"
-
+# --- CONFIGURAÇÃO ---
 XRAY_BIN="/usr/local/bin/xray"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
 SSL_DIR="/opt/DragonCoreSSL"
@@ -14,10 +9,11 @@ KEY_FILE="$SSL_DIR/privkey.pem"
 CRT_FILE="$SSL_DIR/fullchain.pem"
 XRAY_DIR="/opt/XrayTools"
 ACTIVE_DOMAIN_FILE="$XRAY_DIR/active_domain"
+USER_DB="$XRAY_DIR/users.db" # Arquivo de Registro (O Caderninho)
 
-export PGPASSWORD=$DB_PASS
 mkdir -p "$XRAY_DIR"
 mkdir -p "$SSL_DIR"
+touch "$USER_DB" # Cria o arquivo de lista se não existir
 
 # --- CORES E VISUAL ---
 TITLE_BAR='\033[1;47;34m'
@@ -31,17 +27,6 @@ header_blue() {
     clear
     echo -e "${TITLE_BAR}   $1   ${RESET}"
     echo ""
-}
-
-# --- FUNÇÃO DE BANCO DE DADOS (Mantida para compatibilidade) ---
-db_query() {
-    local query="$1"
-    local result=""
-    result=$(psql -h "localhost" -U "$DB_USER" -d "$DB_NAME" -t -A -c "$query" 2>/dev/null)
-    if [ -z "$result" ]; then result=$(sudo -u postgres psql -d sshplus -t -A -c "$query" 2>/dev/null); fi
-    if [ -z "$result" ]; then result=$(sudo -u postgres psql -d dtunnel -t -A -c "$query" 2>/dev/null); fi
-    if [ -z "$result" ]; then result=$(sudo -u postgres psql -d xray -t -A -c "$query" 2>/dev/null); fi
-    echo "$result"
 }
 
 # --- SISTEMA ---
@@ -77,7 +62,7 @@ func_generate_config() {
     mkdir -p "$(dirname "$CONFIG_PATH")"
     local stream_settings=""
     
-    # --- LOGICA DE PROTOCOLOS ---
+    # LÓGICA DE PROTOCOLOS (Com ALPN H2 para Azion)
     if [ "$network" == "xhttp" ]; then
         if [ "$use_tls" = "true" ]; then
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "xhttp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], alpn: ["h2", "http/1.1"]}, xhttpSettings: {path: "/", scMaxBufferedPosts: 30}}')
@@ -137,21 +122,19 @@ func_add_user_logic() {
     local net=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.network' "$CONFIG_PATH")
     local sec=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.security' "$CONFIG_PATH")
     local domain=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.tlsSettings.serverName // empty' "$CONFIG_PATH")
-    
     local vps_ip=$(curl -s icanhazip.com)
     if [ -z "$domain" ]; then domain=$vps_ip; fi
 
     local uuid=$(uuidgen)
     local expiry=$(date -d "+$expiry_days days" +%F)
 
-    # Tenta salvar no DB, mas não depende disso
-    db_query "CREATE TABLE IF NOT EXISTS xray (id SERIAL PRIMARY KEY, uuid TEXT, nick TEXT, expiry DATE, protocol TEXT, domain TEXT);" > /dev/null 2>&1
-
+    # 1. Adiciona no JSON (Configuração Real)
     jq --arg uuid "$uuid" --arg nick_arg "$nick" \
        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) += [{"id": $uuid, "email": $nick_arg, "level": 0}]' \
        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
-    db_query "INSERT INTO xray (uuid, nick, expiry, protocol, domain) VALUES ('$uuid', '$nick', '$expiry', '$net', '$domain')"
+    # 2. Adiciona no ARQUIVO DE LISTA (O Caderninho) - Formato: nick|uuid|data
+    echo "$nick|$uuid|$expiry" >> "$USER_DB"
     
     systemctl restart xray > /dev/null 2>&1
     
@@ -187,6 +170,7 @@ func_add_user_logic() {
     echo -e "${TXT_GREEN}✅ Usuário criado com sucesso!${RESET}"
     echo "-----------------------------------------"
     echo "👤 Usuário: $nick"
+    echo "📅 Expira:  $expiry"
     echo "🔑 UUID:    $uuid"
     echo "-----------------------------------------"
     echo -e "${TXT_BLUE}🔗 Link de Conexão:${RESET}"
@@ -195,21 +179,23 @@ func_add_user_logic() {
 }
 
 func_remove_user_logic() {
-    local identifier="$1" # Pode ser UUID ou NOME
+    local identifier="$1"
     
     if [ ! -f "$CONFIG_PATH" ]; then echo "❌ Erro config."; return; fi
     
-    # Remove pelo JSON (Infalível)
-    # Remove onde ID = identifier OU Email = identifier
+    # Remove do JSON
     jq --arg id "$identifier" \
        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id and .email != $id))' \
        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
-    # Tenta limpar do DB também só pra garantir
-    db_query "DELETE FROM xray WHERE uuid = '$identifier' OR nick = '$identifier'"
+    # Remove do Arquivo de Lista (Caderninho)
+    # Se identifier estiver na linha, deleta a linha
+    if [ -f "$USER_DB" ]; then
+        sed -i "/$identifier/d" "$USER_DB"
+    fi
     
     systemctl restart xray > /dev/null 2>&1
-    echo -e "${TXT_GREEN}✅ Usuário removido (se existia).${RESET}"
+    echo -e "${TXT_GREEN}✅ Usuário removido.${RESET}"
     sleep 1
 }
 
@@ -220,8 +206,9 @@ func_page_create_user() {
         header_blue "CRIAR USUÁRIO"
         read -rp "Nome do usuário (0 p/ voltar): " nick
         if [ "$nick" == "0" ] || [ -z "$nick" ]; then break; fi
-        # Verificação via JSON (Mais confiável que DB)
-        if grep -q "$nick" "$CONFIG_PATH"; then echo "❌ Usuário já existe!"; sleep 1; continue; fi
+        
+        # Verifica se já existe no caderninho
+        if grep -q "$nick" "$USER_DB"; then echo "❌ Usuário já existe!"; sleep 1; continue; fi
         
         read -rp "Dias de validade (Padrão 30): " days
         [ -z "$days" ] && days=30
@@ -238,35 +225,58 @@ func_page_remove_user() {
 }
 
 func_page_list_users() {
-    if [ ! -f "$CONFIG_PATH" ]; then echo "❌ Xray não configurado."; read -rp "Enter..."; return; fi
-    header_blue "LISTAR USUÁRIOS (ARQUIVO REAL)"
+    header_blue "LISTAR USUÁRIOS"
     
-    echo -e "USUÁRIO        | UUID"
+    echo -e "USUÁRIO        | VENCIMENTO | UUID (Final)"
     echo "------------------------------------------------"
     
-    # LÊ DIRETO DO ARQUIVO JSON (INFALÍVEL)
-    jq -r '.inbounds[] | select(.settings.clients != null) | .settings.clients[] | "\(.email) | \(.id)"' "$CONFIG_PATH" | while IFS='|' read -r nick uuid; do
-        if [ -n "$nick" ]; then
-            printf "%-14s | %s\n" "$nick" "$uuid"
-        fi
-    done
+    if [ -f "$USER_DB" ]; then
+        # Lê linha por linha do caderninho
+        while IFS='|' read -r nick uuid expiry; do
+            if [ -n "$nick" ]; then
+                # Mostra apenas o final do UUID para caber na tela
+                local uuid_short="${uuid: -12}"
+                printf "%-14s | %-10s | ...%s\n" "$nick" "$expiry" "$uuid_short"
+            fi
+        done < "$USER_DB"
+    else
+        echo "Nenhum usuário registrado no arquivo local."
+    fi
     
-    echo ""
-    echo -e "${TXT_BLUE}ℹ️  Listagem direta do sistema (Config JSON).${RESET}"
     echo ""
     read -rp "Pressione ENTER para voltar..."
 }
 
 func_page_purge_expired() {
     header_blue "LIMPEZA DE EXPIRADOS"
-    echo "⚠️  Função depende do Banco de Dados."
     local today=$(date +%F)
-    local expired_uuids=$(db_query "SELECT uuid FROM xray WHERE expiry < '$today'")
-    if [ -z "$expired_uuids" ]; then 
-        echo "✅ Nenhum usuário expirado (no banco de dados)."
-    else
-        for uuid in $expired_uuids; do func_remove_user_logic "$uuid"; done
-        echo "✅ Limpeza concluída."
+    echo "Data de hoje: $today"
+    local count=0
+    
+    if [ -f "$USER_DB" ]; then
+        # Cria arquivo temporário
+        touch "${USER_DB}.tmp"
+        
+        while IFS='|' read -r nick uuid expiry; do
+            if [[ "$expiry" < "$today" ]]; then
+                echo "Removendo expirado: $nick ($expiry)"
+                # Remove do JSON
+                jq --arg id "$uuid" '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id))' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
+                ((count++))
+            else
+                # Mantém no arquivo
+                echo "$nick|$uuid|$expiry" >> "${USER_DB}.tmp"
+            fi
+        done < "$USER_DB"
+        
+        mv "${USER_DB}.tmp" "$USER_DB"
+        
+        if [ $count -gt 0 ]; then
+            systemctl restart xray > /dev/null 2>&1
+            echo "✅ $count usuários removidos."
+        else
+            echo "✅ Nenhum usuário expirado."
+        fi
     fi
     echo ""; read -rp "Pressione ENTER para voltar..."
 }
@@ -281,7 +291,6 @@ func_page_uninstall() {
         systemctl disable xray > /dev/null 2>&1
         rm -rf /usr/local/bin/xray /usr/local/etc/xray /usr/local/share/xray /etc/systemd/system/xray* "$XRAY_DIR" "$SSL_DIR" /bin/xray-menu
         systemctl daemon-reload > /dev/null 2>&1
-        sudo -u postgres psql -c "DROP DATABASE IF EXISTS $DB_NAME;" >/dev/null 2>&1
         echo "✅ Desinstalação Completa!"; exit 0
     fi
 }
@@ -369,12 +378,15 @@ menu_display() {
     local status_txt="${TXT_RED}DESATIVADO${RESET}"
     local proto_info="${TXT_RED}---${RESET}"
     
-    # Contagem via JSON (Mais precisa)
+    # Contagem via Arquivo de Registro (O Caderninho)
     local users_count="0"
-    if [ -f "$CONFIG_PATH" ]; then
+    if [ -f "$USER_DB" ]; then
+        users_count=$(wc -l < "$USER_DB")
+    fi
+    # Se não tiver arquivo, conta do JSON
+    if [ "$users_count" == "0" ] && [ -f "$CONFIG_PATH" ]; then
         users_count=$(jq '.inbounds[] | select(.settings.clients != null) | .settings.clients | length' "$CONFIG_PATH")
     fi
-    [ -z "$users_count" ] && users_count="0"
 
     if systemctl is-active --quiet xray; then
         status_txt="${TXT_GREEN}ATIVADO${RESET}"
