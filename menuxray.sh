@@ -1,5 +1,5 @@
 #!/bin/bash
-# menuxray.sh - Versão V6.3 (Azion Fix + Lista Independente com Data)
+# menuxray.sh - Versão V6.4 (Lista Full UUID + Proteção de Erro)
 
 # --- CONFIGURAÇÃO ---
 XRAY_BIN="/usr/local/bin/xray"
@@ -9,13 +9,13 @@ KEY_FILE="$SSL_DIR/privkey.pem"
 CRT_FILE="$SSL_DIR/fullchain.pem"
 XRAY_DIR="/opt/XrayTools"
 ACTIVE_DOMAIN_FILE="$XRAY_DIR/active_domain"
-USER_DB="$XRAY_DIR/users.db" # Arquivo de Registro (O Caderninho)
+USER_DB="$XRAY_DIR/users.db"
 
 mkdir -p "$XRAY_DIR"
 mkdir -p "$SSL_DIR"
-touch "$USER_DB" # Cria o arquivo de lista se não existir
+touch "$USER_DB"
 
-# --- CORES E VISUAL ---
+# --- CORES ---
 TITLE_BAR='\033[1;47;34m'
 TXT_GREEN='\033[1;32m'
 TXT_RED='\033[1;31m'
@@ -62,7 +62,6 @@ func_generate_config() {
     mkdir -p "$(dirname "$CONFIG_PATH")"
     local stream_settings=""
     
-    # LÓGICA DE PROTOCOLOS (Com ALPN H2 para Azion)
     if [ "$network" == "xhttp" ]; then
         if [ "$use_tls" = "true" ]; then
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "xhttp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], alpn: ["h2", "http/1.1"]}, xhttpSettings: {path: "/", scMaxBufferedPosts: 30}}')
@@ -128,12 +127,12 @@ func_add_user_logic() {
     local uuid=$(uuidgen)
     local expiry=$(date -d "+$expiry_days days" +%F)
 
-    # 1. Adiciona no JSON (Configuração Real)
+    # Adiciona no JSON (Configuração Real)
     jq --arg uuid "$uuid" --arg nick_arg "$nick" \
        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) += [{"id": $uuid, "email": $nick_arg, "level": 0}]' \
        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
-    # 2. Adiciona no ARQUIVO DE LISTA (O Caderninho) - Formato: nick|uuid|data
+    # Adiciona no ARQUIVO DE LISTA (O Caderninho)
     echo "$nick|$uuid|$expiry" >> "$USER_DB"
     
     systemctl restart xray > /dev/null 2>&1
@@ -180,7 +179,6 @@ func_add_user_logic() {
 
 func_remove_user_logic() {
     local identifier="$1"
-    
     if [ ! -f "$CONFIG_PATH" ]; then echo "❌ Erro config."; return; fi
     
     # Remove do JSON
@@ -188,8 +186,7 @@ func_remove_user_logic() {
        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id and .email != $id))' \
        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
-    # Remove do Arquivo de Lista (Caderninho)
-    # Se identifier estiver na linha, deleta a linha
+    # Remove do Arquivo de Lista
     if [ -f "$USER_DB" ]; then
         sed -i "/$identifier/d" "$USER_DB"
     fi
@@ -204,10 +201,20 @@ func_remove_user_logic() {
 func_page_create_user() {
     while true; do
         header_blue "CRIAR USUÁRIO"
-        read -rp "Nome do usuário (0 p/ voltar): " nick
-        if [ "$nick" == "0" ] || [ -z "$nick" ]; then break; fi
+        echo "⚠️  Use apenas letras e números. Sem espaços."
+        read -rp "Nome do usuário (0 p/ voltar): " raw_nick
         
-        # Verifica se já existe no caderninho
+        if [ "$raw_nick" == "0" ] || [ -z "$raw_nick" ]; then break; fi
+
+        # SANITIZAÇÃO (LIMPEZA DO NOME)
+        # Remove tudo que não for letra ou número para evitar colar logs sem querer
+        nick=$(echo "$raw_nick" | sed 's/[^a-zA-Z0-9]//g')
+
+        if [ -z "$nick" ]; then
+            echo "❌ Nome inválido (caracteres proibidos)."
+            sleep 1; continue
+        fi
+        
         if grep -q "$nick" "$USER_DB"; then echo "❌ Usuário já existe!"; sleep 1; continue; fi
         
         read -rp "Dias de validade (Padrão 30): " days
@@ -227,20 +234,19 @@ func_page_remove_user() {
 func_page_list_users() {
     header_blue "LISTAR USUÁRIOS"
     
-    echo -e "USUÁRIO        | VENCIMENTO | UUID (Final)"
-    echo "------------------------------------------------"
+    # CABEÇALHO CORRIGIDO
+    printf "%-15s | %-37s | %s\n" "USUÁRIO" "UUID" "VENCIMENTO"
+    echo "------------------------------------------------------------------"
     
     if [ -f "$USER_DB" ]; then
-        # Lê linha por linha do caderninho
         while IFS='|' read -r nick uuid expiry; do
             if [ -n "$nick" ]; then
-                # Mostra apenas o final do UUID para caber na tela
-                local uuid_short="${uuid: -12}"
-                printf "%-14s | %-10s | ...%s\n" "$nick" "$expiry" "$uuid_short"
+                # MOSTRA UUID COMPLETO AGORA
+                printf "%-15s | %-37s | %s\n" "$nick" "$uuid" "$expiry"
             fi
         done < "$USER_DB"
     else
-        echo "Nenhum usuário registrado no arquivo local."
+        echo "Nenhum usuário registrado."
     fi
     
     echo ""
@@ -250,25 +256,19 @@ func_page_list_users() {
 func_page_purge_expired() {
     header_blue "LIMPEZA DE EXPIRADOS"
     local today=$(date +%F)
-    echo "Data de hoje: $today"
     local count=0
     
     if [ -f "$USER_DB" ]; then
-        # Cria arquivo temporário
         touch "${USER_DB}.tmp"
-        
         while IFS='|' read -r nick uuid expiry; do
             if [[ "$expiry" < "$today" ]]; then
-                echo "Removendo expirado: $nick ($expiry)"
-                # Remove do JSON
+                echo "Removendo: $nick ($expiry)"
                 jq --arg id "$uuid" '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id))' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
                 ((count++))
             else
-                # Mantém no arquivo
                 echo "$nick|$uuid|$expiry" >> "${USER_DB}.tmp"
             fi
         done < "$USER_DB"
-        
         mv "${USER_DB}.tmp" "$USER_DB"
         
         if [ $count -gt 0 ]; then
@@ -286,22 +286,19 @@ func_page_uninstall() {
     echo "⚠️  ATENÇÃO: ISSO APAGARÁ TUDO!"
     read -rp "Deseja realmente desinstalar? [s/n]: " confirm
     if [[ "$confirm" =~ ^[sS]$ ]]; then
-        echo "🚀 Iniciando desinstalação..."
         systemctl stop xray > /dev/null 2>&1
         systemctl disable xray > /dev/null 2>&1
         rm -rf /usr/local/bin/xray /usr/local/etc/xray /usr/local/share/xray /etc/systemd/system/xray* "$XRAY_DIR" "$SSL_DIR" /bin/xray-menu
         systemctl daemon-reload > /dev/null 2>&1
-        echo "✅ Desinstalação Completa!"; exit 0
+        echo "✅ Desinstalado!"; exit 0
     fi
 }
 
 func_wizard_install() {
-    # PASSO 1
     header_blue "INSTALAÇÃO GUIADA (1/5)"
     read -rp "Deseja instalar/atualizar o Xray Core? [s/n]: " install_opt
     if [[ "$install_opt" =~ ^[Ss]$ ]]; then func_install_official_core; fi
 
-    # PASSO 2
     header_blue "CONFIGURAÇÃO (2/5)"
     echo "Deseja usar criptografia TLS/SSL (HTTPS)?"
     echo "1) SIM - (SUPREMO/AZION: Aceita domínio Fake/Azion)"
@@ -310,17 +307,14 @@ func_wizard_install() {
     local use_tls="false"
     if [ "$tls_opt" == "1" ]; then use_tls="true"; fi
 
-    # PASSO 3
     header_blue "CONFIGURAÇÃO (3/5)"
     read -rp "Digite a porta interna do Xray [Padrão 1080]: " api_port
     if [ -z "$api_port" ]; then api_port="1080"; fi
 
-    # PASSO 4
     header_blue "CONFIGURAÇÃO (4/5)"
     read -rp "Digite a porta de conexão pública (Ex: 443, 80): " pub_port
     if [ -z "$pub_port" ]; then pub_port="80"; fi
 
-    # PASSO 5
     header_blue "CONFIGURAÇÃO (5/5)"
     local domain_val=""
     if [ "$use_tls" == "true" ]; then
@@ -377,16 +371,8 @@ menu_display() {
 
     local status_txt="${TXT_RED}DESATIVADO${RESET}"
     local proto_info="${TXT_RED}---${RESET}"
-    
-    # Contagem via Arquivo de Registro (O Caderninho)
     local users_count="0"
-    if [ -f "$USER_DB" ]; then
-        users_count=$(wc -l < "$USER_DB")
-    fi
-    # Se não tiver arquivo, conta do JSON
-    if [ "$users_count" == "0" ] && [ -f "$CONFIG_PATH" ]; then
-        users_count=$(jq '.inbounds[] | select(.settings.clients != null) | .settings.clients | length' "$CONFIG_PATH")
-    fi
+    if [ -f "$USER_DB" ]; then users_count=$(wc -l < "$USER_DB"); fi
 
     if systemctl is-active --quiet xray; then
         status_txt="${TXT_GREEN}ATIVADO${RESET}"
