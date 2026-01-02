@@ -1,5 +1,5 @@
 #!/bin/bash
-# menuxray.sh - Versão V6.5 (Anti-Colagem + Retorno Automático)
+# menuxray.sh - Versão V6.6 (Com Chamada Externa para Limitador)
 
 # --- CONFIGURAÇÃO ---
 XRAY_BIN="/usr/local/bin/xray"
@@ -10,6 +10,7 @@ CRT_FILE="$SSL_DIR/fullchain.pem"
 XRAY_DIR="/opt/XrayTools"
 ACTIVE_DOMAIN_FILE="$XRAY_DIR/active_domain"
 USER_DB="$XRAY_DIR/users.db"
+LIMITER_SCRIPT="/bin/limiterxray.sh" # Caminho do script externo
 
 mkdir -p "$XRAY_DIR"
 mkdir -p "$SSL_DIR"
@@ -62,6 +63,12 @@ func_generate_config() {
     mkdir -p "$(dirname "$CONFIG_PATH")"
     local stream_settings=""
     
+    # Adicionando policy para STATS (Importante para o limitador)
+    local policy='{
+        "levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}},
+        "system": {"statsInboundUplink": true, "statsInboundDownlink": true}
+    }'
+
     if [ "$network" == "xhttp" ]; then
         if [ "$use_tls" = "true" ]; then
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "xhttp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], alpn: ["h2", "http/1.1"]}, xhttpSettings: {path: "/", scMaxBufferedPosts: 30}}')
@@ -90,8 +97,8 @@ func_generate_config() {
         fi
     fi
 
-    jq -n --argjson stream "$stream_settings" --arg port "$port" --arg api "$api_port" \
-      '{log: {loglevel: "warning"}, api: {services: ["HandlerService", "LoggerService", "StatsService"], tag: "api"}, inbounds: [{tag: "api", port: ($api | tonumber), protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, listen: "127.0.0.1"}, {tag: "inbound-dragoncore", port: ($port | tonumber), protocol: "vless", settings: {clients: [], decryption: "none", fallbacks: []}, streamSettings: $stream}], outbounds: [{protocol: "freedom", tag: "direct"}, {protocol: "blackhole", tag: "blocked"}], routing: {domainStrategy: "AsIs", rules: [{type: "field", inboundTag: ["api"], outboundTag: "api"}]}}' > "$CONFIG_PATH"
+    jq -n --argjson stream "$stream_settings" --arg port "$port" --arg api "$api_port" --argjson pol "$policy" \
+      '{log: {loglevel: "warning"}, api: {services: ["HandlerService", "LoggerService", "StatsService"], tag: "api"}, policy: $pol, inbounds: [{tag: "api", port: ($api | tonumber), protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, listen: "127.0.0.1"}, {tag: "inbound-dragoncore", port: ($port | tonumber), protocol: "vless", settings: {clients: [], decryption: "none", fallbacks: []}, streamSettings: $stream}], outbounds: [{protocol: "freedom", tag: "direct"}, {protocol: "blackhole", tag: "blocked"}], routing: {domainStrategy: "AsIs", rules: [{type: "field", inboundTag: ["api"], outboundTag: "api"}]}}' > "$CONFIG_PATH"
 
     if [ "$network" == "vision" ]; then
         jq '(.inbounds[] | select(.tag == "inbound-dragoncore").settings) += {"flow": "xtls-rprx-vision"}' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
@@ -127,17 +134,14 @@ func_add_user_logic() {
     local uuid=$(uuidgen)
     local expiry=$(date -d "+$expiry_days days" +%F)
 
-    # 1. Adiciona no JSON (Configuração Real)
     jq --arg uuid "$uuid" --arg nick_arg "$nick" \
        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) += [{"id": $uuid, "email": $nick_arg, "level": 0}]' \
        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
-    # 2. Adiciona no ARQUIVO DE LISTA
     echo "$nick|$uuid|$expiry" >> "$USER_DB"
     
     systemctl restart xray > /dev/null 2>&1
     
-    # --- GERADOR DE LINK ---
     local link=""
     if [ "$net" == "grpc" ]; then
         local serviceName=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.grpcSettings.serviceName' "$CONFIG_PATH")
@@ -180,64 +184,42 @@ func_add_user_logic() {
 func_remove_user_logic() {
     local identifier="$1"
     if [ ! -f "$CONFIG_PATH" ]; then echo "❌ Erro config."; return; fi
-    
-    # Remove do JSON
     jq --arg id "$identifier" \
        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id and .email != $id))' \
        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
-    # Remove do Arquivo de Lista
     if [ -f "$USER_DB" ]; then
         sed -i "/$identifier/d" "$USER_DB"
     fi
-    
     systemctl restart xray > /dev/null 2>&1
     echo -e "${TXT_GREEN}✅ Usuário removido.${RESET}"
     sleep 1
 }
 
 # --- PÁGINAS ---
-
 func_page_create_user() {
-    # REMOVIDO O LOOP WHILE PARA EVITAR AVALANCHE DE COLAGEM
     header_blue "CRIAR USUÁRIO"
     echo "⚠️  Use apenas letras e números. Sem espaços."
     read -rp "Nome do usuário (0 p/ voltar): " raw_nick
-    
     if [ "$raw_nick" == "0" ] || [ -z "$raw_nick" ]; then return; fi
 
-    # 1. VALIDAÇÃO DE TAMANHO (Bloqueia links colados)
     local len=${#raw_nick}
     if [ $len -gt 15 ]; then
-        echo -e "${TXT_RED}❌ Nome muito longo! (Máx 15 caracteres)${RESET}"
-        echo "Evite colar o link anterior aqui."
-        sleep 3
-        return
+        echo -e "${TXT_RED}❌ Nome muito longo!${RESET}"; sleep 2; return
     fi
     
-    # 2. VALIDAÇÃO DE PALAVRAS PROIBIDAS (Lixo de colagem)
-    if [[ "$raw_nick" == *"vless"* ]] || [[ "$raw_nick" == *"http"* ]] || [[ "$raw_nick" == *"Link"* ]]; then
-        echo -e "${TXT_RED}❌ Entrada inválida detectada!${RESET}"
-        sleep 2
-        return
+    if [[ "$raw_nick" == *"vless"* ]] || [[ "$raw_nick" == *"http"* ]]; then
+        echo -e "${TXT_RED}❌ Entrada inválida!${RESET}"; sleep 2; return
     fi
 
-    # 3. SANITIZAÇÃO
     nick=$(echo "$raw_nick" | sed 's/[^a-zA-Z0-9]//g')
-    
     if grep -q "$nick" "$USER_DB"; then 
-        echo -e "${TXT_RED}❌ Usuário já existe!${RESET}"
-        sleep 2
-        return
+        echo -e "${TXT_RED}❌ Usuário já existe!${RESET}"; sleep 2; return
     fi
     
     read -rp "Dias de validade (Padrão 30): " days
     [ -z "$days" ] && days=30
-    
     func_add_user_logic "$nick" "$days"
-    
-    # PAUSA OBRIGATÓRIA ANTES DE VOLTAR AO MENU
-    # Isso impede que o script continue lendo o que foi colado
     read -rp "Pressione ENTER para voltar ao menu..."
 }
 
@@ -261,15 +243,13 @@ func_page_list_users() {
     else
         echo "Nenhum usuário registrado."
     fi
-    echo ""
-    read -rp "Pressione ENTER para voltar..."
+    echo ""; read -rp "Pressione ENTER para voltar..."
 }
 
 func_page_purge_expired() {
     header_blue "LIMPEZA DE EXPIRADOS"
     local today=$(date +%F)
     local count=0
-    
     if [ -f "$USER_DB" ]; then
         touch "${USER_DB}.tmp"
         while IFS='|' read -r nick uuid expiry; do
@@ -282,13 +262,7 @@ func_page_purge_expired() {
             fi
         done < "$USER_DB"
         mv "${USER_DB}.tmp" "$USER_DB"
-        
-        if [ $count -gt 0 ]; then
-            systemctl restart xray > /dev/null 2>&1
-            echo "✅ $count usuários removidos."
-        else
-            echo "✅ Nenhum usuário expirado."
-        fi
+        if [ $count -gt 0 ]; then systemctl restart xray > /dev/null 2>&1; echo "✅ $count usuários removidos."; else echo "✅ Nenhum usuário expirado."; fi
     fi
     echo ""; read -rp "Pressione ENTER para voltar..."
 }
@@ -301,6 +275,7 @@ func_page_uninstall() {
         systemctl stop xray > /dev/null 2>&1
         systemctl disable xray > /dev/null 2>&1
         rm -rf /usr/local/bin/xray /usr/local/etc/xray /usr/local/share/xray /etc/systemd/system/xray* "$XRAY_DIR" "$SSL_DIR" /bin/xray-menu
+        rm -f "$LIMITER_SCRIPT" # Remove também o limitador
         systemctl daemon-reload > /dev/null 2>&1
         echo "✅ Desinstalado!"; exit 0
     fi
@@ -313,7 +288,7 @@ func_wizard_install() {
 
     header_blue "CONFIGURAÇÃO (2/5)"
     echo "Deseja usar criptografia TLS/SSL (HTTPS)?"
-    echo "1) SIM - (SUPREMO/AZION: Aceita domínio Fake/Azion)"
+    echo "1) SIM - (SUPREMO/AZION)"
     echo "2) NÃO - Conexão simples"
     read -rp "Opção [1/2]: " tls_opt
     local use_tls="false"
@@ -331,13 +306,11 @@ func_wizard_install() {
     local domain_val=""
     if [ "$use_tls" == "true" ]; then
         echo -e "${TXT_CYAN}MODO SUPREMO ATIVADO!${RESET}"
-        echo "Digite seu domínio Azion ou Domínio Fake."
-        echo "Ex: turbonet.azion.app ou www.batata.com"
-        read -rp "Domínio: " domain_val
+        read -rp "Domínio (Ex: turbonet.azion.app): " domain_val
         func_xray_cert "$domain_val" 
     else
         echo "ℹ️  Modo sem TLS."
-        read -rp "Digite o Domínio ou IP: " domain_val
+        read -rp "Domínio ou IP: " domain_val
         if [ -z "$domain_val" ]; then domain_val=$(curl -s icanhazip.com); fi
     fi
     echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
@@ -345,9 +318,9 @@ func_wizard_install() {
     header_blue "SELECIONE O PROTOCOLO"
     echo "1. ws (WebSocket)"
     echo "2. grpc (gRPC)"
-    echo "3. xhttp (HTTP/2) - (Ideal para Azion/443)"
+    echo "3. xhttp (HTTP/2)"
     echo "4. tcp (Simples)"
-    echo "5. vision (XTLS-Vision) - 🚀"
+    echo "5. vision (XTLS-Vision)"
     echo "0. Cancelar"
     echo ""
     read -rp "Digite o número da opção: " prot_opt
@@ -373,6 +346,20 @@ func_wizard_install() {
     esac
 
     func_generate_config "$pub_port" "$selected_net" "$domain_val" "$api_port" "$use_tls"
+}
+
+# --- FUNÇÃO CHAMADA EXTERNA DO LIMITADOR ---
+func_call_limiter() {
+    # Verifica se o script existe
+    if [ ! -f "$LIMITER_SCRIPT" ]; then
+        echo -e "${TXT_RED}Script Limitador não encontrado!${RESET}"
+        echo "Por favor, crie o arquivo $LIMITER_SCRIPT"
+        sleep 2
+        return
+    fi
+    
+    chmod +x "$LIMITER_SCRIPT"
+    bash "$LIMITER_SCRIPT"
 }
 
 # --- MENU ---
@@ -409,6 +396,7 @@ menu_display() {
     echo -e "${TXT_CYAN}[4]. INSTALAR E CONFIGURAR XRAY (ASSISTENTE)${RESET}"
     echo -e "${TXT_CYAN}[5]. LIMPAR EXPIRADOS${RESET}"
     echo -e "${TXT_CYAN}[6]. DESINSTALAR (COMPLETO)${RESET}"
+    echo -e "${TXT_GREEN}[7]. LIMITAR CONSUMO GIGAS (NOVO)${RESET}"
     echo -e "${TXT_CYAN}[0]. SAIR${RESET}"
     echo "-----------------------------------------"
     read -rp "Opção: " choice
@@ -424,6 +412,7 @@ if [ -z "$1" ]; then
             4) func_wizard_install ;;
             5) func_page_purge_expired ;;
             6) func_page_uninstall ;; 
+            7) func_call_limiter ;;
             0) exit 0 ;;
         esac
     done
