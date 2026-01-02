@@ -1,11 +1,12 @@
 #!/bin/bash
 # limiterxray.sh - Módulo de Controle de Consumo (DragonCore)
+# Versão: GitHub Edition
 
 # CONFIGURAÇÃO
 XRAY_BIN="/usr/local/bin/xray"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
 LIMITS_DB="/opt/XrayTools/limits.db" # Banco de dados de limites
-XRAY_API_PORT="1080" # Porta Padrão da API (Deve bater com o config.json)
+XRAY_API_PORT="1080" 
 
 # CORES
 TITLE_BAR='\033[1;47;34m'
@@ -26,7 +27,6 @@ header_limit() {
     echo ""
 }
 
-# Verifica API no config
 func_get_api_port() {
     if [ -f "$CONFIG_PATH" ]; then
         local p=$(jq -r '.inbounds[] | select(.tag == "api").port // empty' "$CONFIG_PATH")
@@ -36,7 +36,6 @@ func_get_api_port() {
 
 func_bytes_to_human() {
     local b=${1:-0}
-    local d=$b
     if [ $b -gt 1073741824 ]; then
         echo "$(echo "scale=2; $b/1073741824" | bc) GB"
     elif [ $b -gt 1048576 ]; then
@@ -53,7 +52,6 @@ func_set_limit() {
     read -rp "Digite o Usuário (Nick): " nick
     if [ -z "$nick" ]; then return; fi
     
-    # Verifica se usuário existe no Xray config
     if ! grep -q "\"email\": \"$nick\"" "$CONFIG_PATH"; then
         echo -e "${TXT_RED}Usuário não encontrado no sistema!${RESET}"
         read -rp "Enter..."
@@ -70,11 +68,9 @@ func_set_limit() {
         sleep 1; return
     fi
 
-    # Converte GB para Bytes (GB * 1024^3)
     local bytes_limit=$(echo "$gb_limit * 1073741824" | bc)
 
     # Salva no DB: nick|bytes_limit
-    # Remove anterior se houver
     sed -i "/^$nick|/d" "$LIMITS_DB"
     echo "$nick|$bytes_limit" >> "$LIMITS_DB"
 
@@ -88,13 +84,9 @@ func_view_usage() {
     echo -e "USUÁRIO        | CONSUMO (Atual) | LIMITE    | STATUS"
     echo "--------------------------------------------------------"
 
-    # Itera sobre os usuários configurados no JSON
-    # Necessário jq instalado
     jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients[].email' "$CONFIG_PATH" | while read -r nick; do
         if [ -z "$nick" ]; then continue; fi
         
-        # Pega estatística da API do Xray
-        # Comando: xray api stats -server=... -name "user>>>email>>>traffic>>>downlink"
         local down=$($XRAY_BIN api stats -server="127.0.0.1:$XRAY_API_PORT" -name "user>>>${nick}>>>traffic>>>downlink" 2>/dev/null | grep "value" | awk '{print $2}')
         local up=$($XRAY_BIN api stats -server="127.0.0.1:$XRAY_API_PORT" -name "user>>>${nick}>>>traffic>>>uplink" 2>/dev/null | grep "value" | awk '{print $2}')
         
@@ -104,7 +96,6 @@ func_view_usage() {
         local total=$(echo "$down + $up" | bc)
         local total_h=$(func_bytes_to_human "$total")
         
-        # Verifica Limite
         local limit_bytes=$(grep "^$nick|" "$LIMITS_DB" | cut -d'|' -f2)
         local limit_h="Ilimitado"
         local status="${TXT_GREEN}OK${RESET}"
@@ -114,7 +105,6 @@ func_view_usage() {
             if [ "$total" -ge "$limit_bytes" ]; then
                 status="${TXT_RED}BLOQUEADO${RESET}"
             else
-                # Calcula %
                 local pct=$(echo "scale=0; ($total * 100) / $limit_bytes" | bc)
                 status="${TXT_CYAN}${pct}%${RESET}"
             fi
@@ -140,11 +130,17 @@ func_remove_limit() {
 }
 
 func_check_and_block() {
-    # Função para ser rodada no cron ou manual
     func_get_api_port
-    echo "Verificando excedentes..."
+    header_limit
+    echo "Verificando excedentes e aplicando bloqueios..."
+    echo "-----------------------------------------------"
     
+    local blocked_count=0
+
     while IFS='|' read -r nick limit_bytes; do
+        # Verifica se o usuário ainda existe no config antes de checar stats
+        if ! grep -q "\"email\": \"$nick\"" "$CONFIG_PATH"; then continue; fi
+
         local down=$($XRAY_BIN api stats -server="127.0.0.1:$XRAY_API_PORT" -name "user>>>${nick}>>>traffic>>>downlink" 2>/dev/null | grep "value" | awk '{print $2}')
         local up=$($XRAY_BIN api stats -server="127.0.0.1:$XRAY_API_PORT" -name "user>>>${nick}>>>traffic>>>uplink" 2>/dev/null | grep "value" | awk '{print $2}')
         [ -z "$down" ] && down=0
@@ -152,15 +148,28 @@ func_check_and_block() {
         local total=$(echo "$down + $up" | bc)
         
         if [ "$total" -ge "$limit_bytes" ]; then
-            echo "❌ $nick excedeu o limite! (Total: $total / Limite: $limit_bytes)"
-            # AQUI PODERIA REMOVER O USUÁRIO DO CONFIG, MAS POR ENQUANTO SÓ AVISA
-            # Para bloquear real, descomente abaixo:
-            # jq --arg id "$nick" '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.email != $id))' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
-            # systemctl restart xray
+            echo -e "${TXT_RED}❌ $nick excedeu o limite! Bloqueando...${RESET}"
+            
+            # --- BLOQUEIO REAL ---
+            # Remove o usuário do config.json para impedir conexão
+            jq --arg id "$nick" '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.email != $id))' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
+            ((blocked_count++))
+        else
+            echo "✅ $nick dentro do limite."
         fi
     done < "$LIMITS_DB"
-    echo "Verificação concluída."
-    sleep 2
+    
+    if [ $blocked_count -gt 0 ]; then
+        systemctl restart xray > /dev/null 2>&1
+        echo ""
+        echo -e "${TXT_RED}🚫 $blocked_count usuários foram bloqueados.${RESET}"
+    else
+        echo ""
+        echo -e "${TXT_GREEN}Tudo certo. Ninguém excedeu o limite.${RESET}"
+    fi
+    
+    echo ""
+    read -rp "Pressione ENTER para voltar..."
 }
 
 # --- MENU LIMITER ---
@@ -169,7 +178,7 @@ while true; do
     echo -e "${TXT_CYAN}[1]. DEFINIR LIMITE (GB)${RESET}"
     echo -e "${TXT_CYAN}[2]. VER CONSUMO DOS CLIENTES${RESET}"
     echo -e "${TXT_CYAN}[3]. REMOVER LIMITE (ILIMITADO)${RESET}"
-    echo -e "${TXT_CYAN}[4]. VERIFICAR BLOQUEIOS AGORA${RESET}"
+    echo -e "${TXT_RED}[4]. VERIFICAR E BLOQUEAR EXCEDENTES${RESET}"
     echo -e "${TXT_CYAN}[0]. VOLTAR AO MENU PRINCIPAL${RESET}"
     echo "--------------------------------------"
     read -rp "Opção: " choice
