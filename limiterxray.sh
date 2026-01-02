@@ -1,6 +1,6 @@
 #!/bin/bash
 # limiterxray.sh - Módulo de Controle de Consumo (DragonCore)
-# Versão: GitHub Edition
+# Versão: GitHub Edition + AutoBlock (Baseado na sua preferência)
 
 # CONFIGURAÇÃO
 XRAY_BIN="/usr/local/bin/xray"
@@ -130,10 +130,17 @@ func_remove_limit() {
 }
 
 func_check_and_block() {
+    # Recebe flag do cron
+    local SILENT="$1"
+
     func_get_api_port
-    header_limit
-    echo "Verificando excedentes e aplicando bloqueios..."
-    echo "-----------------------------------------------"
+    
+    # Só limpa a tela e mostra cabeçalho se NÃO for cron
+    if [ "$SILENT" != "--cron" ]; then
+        header_limit
+        echo "Verificando excedentes e aplicando bloqueios..."
+        echo "-----------------------------------------------"
+    fi
     
     local blocked_count=0
 
@@ -148,29 +155,47 @@ func_check_and_block() {
         local total=$(echo "$down + $up" | bc)
         
         if [ "$total" -ge "$limit_bytes" ]; then
-            echo -e "${TXT_RED}❌ $nick excedeu o limite! Bloqueando...${RESET}"
+            # Só mostra mensagem visual se NÃO for cron
+            if [ "$SILENT" != "--cron" ]; then
+                echo -e "${TXT_RED}❌ $nick excedeu o limite! Bloqueando...${RESET}"
+            fi
             
             # --- BLOQUEIO REAL ---
-            # Remove o usuário do config.json para impedir conexão
             jq --arg id "$nick" '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.email != $id))' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
             ((blocked_count++))
         else
-            echo "✅ $nick dentro do limite."
+             if [ "$SILENT" != "--cron" ]; then
+                echo "✅ $nick dentro do limite."
+             fi
         fi
     done < "$LIMITS_DB"
     
     if [ $blocked_count -gt 0 ]; then
         systemctl restart xray > /dev/null 2>&1
-        echo ""
-        echo -e "${TXT_RED}🚫 $blocked_count usuários foram bloqueados.${RESET}"
+        if [ "$SILENT" != "--cron" ]; then
+            echo ""
+            echo -e "${TXT_RED}🚫 $blocked_count usuários foram bloqueados.${RESET}"
+        fi
     else
-        echo ""
-        echo -e "${TXT_GREEN}Tudo certo. Ninguém excedeu o limite.${RESET}"
+        if [ "$SILENT" != "--cron" ]; then
+            echo ""
+            echo -e "${TXT_GREEN}Tudo certo. Ninguém excedeu o limite.${RESET}"
+        fi
     fi
     
-    echo ""
-    read -rp "Pressione ENTER para voltar..."
+    # IMPORTANTE: Só pede ENTER se for humano. Robô não aperta enter.
+    if [ "$SILENT" != "--cron" ]; then
+        echo ""
+        read -rp "Pressione ENTER para voltar..."
+    fi
 }
+
+# --- LÓGICA DE INICIALIZAÇÃO (AUTO-EXECUÇÃO) ---
+# Se o script for chamado com "--cron", roda o check e sai sem mostrar menu
+if [ "$1" == "--cron" ]; then
+    func_check_and_block "--cron"
+    exit 0
+fi
 
 # --- MENU LIMITER ---
 while true; do
