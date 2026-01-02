@@ -1,5 +1,5 @@
 #!/bin/bash
-# menuxray.sh - Versão V6.6 (Com Chamada Externa para Limitador)
+# menuxray.sh - Versão V6.9 (Downloader de Módulo GitHub)
 
 # --- CONFIGURAÇÃO ---
 XRAY_BIN="/usr/local/bin/xray"
@@ -10,11 +10,19 @@ CRT_FILE="$SSL_DIR/fullchain.pem"
 XRAY_DIR="/opt/XrayTools"
 ACTIVE_DOMAIN_FILE="$XRAY_DIR/active_domain"
 USER_DB="$XRAY_DIR/users.db"
-LIMITER_SCRIPT="/bin/limiterxray.sh" # Caminho do script externo
+
+# CONFIGURAÇÃO DO LIMITADOR EXTERNO
+LIMITER_LOCAL="/bin/limiterxray.sh"
+# URL EXATA DO SEU GITHUB (RAW)
+LIMITER_URL="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/limiterxray.sh"
 
 mkdir -p "$XRAY_DIR"
 mkdir -p "$SSL_DIR"
 touch "$USER_DB"
+
+# Instala dependências silenciosamente (Necessárias para o limitador)
+if ! command -v jq &> /dev/null; then apt-get install jq -y > /dev/null 2>&1; fi
+if ! command -v bc &> /dev/null; then apt-get install bc -y > /dev/null 2>&1; fi
 
 # --- CORES ---
 TITLE_BAR='\033[1;47;34m'
@@ -63,7 +71,7 @@ func_generate_config() {
     mkdir -p "$(dirname "$CONFIG_PATH")"
     local stream_settings=""
     
-    # Adicionando policy para STATS (Importante para o limitador)
+    # Policy para STATS (Vital para o Limitador funcionar)
     local policy='{
         "levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}},
         "system": {"statsInboundUplink": true, "statsInboundDownlink": true}
@@ -139,7 +147,6 @@ func_add_user_logic() {
        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
     echo "$nick|$uuid|$expiry" >> "$USER_DB"
-    
     systemctl restart xray > /dev/null 2>&1
     
     local link=""
@@ -188,9 +195,7 @@ func_remove_user_logic() {
        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id and .email != $id))' \
        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
-    if [ -f "$USER_DB" ]; then
-        sed -i "/$identifier/d" "$USER_DB"
-    fi
+    if [ -f "$USER_DB" ]; then sed -i "/$identifier/d" "$USER_DB"; fi
     systemctl restart xray > /dev/null 2>&1
     echo -e "${TXT_GREEN}✅ Usuário removido.${RESET}"
     sleep 1
@@ -204,18 +209,11 @@ func_page_create_user() {
     if [ "$raw_nick" == "0" ] || [ -z "$raw_nick" ]; then return; fi
 
     local len=${#raw_nick}
-    if [ $len -gt 15 ]; then
-        echo -e "${TXT_RED}❌ Nome muito longo!${RESET}"; sleep 2; return
-    fi
-    
-    if [[ "$raw_nick" == *"vless"* ]] || [[ "$raw_nick" == *"http"* ]]; then
-        echo -e "${TXT_RED}❌ Entrada inválida!${RESET}"; sleep 2; return
-    fi
+    if [ $len -gt 15 ]; then echo -e "${TXT_RED}❌ Nome muito longo!${RESET}"; sleep 2; return; fi
+    if [[ "$raw_nick" == *"vless"* ]] || [[ "$raw_nick" == *"http"* ]]; then echo -e "${TXT_RED}❌ Entrada inválida!${RESET}"; sleep 2; return; fi
 
     nick=$(echo "$raw_nick" | sed 's/[^a-zA-Z0-9]//g')
-    if grep -q "$nick" "$USER_DB"; then 
-        echo -e "${TXT_RED}❌ Usuário já existe!${RESET}"; sleep 2; return
-    fi
+    if grep -q "$nick" "$USER_DB"; then echo -e "${TXT_RED}❌ Usuário já existe!${RESET}"; sleep 2; return; fi
     
     read -rp "Dias de validade (Padrão 30): " days
     [ -z "$days" ] && days=30
@@ -236,9 +234,7 @@ func_page_list_users() {
     echo "------------------------------------------------------------------"
     if [ -f "$USER_DB" ]; then
         while IFS='|' read -r nick uuid expiry; do
-            if [ -n "$nick" ]; then
-                printf "%-15s | %-37s | %s\n" "$nick" "$uuid" "$expiry"
-            fi
+            if [ -n "$nick" ]; then printf "%-15s | %-37s | %s\n" "$nick" "$uuid" "$expiry"; fi
         done < "$USER_DB"
     else
         echo "Nenhum usuário registrado."
@@ -275,7 +271,7 @@ func_page_uninstall() {
         systemctl stop xray > /dev/null 2>&1
         systemctl disable xray > /dev/null 2>&1
         rm -rf /usr/local/bin/xray /usr/local/etc/xray /usr/local/share/xray /etc/systemd/system/xray* "$XRAY_DIR" "$SSL_DIR" /bin/xray-menu
-        rm -f "$LIMITER_SCRIPT" # Remove também o limitador
+        rm -f "$LIMITER_LOCAL"
         systemctl daemon-reload > /dev/null 2>&1
         echo "✅ Desinstalado!"; exit 0
     fi
@@ -324,7 +320,6 @@ func_wizard_install() {
     echo "0. Cancelar"
     echo ""
     read -rp "Digite o número da opção: " prot_opt
-    
     local selected_net=""
     case "$prot_opt" in
         1) selected_net="ws" ;;
@@ -334,40 +329,38 @@ func_wizard_install() {
         5) 
             selected_net="vision"
             if [ "$use_tls" == "false" ]; then
-                echo "⚠️  Vision exige TLS. Digite um domínio Fake:"
-                read -rp "Domínio: " domain_val
-                func_xray_cert "$domain_val"
-                use_tls="true"
-                echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
-            fi
-            ;;
+                read -rp "Domínio Fake (Vision): " domain_val
+                func_xray_cert "$domain_val"; use_tls="true"; echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
+            fi ;;
         0) return ;;
         *) echo "❌ Inválido."; sleep 2; return ;;
     esac
-
     func_generate_config "$pub_port" "$selected_net" "$domain_val" "$api_port" "$use_tls"
 }
 
-# --- FUNÇÃO CHAMADA EXTERNA DO LIMITADOR ---
+# --- FUNÇÃO CHAMADA EXTERNA (DOWNLOADER) ---
 func_call_limiter() {
-    # Verifica se o script existe
-    if [ ! -f "$LIMITER_SCRIPT" ]; then
-        echo -e "${TXT_RED}Script Limitador não encontrado!${RESET}"
-        echo "Por favor, crie o arquivo $LIMITER_SCRIPT"
+    echo "Verificando Módulo Limitador..."
+    
+    # Sempre tenta baixar a versão mais recente
+    echo "Baixando atualização do GitHub..."
+    curl -s -L -o "$LIMITER_LOCAL" "$LIMITER_URL"
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${TXT_RED}Erro ao baixar o módulo! Verifique sua internet ou o link.${RESET}"
         sleep 2
         return
     fi
     
-    chmod +x "$LIMITER_SCRIPT"
-    bash "$LIMITER_SCRIPT"
+    chmod +x "$LIMITER_LOCAL"
+    bash "$LIMITER_LOCAL"
 }
 
-# --- MENU ---
+# --- MENU PRINCIPAL ---
 menu_display() {
     clear
     echo -e "${TITLE_BAR}        DRAGONCORE XRAY MANAGER        ${RESET}"
     echo ""
-
     local status_txt="${TXT_RED}DESATIVADO${RESET}"
     local proto_info="${TXT_RED}---${RESET}"
     local users_count="0"
@@ -396,7 +389,7 @@ menu_display() {
     echo -e "${TXT_CYAN}[4]. INSTALAR E CONFIGURAR XRAY (ASSISTENTE)${RESET}"
     echo -e "${TXT_CYAN}[5]. LIMPAR EXPIRADOS${RESET}"
     echo -e "${TXT_CYAN}[6]. DESINSTALAR (COMPLETO)${RESET}"
-    echo -e "${TXT_GREEN}[7]. LIMITAR CONSUMO GIGAS (NOVO)${RESET}"
+    echo -e "${TXT_GREEN}[7]. LIMITAR CONSUMO GIGAS (MÓDULO GITHUB)${RESET}"
     echo -e "${TXT_CYAN}[0]. SAIR${RESET}"
     echo "-----------------------------------------"
     read -rp "Opção: " choice
