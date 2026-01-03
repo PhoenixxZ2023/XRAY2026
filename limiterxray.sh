@@ -1,11 +1,12 @@
 #!/bin/bash
 # limiterxray.sh - Módulo de Controle de Consumo (DragonCore)
-# Versão: GitHub Edition + Smart Unblock
+# Versão: GitHub Edition + UUID Scramble (Bloqueio Real)
 
 # CONFIGURAÇÃO
 XRAY_BIN="/usr/local/bin/xray"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
 LIMITS_DB="/opt/XrayTools/limits.db"
+USER_DB="/opt/XrayTools/users.db" # IMPORTANTE: Para recuperar o UUID original
 XRAY_API_PORT="1080" 
 
 # CORES
@@ -86,17 +87,26 @@ func_set_limit() {
     sed -i "/^$nick|/d" "$LIMITS_DB"
     echo "$nick|$bytes_limit" >> "$LIMITS_DB"
 
-    # 2. Se estiver bloqueado, desbloqueia agora
+    # 2. Se estiver bloqueado, desbloqueia agora (Restaurando UUID Original)
     if [ "$is_locked" = true ]; then
+        echo "Recuperando UUID original..."
+        # Pega o UUID original do arquivo users.db
+        local real_uuid=$(grep "^$nick|" "$USER_DB" | cut -d'|' -f2)
+        
+        if [ -z "$real_uuid" ]; then
+            echo -e "${TXT_RED}ERRO: UUID original não encontrado no backup!${RESET}"
+            read -rp "Enter..."
+            return
+        fi
+
         echo "Aplicando novo limite e desbloqueando..."
-        jq --arg nick "$nick" --arg locked "LOCKED_$nick" \
-           '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(if .email == $locked then .email = $nick else . end)' \
+        jq --arg nick "$nick" --arg locked "LOCKED_$nick" --arg uuid "$real_uuid" \
+           '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(if .email == $locked then .email = $nick | .id = $uuid else . end)' \
            "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
         
         systemctl restart xray > /dev/null 2>&1
         echo -e "${TXT_GREEN}✅ Sucesso! $nick desbloqueado com $gb_limit GB.${RESET}"
     else
-        # Se não estava bloqueado, só avisa (limite já está no DB)
         echo -e "${TXT_GREEN}✅ Limite de $nick atualizado para $gb_limit GB!${RESET}"
     fi
 
@@ -120,8 +130,11 @@ func_view_usage() {
             nick="${email_raw#LOCKED_}"
         fi
 
-        local down=$($XRAY_BIN api stats -server="127.0.0.1:$XRAY_API_PORT" -name "user>>>${email_raw}>>>traffic>>>downlink" 2>/dev/null | grep "value" | awk '{print $2}')
-        local up=$($XRAY_BIN api stats -server="127.0.0.1:$XRAY_API_PORT" -name "user>>>${email_raw}>>>traffic>>>uplink" 2>/dev/null | grep "value" | awk '{print $2}')
+        # Se estiver bloqueado, não adianta pedir stats do nome original, pois mudou no config
+        local query_name="$email_raw"
+        
+        local down=$($XRAY_BIN api stats -server="127.0.0.1:$XRAY_API_PORT" -name "user>>>${query_name}>>>traffic>>>downlink" 2>/dev/null | grep "value" | awk '{print $2}')
+        local up=$($XRAY_BIN api stats -server="127.0.0.1:$XRAY_API_PORT" -name "user>>>${query_name}>>>traffic>>>uplink" 2>/dev/null | grep "value" | awk '{print $2}')
         [ -z "$down" ] && down=0; [ -z "$up" ] && up=0
         local total=$(echo "$down + $up" | bc)
         local total_h=$(func_bytes_to_human "$total")
@@ -132,6 +145,7 @@ func_view_usage() {
 
         if [ "$is_locked" = true ]; then
             status="${TXT_RED}BLOQUEADO${RESET}"
+            total_h="---" # Não mostra consumo enquanto bloqueado (pois zerou/mudou)
         elif [ -n "$limit_bytes" ]; then
             limit_h=$(func_bytes_to_human "$limit_bytes")
             if [ "$total" -ge "$limit_bytes" ]; then status="${TXT_RED}EXCEDIDO${RESET}"; else
@@ -152,8 +166,12 @@ func_remove_limit() {
     
     local reboot_needed=false
     if grep -q "\"email\": \"LOCKED_$nick\"" "$CONFIG_PATH"; then
-        jq --arg nick "$nick" --arg locked "LOCKED_$nick" \
-           '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(if .email == $locked then .email = $nick else . end)' \
+        # Recupera UUID Original
+        local real_uuid=$(grep "^$nick|" "$USER_DB" | cut -d'|' -f2)
+        if [ -z "$real_uuid" ]; then echo "Erro fatal: UUID original sumiu."; sleep 2; return; fi
+
+        jq --arg nick "$nick" --arg locked "LOCKED_$nick" --arg uuid "$real_uuid" \
+           '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(if .email == $locked then .email = $nick | .id = $uuid else . end)' \
            "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
         reboot_needed=true
     fi
@@ -184,8 +202,13 @@ func_check_and_block() {
         
         if [ "$total" -ge "$limit_bytes" ]; then
             if [ "$SILENT" != "--cron" ]; then echo -e "${TXT_RED}❌ $nick excedeu! Bloqueando...${RESET}"; fi
-            jq --arg nick "$nick" --arg locked "LOCKED_$nick" \
-               '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(if .email == $nick then .email = $locked else . end)' \
+            
+            # --- BLOQUEIO REAL (Muda Email + Muda UUID) ---
+            # Gera um UUID falso para quebrar a conexão
+            local fake_uuid=$(uuidgen)
+            
+            jq --arg nick "$nick" --arg locked "LOCKED_$nick" --arg fake "$fake_uuid" \
+               '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(if .email == $nick then .email = $locked | .id = $fake else . end)' \
                "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
             ((blocked_count++))
         else
