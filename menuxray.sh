@@ -1,5 +1,5 @@
 #!/bin/bash
-# menuxray.sh - Versão V6.9 (Downloader de Módulo GitHub)
+# menuxray.sh - Versão V7.0 (Stats Fix Nativo + Auto-Repair)
 
 # --- CONFIGURAÇÃO ---
 XRAY_BIN="/usr/local/bin/xray"
@@ -13,14 +13,13 @@ USER_DB="$XRAY_DIR/users.db"
 
 # CONFIGURAÇÃO DO LIMITADOR EXTERNO
 LIMITER_LOCAL="/bin/limiterxray.sh"
-# URL EXATA DO SEU GITHUB (RAW)
 LIMITER_URL="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/limiterxray.sh"
 
 mkdir -p "$XRAY_DIR"
 mkdir -p "$SSL_DIR"
 touch "$USER_DB"
 
-# Instala dependências silenciosamente (Necessárias para o limitador)
+# Instala dependências silenciosamente
 if ! command -v jq &> /dev/null; then apt-get install jq -y > /dev/null 2>&1; fi
 if ! command -v bc &> /dev/null; then apt-get install bc -y > /dev/null 2>&1; fi
 
@@ -61,6 +60,7 @@ func_xray_cert() {
     chmod 755 "$SSL_DIR"; chmod 644 "$KEY_FILE"; chmod 644 "$CRT_FILE"
 }
 
+# --- AQUI ESTÁ A CORREÇÃO DA RAIZ (PREVENÇÃO) ---
 func_generate_config() {
     local port="$1"
     local network="$2"
@@ -71,12 +71,13 @@ func_generate_config() {
     mkdir -p "$(dirname "$CONFIG_PATH")"
     local stream_settings=""
     
-    # Policy para STATS (Vital para o Limitador funcionar)
+    # Policy para STATS
     local policy='{
         "levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}},
         "system": {"statsInboundUplink": true, "statsInboundDownlink": true}
     }'
 
+    # Configura o Stream (Protocolo)
     if [ "$network" == "xhttp" ]; then
         if [ "$use_tls" = "true" ]; then
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "xhttp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], alpn: ["h2", "http/1.1"]}, xhttpSettings: {path: "/", scMaxBufferedPosts: 30}}')
@@ -105,8 +106,9 @@ func_generate_config() {
         fi
     fi
 
+    # [FIX] ADICIONADO "stats": {} DIRETAMENTE NA CRIAÇÃO DO JSON
     jq -n --argjson stream "$stream_settings" --arg port "$port" --arg api "$api_port" --argjson pol "$policy" \
-      '{log: {loglevel: "warning"}, api: {services: ["HandlerService", "LoggerService", "StatsService"], tag: "api"}, policy: $pol, inbounds: [{tag: "api", port: ($api | tonumber), protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, listen: "127.0.0.1"}, {tag: "inbound-dragoncore", port: ($port | tonumber), protocol: "vless", settings: {clients: [], decryption: "none", fallbacks: []}, streamSettings: $stream}], outbounds: [{protocol: "freedom", tag: "direct"}, {protocol: "blackhole", tag: "blocked"}], routing: {domainStrategy: "AsIs", rules: [{type: "field", inboundTag: ["api"], outboundTag: "api"}]}}' > "$CONFIG_PATH"
+      '{log: {loglevel: "warning"}, stats: {}, api: {services: ["HandlerService", "LoggerService", "StatsService"], tag: "api"}, policy: $pol, inbounds: [{tag: "api", port: ($api | tonumber), protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, listen: "127.0.0.1"}, {tag: "inbound-dragoncore", port: ($port | tonumber), protocol: "vless", settings: {clients: [], decryption: "none", fallbacks: []}, streamSettings: $stream}], outbounds: [{protocol: "freedom", tag: "direct"}, {protocol: "blackhole", tag: "blocked"}], routing: {domainStrategy: "AsIs", rules: [{type: "field", inboundTag: ["api"], outboundTag: "api"}]}}' > "$CONFIG_PATH"
 
     if [ "$network" == "vision" ]; then
         jq '(.inbounds[] | select(.tag == "inbound-dragoncore").settings) += {"flow": "xtls-rprx-vision"}' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
@@ -338,10 +340,22 @@ func_wizard_install() {
     func_generate_config "$pub_port" "$selected_net" "$domain_val" "$api_port" "$use_tls"
 }
 
-# --- FUNÇÃO CHAMADA EXTERNA (DOWNLOADER) ---
+# --- FUNÇÃO CHAMADA EXTERNA (DOWNLOADER + AUTO-REPAIR) ---
 func_call_limiter() {
     echo "Verificando Módulo Limitador..."
     
+    # [VACINA] AUTO-REPAIR: Se o config antigo estiver sem STATS, corrige aqui.
+    if [ -f "$CONFIG_PATH" ]; then
+        if ! grep -q '"stats":' "$CONFIG_PATH"; then
+            echo -e "${TXT_RED}⚠️ Correção detectada! Aplicando patch Stats...${RESET}"
+            systemctl stop xray
+            jq '.stats = {}' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
+            systemctl restart xray
+            echo "✅ Configuração corrigida automaticamente."
+            sleep 2
+        fi
+    fi
+
     # Sempre tenta baixar a versão mais recente
     echo "Baixando atualização do GitHub..."
     curl -s -L -o "$LIMITER_LOCAL" "$LIMITER_URL"
