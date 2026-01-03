@@ -1,5 +1,5 @@
 #!/bin/bash
-# menuxray.sh - Versão V7.0 (Stats Fix Nativo + Auto-Repair)
+# menuxray.sh - Versão V7.1 (Link Universal + Stats Fix + Auto-Repair)
 
 # --- CONFIGURAÇÃO ---
 XRAY_BIN="/usr/local/bin/xray"
@@ -29,6 +29,7 @@ TXT_GREEN='\033[1;32m'
 TXT_RED='\033[1;31m'
 TXT_BLUE='\033[1;34m'
 TXT_CYAN='\033[1;36m'
+TXT_YELLOW='\033[1;33m'
 RESET='\033[0m'
 
 header_blue() {
@@ -60,7 +61,7 @@ func_xray_cert() {
     chmod 755 "$SSL_DIR"; chmod 644 "$KEY_FILE"; chmod 644 "$CRT_FILE"
 }
 
-# --- AQUI ESTÁ A CORREÇÃO DA RAIZ (PREVENÇÃO) ---
+# --- GERAÇÃO DE CONFIG E LINK UNIVERSAL ---
 func_generate_config() {
     local port="$1"
     local network="$2"
@@ -106,7 +107,7 @@ func_generate_config() {
         fi
     fi
 
-    # [FIX] ADICIONADO "stats": {} DIRETAMENTE NA CRIAÇÃO DO JSON
+    # [FIX] ADICIONADO "stats": {} DIRETAMENTE
     jq -n --argjson stream "$stream_settings" --arg port "$port" --arg api "$api_port" --argjson pol "$policy" \
       '{log: {loglevel: "warning"}, stats: {}, api: {services: ["HandlerService", "LoggerService", "StatsService"], tag: "api"}, policy: $pol, inbounds: [{tag: "api", port: ($api | tonumber), protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, listen: "127.0.0.1"}, {tag: "inbound-dragoncore", port: ($port | tonumber), protocol: "vless", settings: {clients: [], decryption: "none", fallbacks: []}, streamSettings: $stream}], outbounds: [{protocol: "freedom", tag: "direct"}, {protocol: "blackhole", tag: "blocked"}], routing: {domainStrategy: "AsIs", rules: [{type: "field", inboundTag: ["api"], outboundTag: "api"}]}}' > "$CONFIG_PATH"
 
@@ -116,16 +117,50 @@ func_generate_config() {
 
     systemctl restart xray > /dev/null 2>&1
     sleep 2
+    
+    # --- GERAÇÃO DO LINK UNIVERSAL ---
     clear
-    header_blue "STATUS DA INSTALAÇÃO"
+    header_blue "INSTALAÇÃO CONCLUÍDA"
     if systemctl is-active --quiet xray; then
-        echo -e "${TXT_GREEN}✅ Configuração Aplicada!${RESET}"
+        echo -e "${TXT_GREEN}✅ Xray Ativo e Configurado!${RESET}"
     else
         echo -e "${TXT_RED}❌ Falha ao iniciar.${RESET}"
         journalctl -u xray -n 5 --no-pager
     fi
+
+    # Monta o link Universal
+    local universal_uuid="UUID_DO_CLIENTE"
+    local link=""
+    local sec_param="none"
+    if [ "$use_tls" == "true" ]; then sec_param="tls"; fi
+
+    if [ "$network" == "grpc" ]; then
+        link="vless://${universal_uuid}@${domain}:${port}?security=${sec_param}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#VLESS_UNIVERSAL"
+    elif [ "$network" == "ws" ]; then
+        link="vless://${universal_uuid}@${domain}:${port}?path=%2F&security=${sec_param}&encryption=none&host=${domain}&type=ws&sni=${domain}#VLESS_UNIVERSAL"
+    elif [ "$network" == "xhttp" ]; then
+        if [ "$use_tls" == "true" ]; then
+            link="vless://${universal_uuid}@${domain}:${port}?mode=auto&path=%2F&security=tls&encryption=none&host=${domain}&type=xhttp&sni=${domain}#VLESS_UNIVERSAL"
+        else
+            link="vless://${universal_uuid}@${domain}:${port}?mode=auto&path=%2F&security=none&encryption=none&host=${domain}&type=xhttp#VLESS_UNIVERSAL"
+        fi
+    elif [ "$network" == "vision" ]; then
+        link="vless://${universal_uuid}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#VLESS_UNIVERSAL"
+    else
+        # TCP Simples
+        link="vless://${universal_uuid}@${domain}:${port}?security=${sec_param}&encryption=none&type=tcp&sni=${domain}#VLESS_UNIVERSAL"
+    fi
+
+    echo ""
     echo "========================================="
-    read -rp "Pressione ENTER para voltar..."
+    echo -e "${TXT_YELLOW}⚠️  ATENÇÃO: LINK VLESS UNIVERSAL ⚠️${RESET}"
+    echo "Copie este link abaixo e salve no seu bloco de notas."
+    echo "Ele servirá de base para TODOS os seus clientes."
+    echo "Você só precisará mudar o 'UUID_DO_CLIENTE'."
+    echo "========================================="
+    echo -e "${TXT_BLUE}$link${RESET}"
+    echo "========================================="
+    read -rp "Pressione ENTER após salvar..."
 }
 
 func_add_user_logic() {
@@ -133,13 +168,6 @@ func_add_user_logic() {
     local expiry_days="$2"
     if [ -z "$nick" ]; then return 1; fi
     if [ ! -f "$CONFIG_PATH" ]; then echo "❌ Xray não configurado."; return 1; fi
-
-    local port=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").port' "$CONFIG_PATH")
-    local net=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.network' "$CONFIG_PATH")
-    local sec=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.security' "$CONFIG_PATH")
-    local domain=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.tlsSettings.serverName // empty' "$CONFIG_PATH")
-    local vps_ip=$(curl -s icanhazip.com)
-    if [ -z "$domain" ]; then domain=$vps_ip; fi
 
     local uuid=$(uuidgen)
     local expiry=$(date -d "+$expiry_days days" +%F)
@@ -151,42 +179,15 @@ func_add_user_logic() {
     echo "$nick|$uuid|$expiry" >> "$USER_DB"
     systemctl restart xray > /dev/null 2>&1
     
-    local link=""
-    if [ "$net" == "grpc" ]; then
-        local serviceName=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.grpcSettings.serviceName' "$CONFIG_PATH")
-        link="vless://${uuid}@${vps_ip}:${port}?security=${sec}&encryption=none&type=grpc&serviceName=${serviceName}&sni=${domain}#${nick}"
-    elif [ "$net" == "ws" ]; then
-        local path=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.wsSettings.path' "$CONFIG_PATH")
-        [ "$path" == "/" ] && path="%2F"
-        link="vless://${uuid}@${vps_ip}:${port}?path=${path}&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#${nick}"
-    elif [ "$net" == "xhttp" ]; then
-        local path=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.xhttpSettings.path' "$CONFIG_PATH")
-        [ "$path" == "/" ] && path="%2F"
-        if [ "$sec" == "tls" ]; then
-            link="vless://${uuid}@${vps_ip}:${port}?mode=auto&path=${path}&security=tls&encryption=none&host=${domain}&type=xhttp&sni=${domain}#${nick}"
-        else
-            link="vless://${uuid}@${vps_ip}:${port}?mode=auto&path=${path}&security=none&encryption=none&host=${domain}&type=xhttp#${nick}"
-        fi
-    elif [ "$net" == "tcp" ] || [ "$net" == "vision" ]; then
-        local flow=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").settings.flow // empty' "$CONFIG_PATH")
-        if [ "$flow" == "xtls-rprx-vision" ]; then
-            link="vless://${uuid}@${vps_ip}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#${nick}"
-        elif [ "$sec" == "tls" ]; then
-            link="vless://${uuid}@${vps_ip}:${port}?security=tls&encryption=none&type=tcp&sni=${domain}#${nick}"
-        else
-            link="vless://${uuid}@${vps_ip}:${port}?security=none&encryption=none&type=tcp#${nick}"
-        fi
-    fi
-
+    # --- OUTPUT SIMPLIFICADO (SEM LINK) ---
     clear
     echo -e "${TXT_GREEN}✅ Usuário criado com sucesso!${RESET}"
     echo "-----------------------------------------"
-    echo "👤 Usuário: $nick"
-    echo "📅 Expira:  $expiry"
-    echo "🔑 UUID:    $uuid"
+    echo -e "👤 Usuário: ${TXT_CYAN}$nick${RESET}"
+    echo -e "🔑 UUID:    ${TXT_YELLOW}$uuid${RESET}"
+    echo -e "📅 Expira:  $expiry"
     echo "-----------------------------------------"
-    echo -e "${TXT_BLUE}🔗 Link de Conexão:${RESET}"
-    echo "$link"
+    echo "Copie o UUID acima e cole no seu Link Universal."
     echo "-----------------------------------------"
 }
 
@@ -343,8 +344,6 @@ func_wizard_install() {
 # --- FUNÇÃO CHAMADA EXTERNA (DOWNLOADER + AUTO-REPAIR) ---
 func_call_limiter() {
     echo "Verificando Módulo Limitador..."
-    
-    # [VACINA] AUTO-REPAIR: Se o config antigo estiver sem STATS, corrige aqui.
     if [ -f "$CONFIG_PATH" ]; then
         if ! grep -q '"stats":' "$CONFIG_PATH"; then
             echo -e "${TXT_RED}⚠️ Correção detectada! Aplicando patch Stats...${RESET}"
@@ -356,16 +355,13 @@ func_call_limiter() {
         fi
     fi
 
-    # Sempre tenta baixar a versão mais recente
     echo "Baixando atualização do GitHub..."
     curl -s -L -o "$LIMITER_LOCAL" "$LIMITER_URL"
-    
     if [ $? -ne 0 ]; then
-        echo -e "${TXT_RED}Erro ao baixar o módulo! Verifique sua internet ou o link.${RESET}"
+        echo -e "${TXT_RED}Erro ao baixar o módulo!${RESET}"
         sleep 2
         return
     fi
-    
     chmod +x "$LIMITER_LOCAL"
     bash "$LIMITER_LOCAL"
 }
