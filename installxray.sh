@@ -78,12 +78,12 @@ EOF
 ) > /dev/null 2>&1 &
 fun_bar $! "Baixando Scripts"
 
-# 4. Configurando Automação (Robô Cron)
+# 4. Configurando Automação (Robô Cron - 2 MINUTOS)
 (
     crontab -l 2>/dev/null | grep -v "limiterxray.sh" | crontab -
-    (crontab -l 2>/dev/null; echo "*/5 * * * * bash /bin/limiterxray.sh --cron") | crontab -
+    (crontab -l 2>/dev/null; echo "*/2 * * * * bash /bin/limiterxray.sh --cron") | crontab -
 ) > /dev/null 2>&1 &
-fun_bar $! "Ativando Robô de Limites"
+fun_bar $! "Ativando Robô (2 min)"
 
 echo -e "${AZUL}==================================================${RESET}"
 echo -e "${VERDE}🎉 INSTALAÇÃO CONCLUÍDA COM SUCESSO!${RESET}"
