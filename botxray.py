@@ -18,7 +18,6 @@ BOT_TOKEN = "SEU_TOKEN_AQUI"
 ADMIN_ID = 123456789 
 
 # Caminhos do DragonCore
-# Ajuste aqui se o seu config estiver em outro lugar (ex: /etc/xray/config.json)
 CONFIG_PATH = "/usr/local/etc/xray/config.json"
 USER_DB = "/opt/XrayTools/users.db"
 XRAY_SERVICE = "xray"
@@ -45,23 +44,18 @@ def save_config(data):
         json.dump(data, f, indent=2)
 
 def core_create_user(nick, days):
-    # 1. Validações
     if not os.path.exists(USER_DB): open(USER_DB, 'a').close()
     
-    # Verifica se já existe no DB
     with open(USER_DB, 'r') as f:
         if nick in f.read():
             return False, "Usuário já existe!"
 
-    # 2. Gera UUID e Data
     user_uuid = str(uuid.uuid4())
     expiry_date = (datetime.now() + timedelta(days=int(days))).strftime('%Y-%m-%d')
 
-    # 3. Adiciona no config.json
     data = load_config()
     if not data: return False, "Erro ao ler config.json"
 
-    # Encontra a inbound correta
     inbounds = data.get('inbounds', [])
     target_inbound = next((i for i in inbounds if i.get('tag') == 'inbound-dragoncore'), None)
     
@@ -72,7 +66,6 @@ def core_create_user(nick, days):
     else:
         return False, "Inbound DragonCore não encontrada."
 
-    # 4. Adiciona no users.db
     with open(USER_DB, 'a') as f:
         f.write(f"{nick}|{user_uuid}|{expiry_date}\n")
 
@@ -80,7 +73,6 @@ def core_create_user(nick, days):
     return True, f"✅ *Usuário Criado!*\n\n👤 User: `{nick}`\n🔑 UUID: `{user_uuid}`\n📅 Expira: `{expiry_date}`"
 
 def core_delete_user(nick):
-    # 1. Remove do config.json
     data = load_config()
     if data:
         inbounds = data.get('inbounds', [])
@@ -90,7 +82,6 @@ def core_delete_user(nick):
                 inbound['settings']['clients'] = [c for c in clients if c.get('email') != nick and c.get('id') != nick]
         save_config(data)
 
-    # 2. Remove do users.db
     if os.path.exists(USER_DB):
         with open(USER_DB, 'r') as f:
             lines = f.readlines()
@@ -111,21 +102,14 @@ def core_list_users():
         for line in f:
             parts = line.strip().split('|')
             if len(parts) >= 3:
-                # parts[0] = Nome
-                # parts[1] = UUID
-                # parts[2] = Data
-                
-                # Formato solicitado: Nome | Data | UUID
                 msg += f"`{parts[0]}` | {parts[2]} | `{parts[1]}`\n"
-                
     return msg
 
 # --- FUNÇÕES DO TELEGRAM ---
 
 def is_admin(update: Update) -> bool:
     user = update.effective_user
-    if user.id != ADMIN_ID:
-        return False
+    if user.id != ADMIN_ID: return False
     return True
 
 def build_menu():
@@ -133,7 +117,7 @@ def build_menu():
         [InlineKeyboardButton("👤 CRIAR USUÁRIO", callback_data='create_start'),
          InlineKeyboardButton("🗑️ REMOVER USUÁRIO", callback_data='delete_start')],
         [InlineKeyboardButton("📋 LISTAR TODOS", callback_data='list_users'),
-         InlineKeyboardButton("📥 BAIXAR BACKUP", callback_data='backup_start')], # <-- NOVO BOTÃO
+         InlineKeyboardButton("📥 BACKUP COMPLETO", callback_data='backup_start')], # Texto atualizado
         [InlineKeyboardButton("❌ CANCELAR", callback_data='cancel')]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -166,23 +150,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return SELECTING_ACTION
 
     elif query.data == 'backup_start':
-        if not os.path.exists(USER_DB):
-            await query.edit_message_text("❌ Banco de dados ainda vazio ou inexistente.", reply_markup=build_menu())
-            return SELECTING_ACTION
+        await query.message.reply_text("📦 Gerando Backup Completo do Sistema (Aguarde)...")
         
-        await query.message.reply_text("📤 Enviando backup...")
+        # --- LÓGICA DE BACKUP FULL (.tar.gz) ---
+        date_str = datetime.now().strftime('%Y%m%d_%H%M')
+        backup_filename = f"/tmp/backup_dragoncore_{date_str}.tar.gz"
+        
+        # Comando TAR igual ao do script Shell
+        # Salva: Pasta do Bot (/opt/XrayTools) e Configs do Xray (/usr/local/etc/xray)
+        cmd = f"tar -czPf {backup_filename} /opt/XrayTools /usr/local/etc/xray"
+        
         try:
-            with open(USER_DB, 'rb') as f:
-                date_str = datetime.now().strftime('%Y%m%d')
-                await context.bot.send_document(
-                    chat_id=ADMIN_ID,
-                    document=f,
-                    filename=f"backup_users_{date_str}.db",
-                    caption=f"📦 Backup DragonCore - {date_str}"
-                )
-            await query.message.reply_text("✅ Backup enviado!", reply_markup=build_menu())
+            # Executa o comando no sistema
+            subprocess.run(cmd, shell=True, check=True)
+            
+            if os.path.exists(backup_filename):
+                with open(backup_filename, 'rb') as f:
+                    await context.bot.send_document(
+                        chat_id=ADMIN_ID,
+                        document=f,
+                        filename=os.path.basename(backup_filename),
+                        caption=f"🔒 **Backup Completo**\n📅 {date_str}\n✅ Compatível com Restore via Terminal.",
+                        parse_mode='Markdown'
+                    )
+                # Apaga o arquivo temporário para não encher o disco
+                os.remove(backup_filename)
+                await query.message.reply_text("✅ Backup enviado com sucesso!", reply_markup=build_menu())
+            else:
+                await query.edit_message_text("❌ Erro: Arquivo de backup não foi criado.", reply_markup=build_menu())
+                
         except Exception as e:
-            await query.edit_message_text(f"Erro ao enviar backup: {str(e)}", reply_markup=build_menu())
+            logger.error(f"Erro no backup: {e}")
+            await query.edit_message_text(f"❌ Falha ao gerar backup: {str(e)}", reply_markup=build_menu())
+            
         return SELECTING_ACTION
 
     elif query.data == 'cancel':
@@ -191,7 +191,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_username_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nick = update.message.text.strip()
-    # Remove caracteres especiais para segurança
     nick = ''.join(e for e in nick if e.isalnum())
     context.user_data['new_nick'] = nick
     await update.message.reply_text(f"Nome: `{nick}`\nAgora digite a *VALIDADE* em dias (Ex: 30):", parse_mode='Markdown')
@@ -205,9 +204,7 @@ async def get_expiry_days_create(update: Update, context: ContextTypes.DEFAULT_T
     
     nick = context.user_data['new_nick']
     await update.message.reply_text("⏳ Criando usuário...")
-    
     success, msg = core_create_user(nick, days)
-    
     await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=build_menu())
     return SELECTING_ACTION
 
