@@ -75,14 +75,14 @@ func_install_bot() {
     echo -e "${TXT_YELLOW}Instalando Python e Dependências...${RESET}"
     
     # Atualiza e instala Python 3 e PIP
-    apt-get update -y > /dev/null 2>&1
-    apt-get install python3 python3-pip -y > /dev/null 2>&1
+    apt-get update
+    apt-get install python3 python3-pip 
     
     # Remove restrição de pip em sistemas Debian 12+/Ubuntu 23+ (EXTERNALLY-MANAGED)
     rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
     
     echo "Instalando biblioteca python-telegram-bot..."
-    pip3 install python-telegram-bot > /dev/null 2>&1
+    pip3 install python-telegram-bot  
 
     echo -e "${TXT_GREEN}Dependências instaladas!${RESET}"
     echo ""
@@ -361,17 +361,63 @@ func_page_purge_expired() {
 }
 
 func_page_uninstall() {
-    header_blue "DESINSTALAR SISTEMA"
-    echo "⚠️  ATENÇÃO: ISSO APAGARÁ TUDO!"
-    read -rp "Deseja realmente desinstalar? [s/n]: " confirm
-    if [[ "$confirm" =~ ^[sS]$ ]]; then
-        systemctl stop xray > /dev/null 2>&1
-        systemctl disable xray > /dev/null 2>&1
-        rm -rf /usr/local/bin/xray /usr/local/etc/xray /usr/local/share/xray /etc/systemd/system/xray* "$XRAY_DIR" "$SSL_DIR" /bin/xray-menu
-        rm -f "$LIMITER_LOCAL"
-        systemctl daemon-reload > /dev/null 2>&1
-        echo "✅ Desinstalado!"; exit 0
-    fi
+    clear
+    header_red "⚠️  DESINSTALAÇÃO COMPLETA ⚠️"
+    echo -e "${TXT_RED}ATENÇÃO:${RESET} Esta ação é irreversível."
+    echo "Isso irá remover:"
+    echo " • O Xray Core e todas as configurações"
+    echo " • O Bot do Telegram e o Banco de Dados (users.db)"
+    echo " • Todos os usuários criados"
+    echo " • Serviços do sistema (Systemd) e Logs"
+    echo ""
+    read -rp "Tem certeza que deseja continuar? [s/n]: " confirm
+    
+    if [[ "$confirm" != "s" ]]; then return; fi
+
+    echo ""
+    echo "1. Parando serviços..."
+    systemctl stop xray > /dev/null 2>&1
+    systemctl disable xray > /dev/null 2>&1
+    
+    # [NOVO] Para o serviço do Bot
+    systemctl stop botxray > /dev/null 2>&1
+    systemctl disable botxray > /dev/null 2>&1
+
+    echo "2. Removendo arquivos do sistema..."
+    # Remove serviços do Systemd
+    rm -f /etc/systemd/system/xray.service
+    rm -f /etc/systemd/system/xray@.service
+    rm -f /etc/systemd/system/botxray.service  # [NOVO]
+    systemctl daemon-reload
+
+    # Remove binários e pastas do Xray
+    rm -rf /usr/local/bin/xray
+    rm -rf /usr/local/share/xray
+    rm -rf /usr/local/etc/xray
+    rm -rf /var/log/xray
+    
+    # [NOVO] Remove a pasta do DragonCore (Bot e DB)
+    rm -rf /opt/XrayTools
+
+    echo "3. Limpando agendamentos (Cron)..."
+    # [NOVO] Remove qualquer linha do crontab que tenha "menuxray" ou scripts relacionados
+    crontab -l | grep -v "menuxray" | grep -v "limiter" | crontab -
+    
+    echo "4. Removendo atalhos..."
+    rm -f /usr/bin/xray-menu
+    rm -f /usr/local/bin/uuidgen  # (Opcional, se o script baixou um binário isolado)
+
+    echo ""
+    echo "========================================="
+    echo -e "${TXT_GREEN}✅ DESINSTALAÇÃO CONCLUÍDA!${RESET}"
+    echo "O sistema está limpo. O script será encerrado."
+    echo "========================================="
+    echo ""
+    
+    # Auto-destruição do script atual (Opcional - remove o próprio arquivo do menu)
+    # rm -- "$0"
+    
+    exit 0
 }
 
 func_wizard_install() {
