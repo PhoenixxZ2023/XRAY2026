@@ -309,7 +309,8 @@ func_wizard_install() {
     local domain_val=""
     if [ "$use_tls" == "true" ]; then
         echo -e "${TXT_CYAN}MODO SUPREMO ATIVADO!${RESET}"
-        read -rp "Domínio (Ex: turbonet.azion.app): " domain_val
+        # [ALTERAÇÃO AQUI] Texto do exemplo mudado
+        read -rp "Domínio (Ex: seudominio.azion.app): " domain_val
         func_xray_cert "$domain_val" 
     else
         echo "ℹ️  Modo sem TLS."
