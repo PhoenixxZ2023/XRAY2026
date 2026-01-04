@@ -61,6 +61,97 @@ func_xray_cert() {
     chmod 777 "$SSL_DIR"; chmod 777 "$KEY_FILE"; chmod 644 "$CRT_FILE"
 }
 
+# --- FUNÇÃO DE BACKUP DO SISTEMA ---
+func_backup_system() {
+    clear
+    header_blue "SISTEMA DE BACKUP"
+    echo "Isso irá salvar:"
+    echo " • Banco de Dados de Usuários (users.db)"
+    echo " • Configurações do Xray (config.json)"
+    echo " • Certificados e Chaves (na pasta padrão)"
+    echo ""
+    
+    local backup_dir="/root/backups"
+    local date_now=$(date +%Y%m%d_%H%M%S)
+    local backup_file="${backup_dir}/backup_dragoncore_${date_now}.tar.gz"
+    
+    mkdir -p "$backup_dir"
+
+    echo "📦 Criando arquivo de backup..."
+    
+    # Verifica se os arquivos existem antes de tentar salvar
+    if [ ! -f "/opt/XrayTools/users.db" ] && [ ! -d "/usr/local/etc/xray" ]; then
+        echo -e "${TXT_RED}❌ Erro: Arquivos do sistema não encontrados!${RESET}"
+        read -rp "Pressione ENTER..."
+        return
+    fi
+
+    # Cria o arquivo compactado (tar.gz) preservando os caminhos absolutos
+    # Salva: Pasta do Bot/DB e Pasta de Config/Certificados do Xray
+    tar -czPf "$backup_file" /opt/XrayTools /usr/local/etc/xray > /dev/null 2>&1
+
+    if [ -f "$backup_file" ]; then
+        echo ""
+        echo -e "${TXT_GREEN}✅ BACKUP CRIADO COM SUCESSO!${RESET}"
+        echo "📂 Local: ${TXT_CYAN}$backup_file${RESET}"
+        echo ""
+        echo "Baixe este arquivo para seu PC para garantir a segurança."
+    else
+        echo -e "${TXT_RED}❌ Falha ao criar arquivo de backup.${RESET}"
+    fi
+    echo "========================================="
+    read -rp "Pressione ENTER para voltar..."
+}
+
+# --- FUNÇÃO DE RESTAURAÇÃO DO SISTEMA ---
+func_restore_system() {
+    clear
+    header_red "RESTAURAÇÃO DE SISTEMA"
+    echo -e "${TXT_YELLOW}⚠️  ATENÇÃO:${RESET} Isso irá substituir o banco de dados"
+    echo "e as configurações atuais pelos dados do backup."
+    echo ""
+    echo "Certifique-se que o arquivo de backup (.tar.gz) está na VPS."
+    echo ""
+    
+    read -rp "Digite o CAMINHO COMPLETO do arquivo de backup: " backup_path
+    # Exemplo de sugestão visual: /root/backups/backup_dragoncore_....tar.gz
+    
+    if [ -z "$backup_path" ]; then return; fi
+
+    if [ ! -f "$backup_path" ]; then
+        echo -e "${TXT_RED}❌ Arquivo não encontrado!${RESET}"
+        read -rp "Pressione ENTER..."
+        return
+    fi
+
+    echo ""
+    echo "1. Parando serviços para evitar conflitos..."
+    systemctl stop xray
+    systemctl stop botxray
+
+    echo "2. Restaurando arquivos..."
+    # Extrai sobrescrevendo os arquivos originais (-P para usar caminhos absolutos)
+    tar -xzPf "$backup_path" -C / 
+    
+    if [ $? -eq 0 ]; then
+        echo "3. Reiniciando serviços..."
+        systemctl restart xray
+        systemctl restart botxray
+        
+        echo ""
+        echo -e "${TXT_GREEN}✅ RESTAURAÇÃO CONCLUÍDA!${RESET}"
+        echo "Seus usuários e configurações estão ativos."
+    else
+        echo -e "${TXT_RED}❌ Falha ao extrair arquivos.${RESET}"
+        # Tenta religar os serviços mesmo com erro
+        systemctl start xray
+        systemctl start botxray
+    fi
+    
+    echo "========================================="
+    read -rp "Pressione ENTER para voltar..."
+}
+
 # --- INSTALAÇÃO DO BOT TELEGRAM ---
 func_install_bot() {
     header_blue "INSTALADOR DO BOT TELEGRAM"
@@ -542,6 +633,8 @@ menu_display() {
     echo -e "${TXT_CYAN}[6]. DESINSTALAR (COMPLETO)${RESET}"
     echo -e "${TXT_GREEN}[7]. LIMITAR CONSUMO GIGAS (MÓDULO GITHUB)${RESET}"
     echo -e "${TXT_CYAN}[8]. ATIVAR BOT TELEGRAM${RESET}"
+    echo -e "${TXT_CYAN}[9]. CRIAR BACKUP${RESET}"   
+    echo -e "${TXT_CYAN}[10]. RESTAURAR BACKUP${RESET}" 
     echo -e "${TXT_CYAN}[0]. SAIR${RESET}"
     echo "-----------------------------------------"
     read -rp "Opção: " choice
@@ -559,6 +652,8 @@ if [ -z "$1" ]; then
             6) func_page_uninstall ;; 
             7) func_call_limiter ;;
             8) func_install_bot ;;
+            9) func_backup_system ;;    
+            10) func_restore_system ;;  
             0) exit 0 ;;
         esac
     done
