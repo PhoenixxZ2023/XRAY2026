@@ -61,7 +61,7 @@ func_xray_cert() {
     chmod 755 "$SSL_DIR"; chmod 644 "$KEY_FILE"; chmod 644 "$CRT_FILE"
 }
 
-# --- GERAÇÃO DE CONFIG E LINK UNIVERSAL ---
+# --- GERAÇÃO DE CONFIG, RESUMO E LINK UNIVERSAL ---
 func_generate_config() {
     local port="$1"
     local network="$2"
@@ -107,7 +107,7 @@ func_generate_config() {
         fi
     fi
 
-    # [FIX] ADICIONADO "stats": {} DIRETAMENTE
+    # [FIX] ADICIONADO "stats": {}
     jq -n --argjson stream "$stream_settings" --arg port "$port" --arg api "$api_port" --argjson pol "$policy" \
       '{log: {loglevel: "warning"}, stats: {}, api: {services: ["HandlerService", "LoggerService", "StatsService"], tag: "api"}, policy: $pol, inbounds: [{tag: "api", port: ($api | tonumber), protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, listen: "127.0.0.1"}, {tag: "inbound-dragoncore", port: ($port | tonumber), protocol: "vless", settings: {clients: [], decryption: "none", fallbacks: []}, streamSettings: $stream}], outbounds: [{protocol: "freedom", tag: "direct"}, {protocol: "blackhole", tag: "blocked"}], routing: {domainStrategy: "AsIs", rules: [{type: "field", inboundTag: ["api"], outboundTag: "api"}]}}' > "$CONFIG_PATH"
 
@@ -118,9 +118,10 @@ func_generate_config() {
     systemctl restart xray > /dev/null 2>&1
     sleep 2
     
-    # --- GERAÇÃO DO LINK UNIVERSAL COM UUID VÁLIDO (MODIFICADO) ---
+    # --- RESUMO E LINK ---
     clear
     header_blue "INSTALAÇÃO CONCLUÍDA"
+    
     if systemctl is-active --quiet xray; then
         echo -e "${TXT_GREEN}✅ Xray Ativo e Configurado!${RESET}"
     else
@@ -128,14 +129,27 @@ func_generate_config() {
         journalctl -u xray -n 5 --no-pager
     fi
 
-    # [ALTERAÇÃO AQUI] Gera um UUID válido aleatório para o template
+    # Tratamento visual do status TLS
+    local tls_msg="${TXT_RED}DESATIVADO (Porta Padrão)${RESET}"
+    if [ "$use_tls" == "true" ]; then tls_msg="${TXT_GREEN}ATIVADO (TLS/SSL)${RESET}"; fi
+
+    # [NOVO] PAINEL DE RESUMO DAS CONFIGURAÇÕES
+    echo ""
+    echo "========================================="
+    echo -e " PROTOCOLO:      ${TXT_CYAN}${network^^}${RESET}"
+    echo -e " DOMÍNIO (SNI):  ${TXT_CYAN}${domain}${RESET}"
+    echo -e " PORTA PÚBLICA:  ${TXT_CYAN}${port}${RESET}"
+    echo -e " PORTA INTERNA:  ${TXT_CYAN}${api_port}${RESET}"
+    echo -e " CRIPTOGRAFIA:   ${tls_msg}"
+    echo "========================================="
+    echo ""
+
+    # Gera UUID válido para o template
     local universal_uuid=$(uuidgen)
-    
     local link=""
     local sec_param="none"
     if [ "$use_tls" == "true" ]; then sec_param="tls"; fi
 
-    # Monta o link baseado no protocolo escolhido
     if [ "$network" == "grpc" ]; then
         link="vless://${universal_uuid}@${domain}:${port}?security=${sec_param}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#VLESS_BASE"
     elif [ "$network" == "ws" ]; then
@@ -149,19 +163,12 @@ func_generate_config() {
     elif [ "$network" == "vision" ]; then
         link="vless://${universal_uuid}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#VLESS_BASE"
     else
-        # TCP Simples
         link="vless://${universal_uuid}@${domain}:${port}?security=${sec_param}&encryption=none&type=tcp&sni=${domain}#VLESS_BASE"
     fi
 
-    echo ""
-    echo "========================================="
     echo -e "${TXT_YELLOW}⚠️  LINK VLESS BASE (TEMPLATE) ⚠️${RESET}"
-    echo "Copie e importe este link no seu aplicativo."
-    echo "Ele já tem um UUID válido para o app aceitar."
+    echo "Copie e importe este link vless para o seu aplicativo vpn."
     echo ""
-    echo -e "Lembre-se: Depois de importar, ${TXT_CYAN}TROQUE O UUID${RESET}"
-    echo "pelo UUID real do cliente que você criar."
-    echo "========================================="
     echo -e "${TXT_BLUE}$link${RESET}"
     echo "========================================="
     read -rp "Pressione ENTER após salvar..."
