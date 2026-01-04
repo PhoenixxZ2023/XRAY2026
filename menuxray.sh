@@ -58,7 +58,90 @@ func_xray_cert() {
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
         -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$domain" \
         -keyout "$KEY_FILE" -out "$CRT_FILE" > /dev/null 2>&1
-    chmod 755 "$SSL_DIR"; chmod 644 "$KEY_FILE"; chmod 644 "$CRT_FILE"
+    chmod 777 "$SSL_DIR"; chmod 777 "$KEY_FILE"; chmod 644 "$CRT_FILE"
+}
+
+# --- INSTALAÇÃO DO BOT TELEGRAM ---
+func_install_bot() {
+    header_blue "INSTALADOR DO BOT TELEGRAM"
+    
+    echo "Esta opção irá instalar o Python e configurar seu Bot."
+    echo "Tenha em mãos o TOKEN do BotFather e seu ID numérico."
+    echo ""
+    read -rp "Deseja continuar? [s/n]: " continue_opt
+    if [[ "$continue_opt" != "s" ]]; then return; fi
+
+    echo ""
+    echo -e "${TXT_YELLOW}Instalando Python e Dependências...${RESET}"
+    
+    # Atualiza e instala Python 3 e PIP
+    apt-get update -y > /dev/null 2>&1
+    apt-get install python3 python3-pip -y > /dev/null 2>&1
+    
+    # Remove restrição de pip em sistemas Debian 12+/Ubuntu 23+ (EXTERNALLY-MANAGED)
+    rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
+    
+    echo "Instalando biblioteca python-telegram-bot..."
+    pip3 install python-telegram-bot > /dev/null 2>&1
+
+    echo -e "${TXT_GREEN}Dependências instaladas!${RESET}"
+    echo ""
+    
+    # Coleta de Dados
+    read -rp "Digite o TOKEN do Bot (BotFather): " bot_token
+    read -rp "Digite o SEU ID (Admin ID): " admin_id
+
+    if [ -z "$bot_token" ] || [ -z "$admin_id" ]; then
+        echo -e "${TXT_RED}Dados inválidos!${RESET}"
+        sleep 2
+        return
+    fi
+
+    echo "Baixando código do bot do GitHub..."
+    rm -f /opt/XrayTools/botxray.py
+    
+    # [LINK ATUALIZADO PARA SEU REPOSITÓRIO]
+    curl -s -L -o /opt/XrayTools/botxray.py "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/botxray.py"
+    
+    if [ ! -f "/opt/XrayTools/botxray.py" ]; then
+        echo -e "${TXT_RED}Erro ao baixar botxray.py! Verifique seu GitHub.${RESET}"
+        sleep 3
+        return
+    fi
+
+    # Injeta o Token e o ID dentro do arquivo Python
+    sed -i "s/SEU_TOKEN_AQUI/$bot_token/g" /opt/XrayTools/botxray.py
+    sed -i "s/123456789/$admin_id/g" /opt/XrayTools/botxray.py
+
+    # Criação do Serviço Systemd (Para rodar em segundo plano e iniciar com o sistema)
+    echo "Criando serviço do sistema..."
+    cat <<EOF > /etc/systemd/system/botxray.service
+[Unit]
+Description=DragonCore Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/XrayTools
+ExecStart=/usr/bin/python3 /opt/XrayTools/botxray.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable botxray
+    systemctl restart botxray
+
+    echo ""
+    echo "========================================="
+    echo -e "${TXT_GREEN}✅ BOT ATIVADO COM SUCESSO!${RESET}"
+    echo "Vá no Telegram e mande /start para ele."
+    echo "========================================="
+    read -rp "Pressione ENTER para voltar..."
 }
 
 # --- GERAÇÃO DE CONFIG, RESUMO E LINK UNIVERSAL ---
@@ -412,6 +495,7 @@ menu_display() {
     echo -e "${TXT_CYAN}[5]. LIMPAR EXPIRADOS${RESET}"
     echo -e "${TXT_CYAN}[6]. DESINSTALAR (COMPLETO)${RESET}"
     echo -e "${TXT_GREEN}[7]. LIMITAR CONSUMO GIGAS (MÓDULO GITHUB)${RESET}"
+    echo -e "${TXT_CYAN}[8]. ATIVAR BOT TELEGRAM${RESET}"
     echo -e "${TXT_CYAN}[0]. SAIR${RESET}"
     echo "-----------------------------------------"
     read -rp "Opção: " choice
@@ -428,6 +512,7 @@ if [ -z "$1" ]; then
             5) func_page_purge_expired ;;
             6) func_page_uninstall ;; 
             7) func_call_limiter ;;
+            8) func_install_bot ;;
             0) exit 0 ;;
         esac
     done
