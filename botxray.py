@@ -13,11 +13,12 @@ from telegram.ext import (
 import io
 
 # --- CONFIGURAÇÃO ---
-# (O instalador vai preencher isso automaticamente, ou você edita aqui)
+# (Estes valores serão substituídos automaticamente pelo instalador)
 BOT_TOKEN = "SEU_TOKEN_AQUI"
-ADMIN_ID = 123456789  # Seu ID numérico
+ADMIN_ID = 123456789 
 
 # Caminhos do DragonCore
+# Ajuste aqui se o seu config estiver em outro lugar (ex: /etc/xray/config.json)
 CONFIG_PATH = "/usr/local/etc/xray/config.json"
 USER_DB = "/opt/XrayTools/users.db"
 XRAY_SERVICE = "xray"
@@ -86,7 +87,6 @@ def core_delete_user(nick):
         for inbound in inbounds:
             if inbound.get('tag') == 'inbound-dragoncore':
                 clients = inbound['settings']['clients']
-                # Filtra removendo o usuário (por email ou id)
                 inbound['settings']['clients'] = [c for c in clients if c.get('email') != nick and c.get('id') != nick]
         save_config(data)
 
@@ -95,11 +95,8 @@ def core_delete_user(nick):
         with open(USER_DB, 'r') as f:
             lines = f.readlines()
         with open(USER_DB, 'w') as f:
-            found = False
             for line in lines:
-                if line.startswith(f"{nick}|"):
-                    found = True
-                else:
+                if not line.startswith(f"{nick}|"):
                     f.write(line)
     
     restart_xray()
@@ -107,12 +104,20 @@ def core_delete_user(nick):
 
 def core_list_users():
     if not os.path.exists(USER_DB): return "Nenhum usuário."
-    msg = "📋 *LISTA DE USUÁRIOS*\n\n"
+    msg = "📋 *LISTA DE USUÁRIOS*\n"
+    msg += "_(Nome | Vencimento | UUID)_\n\n"
+    
     with open(USER_DB, 'r') as f:
         for line in f:
             parts = line.strip().split('|')
             if len(parts) >= 3:
-                msg += f"👤 `{parts[0]}` | 📅 {parts[2]}\n"
+                # parts[0] = Nome
+                # parts[1] = UUID
+                # parts[2] = Data
+                
+                # Formato solicitado: Nome | Data | UUID
+                msg += f"`{parts[0]}` | {parts[2]} | `{parts[1]}`\n"
+                
     return msg
 
 # --- FUNÇÕES DO TELEGRAM ---
@@ -128,7 +133,8 @@ def build_menu():
         [InlineKeyboardButton("👤 CRIAR USUÁRIO", callback_data='create_start'),
          InlineKeyboardButton("🗑️ REMOVER USUÁRIO", callback_data='delete_start')],
         [InlineKeyboardButton("📋 LISTAR TODOS", callback_data='list_users'),
-         InlineKeyboardButton("❌ CANCELAR", callback_data='cancel')]
+         InlineKeyboardButton("📥 BAIXAR BACKUP", callback_data='backup_start')], # <-- NOVO BOTÃO
+        [InlineKeyboardButton("❌ CANCELAR", callback_data='cancel')]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -151,7 +157,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == 'list_users':
         report = core_list_users()
-        # Se for muito grande, envia arquivo, senão envia texto
         if len(report) > 4000:
             file_obj = io.BytesIO(report.encode())
             file_obj.name = "usuarios.txt"
@@ -160,13 +165,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(report, parse_mode='Markdown', reply_markup=build_menu())
         return SELECTING_ACTION
 
+    elif query.data == 'backup_start':
+        if not os.path.exists(USER_DB):
+            await query.edit_message_text("❌ Banco de dados ainda vazio ou inexistente.", reply_markup=build_menu())
+            return SELECTING_ACTION
+        
+        await query.message.reply_text("📤 Enviando backup...")
+        try:
+            with open(USER_DB, 'rb') as f:
+                date_str = datetime.now().strftime('%Y%m%d')
+                await context.bot.send_document(
+                    chat_id=ADMIN_ID,
+                    document=f,
+                    filename=f"backup_users_{date_str}.db",
+                    caption=f"📦 Backup DragonCore - {date_str}"
+                )
+            await query.message.reply_text("✅ Backup enviado!", reply_markup=build_menu())
+        except Exception as e:
+            await query.edit_message_text(f"Erro ao enviar backup: {str(e)}", reply_markup=build_menu())
+        return SELECTING_ACTION
+
     elif query.data == 'cancel':
         await query.edit_message_text("Operação cancelada.", reply_markup=build_menu())
         return SELECTING_ACTION
 
 async def get_username_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nick = update.message.text.strip()
-    # Validação simples
+    # Remove caracteres especiais para segurança
     nick = ''.join(e for e in nick if e.isalnum())
     context.user_data['new_nick'] = nick
     await update.message.reply_text(f"Nome: `{nick}`\nAgora digite a *VALIDADE* em dias (Ex: 30):", parse_mode='Markdown')
@@ -198,9 +223,7 @@ async def cancel_op(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SELECTING_ACTION
 
 def main():
-    # Cria a aplicação
     application = Application.builder().token(BOT_TOKEN).build()
-
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start), CommandHandler('menu', start)],
         states={
@@ -211,7 +234,6 @@ def main():
         },
         fallbacks=[CommandHandler('cancel', cancel_op)]
     )
-
     application.add_handler(conv_handler)
     print("Bot Iniciado...")
     application.run_polling()
