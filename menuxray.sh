@@ -118,7 +118,7 @@ func_generate_config() {
     systemctl restart xray > /dev/null 2>&1
     sleep 2
     
-    # --- GERAÇÃO DO LINK UNIVERSAL ---
+    # --- GERAÇÃO DO LINK UNIVERSAL COM UUID VÁLIDO (MODIFICADO) ---
     clear
     header_blue "INSTALAÇÃO CONCLUÍDA"
     if systemctl is-active --quiet xray; then
@@ -128,35 +128,39 @@ func_generate_config() {
         journalctl -u xray -n 5 --no-pager
     fi
 
-    # Monta o link Universal
-    local universal_uuid="UUID_DO_CLIENTE"
+    # [ALTERAÇÃO AQUI] Gera um UUID válido aleatório para o template
+    local universal_uuid=$(uuidgen)
+    
     local link=""
     local sec_param="none"
     if [ "$use_tls" == "true" ]; then sec_param="tls"; fi
 
+    # Monta o link baseado no protocolo escolhido
     if [ "$network" == "grpc" ]; then
-        link="vless://${universal_uuid}@${domain}:${port}?security=${sec_param}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#VLESS_UNIVERSAL"
+        link="vless://${universal_uuid}@${domain}:${port}?security=${sec_param}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#VLESS_BASE"
     elif [ "$network" == "ws" ]; then
-        link="vless://${universal_uuid}@${domain}:${port}?path=%2F&security=${sec_param}&encryption=none&host=${domain}&type=ws&sni=${domain}#VLESS_UNIVERSAL"
+        link="vless://${universal_uuid}@${domain}:${port}?path=%2F&security=${sec_param}&encryption=none&host=${domain}&type=ws&sni=${domain}#VLESS_BASE"
     elif [ "$network" == "xhttp" ]; then
         if [ "$use_tls" == "true" ]; then
-            link="vless://${universal_uuid}@${domain}:${port}?mode=auto&path=%2F&security=tls&encryption=none&host=${domain}&type=xhttp&sni=${domain}#VLESS_UNIVERSAL"
+            link="vless://${universal_uuid}@${domain}:${port}?mode=auto&path=%2F&security=tls&encryption=none&host=${domain}&type=xhttp&sni=${domain}#VLESS_BASE"
         else
-            link="vless://${universal_uuid}@${domain}:${port}?mode=auto&path=%2F&security=none&encryption=none&host=${domain}&type=xhttp#VLESS_UNIVERSAL"
+            link="vless://${universal_uuid}@${domain}:${port}?mode=auto&path=%2F&security=none&encryption=none&host=${domain}&type=xhttp#VLESS_BASE"
         fi
     elif [ "$network" == "vision" ]; then
-        link="vless://${universal_uuid}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#VLESS_UNIVERSAL"
+        link="vless://${universal_uuid}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#VLESS_BASE"
     else
         # TCP Simples
-        link="vless://${universal_uuid}@${domain}:${port}?security=${sec_param}&encryption=none&type=tcp&sni=${domain}#VLESS_UNIVERSAL"
+        link="vless://${universal_uuid}@${domain}:${port}?security=${sec_param}&encryption=none&type=tcp&sni=${domain}#VLESS_BASE"
     fi
 
     echo ""
     echo "========================================="
-    echo -e "${TXT_YELLOW}⚠️  ATENÇÃO: LINK VLESS UNIVERSAL ⚠️${RESET}"
-    echo "Copie este link abaixo e salve no seu bloco de notas."
-    echo "Ele servirá de base para TODOS os seus clientes."
-    echo "Você só precisará mudar o 'UUID_DO_CLIENTE'."
+    echo -e "${TXT_YELLOW}⚠️  LINK VLESS BASE (TEMPLATE) ⚠️${RESET}"
+    echo "Copie e importe este link no seu aplicativo."
+    echo "Ele já tem um UUID válido para o app aceitar."
+    echo ""
+    echo -e "Lembre-se: Depois de importar, ${TXT_CYAN}TROQUE O UUID${RESET}"
+    echo "pelo UUID real do cliente que você criar."
     echo "========================================="
     echo -e "${TXT_BLUE}$link${RESET}"
     echo "========================================="
