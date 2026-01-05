@@ -1,5 +1,5 @@
 #!/bin/bash
-# limiterxray.sh - Módulo de Controle de Consumo (DragonCore)
+# limiterxray.sh - Módulo de Controle de Consumo (DragonCore V7.3)
 # Versão: GitHub Edition + UUID Scramble (Bloqueio Real)
 
 # CONFIGURAÇÃO
@@ -116,8 +116,8 @@ func_set_limit() {
 func_view_usage() {
     func_get_api_port
     header_limit
-    echo -e "USUÁRIO        | CONSUMO (Atual) | LIMITE    | STATUS"
-    echo "--------------------------------------------------------"
+    printf "%-15s | %-15s | %-10s | %s\n" "USUÁRIO" "CONSUMO" "LIMITE" "STATUS"
+    echo "------------------------------------------------------------"
 
     jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients[].email' "$CONFIG_PATH" | while read -r email_raw; do
         if [ -z "$email_raw" ]; then continue; fi
@@ -145,14 +145,15 @@ func_view_usage() {
 
         if [ "$is_locked" = true ]; then
             status="${TXT_RED}BLOQUEADO${RESET}"
-            total_h="---" # Não mostra consumo enquanto bloqueado (pois zerou/mudou)
+            total_h="---" # Não mostra consumo enquanto bloqueado
         elif [ -n "$limit_bytes" ]; then
             limit_h=$(func_bytes_to_human "$limit_bytes")
             if [ "$total" -ge "$limit_bytes" ]; then status="${TXT_RED}EXCEDIDO${RESET}"; else
                 local pct=$(echo "scale=0; ($total * 100) / $limit_bytes" | bc); status="${TXT_CYAN}${pct}%${RESET}"; fi
         fi
-        printf "%-14s | %-15s | %-9s | %b\n" "$nick" "$total_h" "$limit_h" "$status"
+        printf "%-15s | %-15s | %-10s | %b\n" "$nick" "$total_h" "$limit_h" "$status"
     done
+    echo "------------------------------------------------------------"
     echo ""; read -rp "Pressione ENTER para voltar..."
 }
 
@@ -240,6 +241,10 @@ while true; do
     echo "--------------------------------------"
     read -rp "Opção: " choice
     case "$choice" in
-        1) func_set_limit ;; 2) func_view_usage ;; 3) func_remove_limit ;; 4) func_check_and_block ;; 0) exit 0 ;; *) echo "Inválido";;
+        1) func_set_limit ;; 
+        2) func_view_usage ;; 
+        3) func_remove_limit ;; 
+        4) func_check_and_block ;;
+        0) exit 0 ;; *) echo "Inválido";;
     esac
 done
