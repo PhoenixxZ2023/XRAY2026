@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Estados da Conversa
 (SELECTING_ACTION, GET_USERNAME_CREATE, GET_EXPIRY_DAYS_CREATE, GET_USER_TO_DELETE, GET_USER_TO_BLOCK, GET_USER_TO_UNBLOCK) = range(6)
 
-# --- FUNÇÕES DE SISTEMA (BACKEND) ---
+# --- FUNÇÕES DE SISTEMA (COMPATIBILIDADE V7.3) ---
 
 def restart_xray():
     subprocess.run(["systemctl", "restart", XRAY_SERVICE], check=False)
@@ -41,112 +41,151 @@ def save_config(data):
         json.dump(data, f, indent=2)
 
 def core_create_user(nick, days):
-    if not os.path.exists(USER_DB): open(USER_DB, 'a').close()
-    with open(USER_DB, 'r') as f:
-        if nick in f.read(): return False, "Usuário já existe!"
+    # Verifica duplicidade no DB
+    if os.path.exists(USER_DB):
+        with open(USER_DB, 'r') as f:
+            if f"{nick}|" in f.read(): return False, "❌ Usuário já existe!"
+    else:
+        open(USER_DB, 'a').close()
     
     user_uuid = str(uuid.uuid4())
     expiry_date = (datetime.now() + timedelta(days=int(days))).strftime('%Y-%m-%d')
     data = load_config()
     
+    if not data: return False, "❌ Erro ao ler config.json"
+
     inbounds = data.get('inbounds', [])
+    # Procura inbound-dragoncore
     target = next((i for i in inbounds if i.get('tag') == 'inbound-dragoncore'), None)
+    
     if target:
+        # Adiciona ao JSON
         target['settings']['clients'].append({"id": user_uuid, "email": nick, "level": 0})
         save_config(data)
-    
-    with open(USER_DB, 'a') as f:
-        f.write(f"{nick}|{user_uuid}|{expiry_date}\n")
-    
-    restart_xray()
-    return True, f"✅ *Usuário Criado!*\n\n👤 `{nick}`\n🔑 `{user_uuid}`\n📅 `{expiry_date}`"
+        
+        # Adiciona ao Banco de Dados (Backup Seguro)
+        with open(USER_DB, 'a') as f:
+            f.write(f"{nick}|{user_uuid}|{expiry_date}\n")
+        
+        restart_xray()
+        return True, f"✅ *Usuário Criado!*\n\n👤 `{nick}`\n🔑 `{user_uuid}`\n📅 `{expiry_date}`"
+    return False, "❌ Inbound não encontrado."
 
 def core_delete_user(nick):
     data = load_config()
+    found = False
+    
+    # 1. Remove do JSON (Remove normal ou LOCKED)
     if data:
         inbounds = data.get('inbounds', [])
         for inbound in inbounds:
             if inbound.get('tag') == 'inbound-dragoncore':
                 clients = inbound['settings']['clients']
-                inbound['settings']['clients'] = [c for c in clients if c.get('email') != nick]
+                # Filtra removendo o nick ou LOCKED_nick
+                new_clients = [c for c in clients if c.get('email') != nick and c.get('email') != f"LOCKED_{nick}"]
+                if len(clients) != len(new_clients): found = True
+                inbound['settings']['clients'] = new_clients
         save_config(data)
     
+    # 2. Remove do Banco de Dados
     if os.path.exists(USER_DB):
         with open(USER_DB, 'r') as f: lines = f.readlines()
         with open(USER_DB, 'w') as f:
             for line in lines:
                 if not line.startswith(f"{nick}|"): f.write(line)
+    
     restart_xray()
-    return "✅ Usuário removido."
+    return "✅ Usuário removido do sistema."
 
 def core_block_user(nick):
-    # 1. Remove do Config (Derruba conexão)
+    # LÓGICA V7.3: SCRAMBLE (Não toca no DB, altera JSON)
     data = load_config()
-    if data:
-        inbounds = data.get('inbounds', [])
-        for inbound in inbounds:
-            if inbound.get('tag') == 'inbound-dragoncore':
-                clients = inbound['settings']['clients']
-                inbound['settings']['clients'] = [c for c in clients if c.get('email') != nick]
-        save_config(data)
-    
-    # 2. Marca como BLOCKED no DB
+    if not data: return "❌ Erro config."
+
     found = False
-    if os.path.exists(USER_DB):
-        with open(USER_DB, 'r') as f: lines = f.readlines()
-        with open(USER_DB, 'w') as f:
-            for line in lines:
-                if line.startswith(f"{nick}|") and "BLOCKED-" not in line:
-                    parts = line.strip().split('|')
-                    # Formato: nick|BLOCKED-uuid|data
-                    f.write(f"{parts[0]}|BLOCKED-{parts[1]}|{parts[2]}\n")
+    inbounds = data.get('inbounds', [])
+    for inbound in inbounds:
+        if inbound.get('tag') == 'inbound-dragoncore':
+            for client in inbound['settings']['clients']:
+                if client.get('email') == f"LOCKED_{nick}":
+                    return "⚠️ Usuário já está bloqueado."
+                if client.get('email') == nick:
+                    # Aplica Bloqueio: Muda nome e UUID
+                    client['email'] = f"LOCKED_{nick}"
+                    client['id'] = str(uuid.uuid4()) # UUID Falso
                     found = True
-                else:
-                    f.write(line)
+                    break
     
-    if not found: return "❌ Usuário não encontrado ou já bloqueado."
-    restart_xray()
-    return f"⛔ Usuário `{nick}` foi SUSPENSO."
+    if found:
+        save_config(data)
+        restart_xray()
+        return f"⛔ Usuário `{nick}` foi SUSPENSO (Scramble)."
+    else:
+        return "❌ Usuário não encontrado no Config."
 
 def core_unblock_user(nick):
-    real_uuid = ""
-    # 1. Remove BLOCKED do DB e pega o UUID real
+    # LÓGICA V7.3: RESTORE (Pega UUID do DB, restaura JSON)
+    
+    # 1. Busca UUID Original no DB
+    real_uuid = None
     if os.path.exists(USER_DB):
-        with open(USER_DB, 'r') as f: lines = f.readlines()
-        with open(USER_DB, 'w') as f:
-            for line in lines:
-                if line.startswith(f"{nick}|") and "BLOCKED-" in line:
+        with open(USER_DB, 'r') as f:
+            for line in f:
+                if line.startswith(f"{nick}|"):
                     parts = line.strip().split('|')
-                    # Remove 'BLOCKED-' do UUID (parts[1])
-                    clean_uuid = parts[1].replace("BLOCKED-", "")
-                    real_uuid = clean_uuid
-                    f.write(f"{parts[0]}|{clean_uuid}|{parts[2]}\n")
-                else:
-                    f.write(line)
+                    real_uuid = parts[1]
+                    break
     
-    if not real_uuid: return "❌ Usuário não estava bloqueado."
+    if not real_uuid: return "❌ Erro: UUID original não encontrado no Backup (DB)."
 
-    # 2. Adiciona de volta no Config
+    # 2. Restaura no JSON
     data = load_config()
+    found = False
     inbounds = data.get('inbounds', [])
-    target = next((i for i in inbounds if i.get('tag') == 'inbound-dragoncore'), None)
-    if target:
-        target['settings']['clients'].append({"id": real_uuid, "email": nick, "level": 0})
-        save_config(data)
+    for inbound in inbounds:
+        if inbound.get('tag') == 'inbound-dragoncore':
+            for client in inbound['settings']['clients']:
+                if client.get('email') == f"LOCKED_{nick}":
+                    client['email'] = nick
+                    client['id'] = real_uuid # Restaura UUID Real
+                    found = True
+                    break
     
-    restart_xray()
-    return f"✅ Usuário `{nick}` foi REATIVADO."
+    if found:
+        save_config(data)
+        restart_xray()
+        return f"✅ Usuário `{nick}` REATIVADO com sucesso."
+    else:
+        return "❌ Usuário não estava bloqueado no sistema."
 
 def core_list_users():
     if not os.path.exists(USER_DB): return "Nenhum usuário."
+    
+    # Carrega config para checar status (quem está LOCKED)
+    data = load_config()
+    locked_users = []
+    if data:
+        inbounds = data.get('inbounds', [])
+        target = next((i for i in inbounds if i.get('tag') == 'inbound-dragoncore'), None)
+        if target:
+            for c in target['settings']['clients']:
+                email = c.get('email', '')
+                if email.startswith("LOCKED_"):
+                    locked_users.append(email.replace("LOCKED_", ""))
+
     msg = "📋 *LISTA DE USUÁRIOS*\n_(Nome | Vencimento | Status)_\n\n"
     with open(USER_DB, 'r') as f:
         for line in f:
             parts = line.strip().split('|')
             if len(parts) >= 3:
+                nick = parts[0]
+                expiry = parts[2]
+                
                 status = "✅ Ativo"
-                if "BLOCKED-" in parts[1]: status = "⛔ SUSPENSO"
-                msg += f"`{parts[0]}` | {parts[2]} | {status}\n"
+                if nick in locked_users:
+                    status = "⛔ SUSPENSO"
+                
+                msg += f"`{nick}` | {expiry} | {status}\n"
     return msg
 
 # --- FUNÇÕES DO TELEGRAM ---
@@ -169,7 +208,7 @@ def build_menu():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
-    await update.message.reply_text("🐉 *PAINEL DRAGONCORE*", reply_markup=build_menu(), parse_mode='Markdown')
+    await update.message.reply_text("🐉 *PAINEL DRAGONCORE V7.3*", reply_markup=build_menu(), parse_mode='Markdown')
     return SELECTING_ACTION
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
