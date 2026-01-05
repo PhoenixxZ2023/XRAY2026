@@ -147,7 +147,6 @@ def core_unblock_user(nick):
         return "❌ Usuário não estava bloqueado no sistema."
 
 def core_list_users_text():
-    # Esta função gera o conteúdo TEXTO PURO para o arquivo .txt
     if not os.path.exists(USER_DB): return "Nenhum usuário cadastrado."
     
     data = load_config()
@@ -161,7 +160,6 @@ def core_list_users_text():
                 if email.startswith("LOCKED_"):
                     locked_users.append(email.replace("LOCKED_", ""))
 
-    # Cabeçalho do arquivo TXT
     msg = "LISTA DE USUARIOS - DRAGONCORE\n"
     msg += "=================================================================================\n"
     msg += "NOME            | VENCIMENTO  | UUID                                 | STATUS\n"
@@ -174,15 +172,10 @@ def core_list_users_text():
                 nick = parts[0]
                 uuid_real = parts[1]
                 expiry = parts[2]
-                
                 status = "✅"
                 if nick in locked_users:
                     status = "⛔️"
-                
-                # Formatação alinhada para TXT (sem markdown)
-                # %-15s significa: reservar 15 espaços e alinhar à esquerda
                 msg += f"{nick:<15} | {expiry:<11} | {uuid_real:<36} | {status}\n"
-    
     return msg
 
 # --- FUNÇÕES DO TELEGRAM ---
@@ -205,6 +198,8 @@ def build_menu():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
+    # Limpa dados de usuário ao iniciar/reiniciar
+    context.user_data.clear()
     await update.message.reply_text("🐉 *PAINEL DRAGONCORE V7.3*", reply_markup=build_menu(), parse_mode='Markdown')
     return SELECTING_ACTION
 
@@ -212,8 +207,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
+    # Se clicar em CANCEL ou qualquer botão de navegação, reseta o estado
+    if query.data == 'cancel':
+        await query.edit_message_text("Painel Fechado.", reply_markup=None); return ConversationHandler.END
+    
+    # Se clicar em um botão de ação principal, define o fluxo
     if query.data == 'create_start':
-        await query.edit_message_text("Nome do usuário:", parse_mode='Markdown'); return GET_USERNAME_CREATE
+        await query.edit_message_text("Nome do usuário (5-9 letras/num):", parse_mode='Markdown'); return GET_USERNAME_CREATE
     elif query.data == 'delete_start':
         await query.edit_message_text("Nome para remover:", parse_mode='Markdown'); return GET_USER_TO_DELETE
     elif query.data == 'block_start':
@@ -222,19 +222,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Nome para ✅ REATIVAR:", parse_mode='Markdown'); return GET_USER_TO_UNBLOCK
     
     elif query.data == 'list_users':
-        # Gera o relatório em texto puro
         report = core_list_users_text()
-        
-        # Cria o arquivo em memória
         f = io.BytesIO(report.encode('utf-8'))
         f.name = "usuarios.txt"
-        
-        # Envia como documento
         await query.message.reply_document(
-            document=f, 
-            caption="📂 *Lista de Usuários Gerada*", 
-            parse_mode='Markdown',
-            reply_markup=build_menu()
+            document=f, caption="📂 *Lista de Usuários*", parse_mode='Markdown', reply_markup=build_menu()
         )
         return SELECTING_ACTION
         
@@ -249,17 +241,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(bkp_file)
             await query.message.reply_text("✅ Enviado!", reply_markup=build_menu())
         return SELECTING_ACTION
-    elif query.data == 'cancel':
-        await query.edit_message_text("Fim.", reply_markup=build_menu()); return SELECTING_ACTION
+    
+    # Se chegou aqui, é um botão desconhecido ou clique fora de hora, reinicia menu
+    await query.edit_message_text("Reiniciando...", reply_markup=build_menu())
+    return SELECTING_ACTION
+
+# Função especial para resetar se o usuário clicar em botões enquanto digita
+async def unexpected_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    # Se o usuário clicar em QUALQUER botão enquanto o bot espera texto, cancela a ação anterior e processa o botão
+    return await button_handler(update, context)
 
 async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode):
-    text = update.message.text.strip().split()[0] # Pega só a primeira palavra
+    # Proteção: Se não for texto, ignora
+    if not update.message or not update.message.text: return
+    
+    text = update.message.text.strip().split()[0]
 
     if mode == 'create_nick':
         # Validação 5-9 chars e alfanumérico
         if not re.match(r'^[a-zA-Z0-9]{5,9}$', text):
             await update.message.reply_text(
-                "❌ *Nome Inválido!*\n\nRegras:\n• Entre 5 e 9 caracteres\n• Apenas letras e números\n\nTente outro:",
+                "❌ *Nome Inválido!*\n\nRegras:\n• Entre 5 e 9 caracteres\n• Apenas letras e números\n\nDigite um novo nome ou /cancel:",
                 parse_mode='Markdown'
             )
             return GET_USERNAME_CREATE
@@ -291,15 +295,37 @@ async def cancel_op(u, c): await u.message.reply_text("Cancelado.", reply_markup
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Handler Comum de Texto
+    txt_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, None)
+
     conv = ConversationHandler(
         entry_points=[CommandHandler('start', start), CommandHandler('menu', start)],
         states={
+            # Em cada estado, adicionamos CallbackQueryHandler(unexpected_button)
+            # Isso permite que se o usuário clicar num botão enquanto digita, o bot obedeça o botão!
             SELECTING_ACTION: [CallbackQueryHandler(button_handler)],
-            GET_USERNAME_CREATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, h_create_nick)],
-            GET_EXPIRY_DAYS_CREATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, h_create_days)],
-            GET_USER_TO_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, h_delete)],
-            GET_USER_TO_BLOCK: [MessageHandler(filters.TEXT & ~filters.COMMAND, h_block)],
-            GET_USER_TO_UNBLOCK: [MessageHandler(filters.TEXT & ~filters.COMMAND, h_unblock)],
+            
+            GET_USERNAME_CREATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, h_create_nick),
+                CallbackQueryHandler(unexpected_button)
+            ],
+            GET_EXPIRY_DAYS_CREATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, h_create_days),
+                CallbackQueryHandler(unexpected_button)
+            ],
+            GET_USER_TO_DELETE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, h_delete),
+                CallbackQueryHandler(unexpected_button)
+            ],
+            GET_USER_TO_BLOCK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, h_block),
+                CallbackQueryHandler(unexpected_button)
+            ],
+            GET_USER_TO_UNBLOCK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, h_unblock),
+                CallbackQueryHandler(unexpected_button)
+            ],
         },
         fallbacks=[CommandHandler('cancel', cancel_op)]
     )
