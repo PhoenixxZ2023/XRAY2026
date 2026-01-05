@@ -121,36 +121,89 @@ func_backup_system() {
     read -rp "Pressione ENTER para voltar..."
 }
 
-# --- FUNÇÃO DE RESTAURAÇÃO DO SISTEMA ---
+# --- FUNÇÃO DE RESTAURAÇÃO DO SISTEMA (AUTO-DETECT) ---
 func_restore_system() {
     clear
     header_red "RESTAURAÇÃO DE SISTEMA"
     echo -e "${TXT_YELLOW}⚠️  ATENÇÃO:${RESET} Isso irá substituir o banco de dados"
     echo "e as configurações atuais pelos dados do backup."
     echo ""
-    echo "Certifique-se que o arquivo de backup (.tar.gz) está na VPS."
-    echo ""
-    
-    read -rp "Digite o CAMINHO COMPLETO do arquivo de backup: " backup_path
-    # Exemplo de sugestão visual: /root/backups/backup_dragoncore_....tar.gz
-    
-    if [ -z "$backup_path" ]; then return; fi
 
-    if [ ! -f "$backup_path" ]; then
-        echo -e "${TXT_RED}❌ Arquivo não encontrado!${RESET}"
+    local backup_dir="/root/backups"
+
+    # 1. Verifica se a pasta existe
+    if [ ! -d "$backup_dir" ]; then
+        echo -e "${TXT_RED}❌ Pasta de backups não encontrada ($backup_dir).${RESET}"
+        echo "Você precisa criar um backup primeiro (Opção 9)."
         read -rp "Pressione ENTER..."
         return
     fi
 
+    # 2. Busca arquivos .tar.gz automaticamente
+    # (shopt nullglob evita erros se a pasta estiver vazia)
+    shopt -s nullglob
+    local backups=("$backup_dir"/*.tar.gz)
+    shopt -u nullglob
+
+    # 3. Se não achar nada, avisa e sai
+    if [ ${#backups[@]} -eq 0 ]; then
+        echo -e "${TXT_RED}❌ Nenhum arquivo de backup encontrado em $backup_dir.${RESET}"
+        read -rp "Pressione ENTER..."
+        return
+    fi
+
+    echo "📂 Backups encontrados:"
     echo ""
-    echo "1. Parando serviços para evitar conflitos..."
+
+    # 4. Lista os arquivos numerados
+    local i=1
+    for bkp in "${backups[@]}"; do
+        filename=$(basename "$bkp")
+        echo -e "${TXT_CYAN}[$i]${RESET} $filename"
+        ((i++))
+    done
+
+    echo ""
+    echo -e "${TXT_CYAN}[0]${RESET} Cancelar"
+    echo ""
+
+    # 5. Seleção do usuário
+    read -rp "Digite o número do arquivo para restaurar: " choice
+
+    # Validações
+    if [ "$choice" == "0" ] || [ -z "$choice" ]; then return; fi
+    
+    # Verifica se digitou número
+    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+        echo -e "${TXT_RED}❌ Opção inválida!${RESET}"; sleep 2; return
+    fi
+
+    # Ajusta o índice (array começa em 0, menu em 1)
+    local index=$((choice - 1))
+
+    # Verifica se o número escolhido existe na lista
+    if [ -z "${backups[$index]}" ]; then
+        echo -e "${TXT_RED}❌ Arquivo inválido!${RESET}"; sleep 2; return
+    fi
+
+    local selected_file="${backups[$index]}"
+
+    echo ""
+    echo -e "Você selecionou: ${TXT_YELLOW}$(basename "$selected_file")${RESET}"
+    read -rp "Tem certeza absoluta? [s/n]: " confirm
+
+    if [[ "$confirm" != "s" ]]; then return; fi
+
+    # 6. Executa a restauração
+    echo ""
+    echo "1. Parando serviços..."
     systemctl stop xray
     systemctl stop botxray
 
     echo "2. Restaurando arquivos..."
-    # Extrai sobrescrevendo os arquivos originais (-P para usar caminhos absolutos)
-    tar -xzPf "$backup_path" -C / 
-    
+    # Extrai sobrescrevendo os arquivos originais
+    tar -xzPf "$selected_file" -C /
+
     if [ $? -eq 0 ]; then
         echo "3. Reiniciando serviços..."
         systemctl restart xray
@@ -158,10 +211,10 @@ func_restore_system() {
         
         echo ""
         echo -e "${TXT_GREEN}✅ RESTAURAÇÃO CONCLUÍDA!${RESET}"
-        echo "Seus usuários e configurações estão ativos."
+        echo "Seus usuários e configurações foram recuperados."
     else
-        echo -e "${TXT_RED}❌ Falha ao extrair arquivos.${RESET}"
-        # Tenta religar os serviços mesmo com erro
+        echo -e "${TXT_RED}❌ Falha crítica ao extrair arquivos.${RESET}"
+        # Tenta religar serviços para não deixar off
         systemctl start xray
         systemctl start botxray
     fi
