@@ -451,23 +451,43 @@ func_remove_user_logic() {
     sleep 1
 }
 
-# --- PÁGINAS ---
+# --- PÁGINA: CRIAR USUÁRIO (COM VALIDAÇÃO 5-9 CARACTERES) ---
 func_page_create_user() {
     header_blue "CRIAR USUÁRIO"
-    echo "⚠️  Use apenas letras e números. Sem espaços."
+    echo "⚠️  Regras para o nome do usuário:"
+    echo " • Mínimo 5 e Máximo 9 caracteres"
+    echo " • Apenas letras e números (sem símbolos)"
+    echo ""
+    
     read -rp "Nome do usuário (0 p/ voltar): " raw_nick
     if [ "$raw_nick" == "0" ] || [ -z "$raw_nick" ]; then return; fi
 
-    local len=${#raw_nick}
-    if [ $len -gt 15 ]; then echo -e "${TXT_RED}❌ Nome muito longo!${RESET}"; sleep 2; return; fi
-    if [[ "$raw_nick" == *"vless"* ]] || [[ "$raw_nick" == *"http"* ]]; then echo -e "${TXT_RED}❌ Entrada inválida!${RESET}"; sleep 2; return; fi
+    # --- VALIDAÇÃO RIGOROSA ---
+    # Verifica se contém apenas letras/números E se tem entre 5 e 9 chars
+    if ! [[ "$raw_nick" =~ ^[a-zA-Z0-9]{5,9}$ ]]; then
+        echo ""
+        echo -e "${TXT_RED}❌ ERRO: Formato inválido!${RESET}"
+        echo "O usuário deve ter entre 5 e 9 caracteres."
+        echo "Use apenas letras e números (sem espaços ou símbolos)."
+        echo ""
+        read -rp "Pressione ENTER para tentar novamente..."
+        return
+    fi
+    # --------------------------
 
-    nick=$(echo "$raw_nick" | sed 's/[^a-zA-Z0-9]//g')
-    if grep -q "$nick" "$USER_DB"; then echo -e "${TXT_RED}❌ Usuário já existe!${RESET}"; sleep 2; return; fi
+    if grep -q "$raw_nick" "$USER_DB"; then 
+        echo -e "${TXT_RED}❌ Usuário já existe!${RESET}"
+        sleep 2
+        return
+    fi
     
     read -rp "Dias de validade (Padrão 30): " days
     [ -z "$days" ] && days=30
-    func_add_user_logic "$nick" "$days"
+    
+    # Validação extra para dias (apenas números)
+    if ! [[ "$days" =~ ^[0-9]+$ ]]; then days=30; fi
+
+    func_add_user_logic "$raw_nick" "$days"
     read -rp "Pressione ENTER para voltar ao menu..."
 }
 
