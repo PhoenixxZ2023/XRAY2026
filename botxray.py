@@ -198,7 +198,6 @@ def build_menu():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
-    # Limpa dados de usuário ao iniciar/reiniciar
     context.user_data.clear()
     await update.message.reply_text("🐉 *PAINEL DRAGONCORE V7.3*", reply_markup=build_menu(), parse_mode='Markdown')
     return SELECTING_ACTION
@@ -207,11 +206,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # Se clicar em CANCEL ou qualquer botão de navegação, reseta o estado
+    # --- AÇÃO ESPECIAL: FECHAR ARQUIVO ---
+    # Se o botão clicado for "close_file", ele apaga a mensagem do arquivo
+    # mas mantem o menu principal intacto.
+    if query.data == 'close_file':
+        await query.message.delete()
+        return SELECTING_ACTION
+
+    # --- RESET ---
     if query.data == 'cancel':
         await query.edit_message_text("Painel Fechado.", reply_markup=None); return ConversationHandler.END
     
-    # Se clicar em um botão de ação principal, define o fluxo
+    # --- AÇÕES DO MENU ---
     if query.data == 'create_start':
         await query.edit_message_text("Nome do usuário (5-9 letras/num):", parse_mode='Markdown'); return GET_USERNAME_CREATE
     elif query.data == 'delete_start':
@@ -225,45 +231,68 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = core_list_users_text()
         f = io.BytesIO(report.encode('utf-8'))
         f.name = "usuarios.txt"
-        await query.message.reply_document(
-            document=f, caption="📂 *Lista de Usuários*", parse_mode='Markdown', reply_markup=build_menu()
+        
+        # 1. Manda o arquivo separado, com um botão "Fechar" nele
+        close_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Fechar Lista", callback_data='close_file')]])
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=f,
+            caption="📂 *Lista gerada*", # Legenda curta
+            parse_mode='Markdown',
+            reply_markup=close_btn # Botão de fechar anexado ao arquivo
+        )
+        
+        # 2. Atualiza o Menu Principal (Texto) para avisar
+        # O menu NÃO muda para o arquivo, ele continua sendo texto.
+        await query.edit_message_text(
+            "✅ *Lista enviada abaixo!*\nVerifique o arquivo ou escolha outra opção:",
+            parse_mode='Markdown',
+            reply_markup=build_menu()
         )
         return SELECTING_ACTION
         
     elif query.data == 'backup_start':
-        await query.message.reply_text("📦 Gerando Backup...")
+        await query.edit_message_text("📦 Gerando Backup...", parse_mode='Markdown')
+        
         date_str = datetime.now().strftime('%Y%m%d_%H%M')
         bkp_file = f"/tmp/backup_{date_str}.tar.gz"
         subprocess.run(f"tar -czPf {bkp_file} /opt/XrayTools /usr/local/etc/xray", shell=True)
+        
         if os.path.exists(bkp_file):
             with open(bkp_file, 'rb') as f:
-                await context.bot.send_document(chat_id=ADMIN_ID, document=f, filename=os.path.basename(bkp_file))
+                # Manda arquivo separado com botão Fechar
+                close_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Fechar Backup", callback_data='close_file')]])
+                await context.bot.send_document(
+                    chat_id=update.effective_chat.id, 
+                    document=f, 
+                    filename=os.path.basename(bkp_file),
+                    caption="🔐 *Backup do Sistema*",
+                    parse_mode='Markdown',
+                    reply_markup=close_btn
+                )
             os.remove(bkp_file)
-            await query.message.reply_text("✅ Enviado!", reply_markup=build_menu())
+            # Atualiza Menu Principal
+            await query.edit_message_text("✅ *Backup enviado abaixo!*", parse_mode='Markdown', reply_markup=build_menu())
+        else:
+            await query.edit_message_text("❌ Falha ao criar backup.", reply_markup=build_menu())
         return SELECTING_ACTION
     
-    # Se chegou aqui, é um botão desconhecido ou clique fora de hora, reinicia menu
     await query.edit_message_text("Reiniciando...", reply_markup=build_menu())
     return SELECTING_ACTION
 
-# Função especial para resetar se o usuário clicar em botões enquanto digita
 async def unexpected_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    # Se o usuário clicar em QUALQUER botão enquanto o bot espera texto, cancela a ação anterior e processa o botão
     return await button_handler(update, context)
 
 async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode):
-    # Proteção: Se não for texto, ignora
     if not update.message or not update.message.text: return
-    
     text = update.message.text.strip().split()[0]
 
     if mode == 'create_nick':
-        # Validação 5-9 chars e alfanumérico
         if not re.match(r'^[a-zA-Z0-9]{5,9}$', text):
             await update.message.reply_text(
-                "❌ *Nome Inválido!*\n\nRegras:\n• Entre 5 e 9 caracteres\n• Apenas letras e números\n\nDigite um novo nome ou /cancel:",
+                "❌ *Nome Inválido!*\n\nRegras:\n• Entre 5 e 9 caracteres\n• Apenas letras e números\n\nTente outro:",
                 parse_mode='Markdown'
             )
             return GET_USERNAME_CREATE
@@ -296,14 +325,11 @@ async def cancel_op(u, c): await u.message.reply_text("Cancelado.", reply_markup
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Handler Comum de Texto
     txt_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, None)
 
     conv = ConversationHandler(
         entry_points=[CommandHandler('start', start), CommandHandler('menu', start)],
         states={
-            # Em cada estado, adicionamos CallbackQueryHandler(unexpected_button)
-            # Isso permite que se o usuário clicar num botão enquanto digita, o bot obedeça o botão!
             SELECTING_ACTION: [CallbackQueryHandler(button_handler)],
             
             GET_USERNAME_CREATE: [
