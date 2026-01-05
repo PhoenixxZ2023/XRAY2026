@@ -1,5 +1,5 @@
 #!/bin/bash
-# menuxray.sh - Versão V7.2 (Backup/Restore Auto-Detect)
+# menuxray.sh - Versão V7.3 (Backup Seguro + UUID na Lista)
 
 # --- CONFIGURAÇÃO ---
 XRAY_BIN="/usr/local/bin/xray"
@@ -19,9 +19,10 @@ mkdir -p "$XRAY_DIR"
 mkdir -p "$SSL_DIR"
 touch "$USER_DB"
 
-# Instala dependências silenciosamente
+# Instala dependências silenciosamente se faltarem
 if ! command -v jq &> /dev/null; then apt-get install jq -y > /dev/null 2>&1; fi
 if ! command -v bc &> /dev/null; then apt-get install bc -y > /dev/null 2>&1; fi
+if ! command -v uuidgen &> /dev/null; then apt-get install uuid-runtime -y > /dev/null 2>&1; fi
 
 # --- CORES ---
 TITLE_BAR='\033[1;47;34m'
@@ -67,81 +68,69 @@ func_xray_cert() {
     chmod 777 "$SSL_DIR"; chmod 777 "$KEY_FILE"; chmod 644 "$CRT_FILE"
 }
 
-# --- MÓDULO: SUSPENDER USUÁRIO ---
+# --- MÓDULOS EXTERNOS ---
 func_module_block() {
-    # Baixa o módulo do GitHub
     curl -s -L -o /tmp/block_user.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/block_user.sh"
     chmod +x /tmp/block_user.sh
     bash /tmp/block_user.sh
-    rm -f /tmp/block_user.sh # Limpa depois de usar
+    rm -f /tmp/block_user.sh
 }
 
-# --- MÓDULO: DESBLOQUEAR USUÁRIO ---
 func_module_unblock() {
-    # Baixa o módulo do GitHub
     curl -s -L -o /tmp/unblock_user.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/unblock_user.sh"
     chmod +x /tmp/unblock_user.sh
     bash /tmp/unblock_user.sh
-    rm -f /tmp/unblock_user.sh # Limpa depois de usar
+    rm -f /tmp/unblock_user.sh
 }
 
-# --- FUNÇÃO DE BACKUP DO SISTEMA (OPCIONAL + AUTO-LIMPEZA) ---
+# --- FUNÇÃO DE BACKUP DO SISTEMA (SEGURO E OTIMIZADO) ---
 func_backup_system() {
     clear
     header_blue "SISTEMA DE BACKUP"
     echo "Isso irá salvar:"
     echo " • Banco de Dados de Usuários (users.db)"
     echo " • Configurações do Xray (config.json)"
-    echo " • Certificados e Chaves (na pasta padrão)"
+    echo " • Certificados e Chaves"
     echo ""
     
-    # --- MENU DE DECISÃO ---
-    echo -e "${TXT_CYAN}[1] CONFIRMAR E CRIAR BACKUP${RESET}"
-    echo -e "${TXT_CYAN}[0] VOLTAR AO MENU PRINCIPAL${RESET}"
+    echo -e "${TXT_CYAN}[1] CRIAR NOVO BACKUP (Substitui o anterior)${RESET}"
+    echo -e "${TXT_CYAN}[0] VOLTAR${RESET}"
     echo ""
-    read -rp "Escolha uma opção: " bkp_opt
+    read -rp "Opção: " bkp_opt
 
-    # Se não for 1, sai da função e volta pro menu
-    if [[ "$bkp_opt" != "1" ]]; then
-        return
-    fi
-    # -----------------------
+    if [[ "$bkp_opt" != "1" ]]; then return; fi
 
     local backup_dir="/root/backups"
     local date_now=$(date +%Y%m%d_%H%M%S)
     local backup_file="${backup_dir}/backup_dragoncore_${date_now}.tar.gz"
+    local filename=$(basename "$backup_file")
     
     mkdir -p "$backup_dir"
 
-    # --- LIMPEZA DE BACKUPS ANTIGOS ---
-    # Verifica se já existem arquivos .tar.gz e os remove para manter apenas o atual
-    if ls "$backup_dir"/*.tar.gz 1> /dev/null 2>&1; then
-        echo ""
-        echo "🧹 Removendo backups antigos para economizar espaço..."
-        rm -f "$backup_dir"/*.tar.gz
-    fi
-
+    echo ""
     echo "📦 Criando novo arquivo de backup..."
     
-    # Verifica se os arquivos existem antes de tentar salvar
+    # Verifica se os arquivos cruciais existem
     if [ ! -f "/opt/XrayTools/users.db" ] && [ ! -d "/usr/local/etc/xray" ]; then
         echo -e "${TXT_RED}❌ Erro: Arquivos do sistema não encontrados!${RESET}"
         read -rp "Pressione ENTER..."
         return
     fi
 
-    # Cria o arquivo compactado (tar.gz) preservando caminhos absolutos
+    # 1. Cria o backup NOVO primeiro (tentativa segura)
     tar -czPf "$backup_file" /opt/XrayTools /usr/local/etc/xray > /dev/null 2>&1
 
+    # 2. Verifica se criou com sucesso antes de apagar os antigos
     if [ -f "$backup_file" ]; then
         echo ""
-        echo -e "${TXT_GREEN}✅ BACKUP CRIADO COM SUCESSO!${RESET}"
-        echo -e "📂 Local: ${TXT_CYAN}$backup_file${RESET}"
-        echo ""
-        echo "Este é agora o único backup salvo no sistema."
-        echo "Baixe-o para o seu computador para garantir a segurança."
+        echo "🧹 Limpando backups antigos..."
+        # Remove todos os .tar.gz nesta pasta que NÃO sejam o arquivo que acabamos de criar
+        find "$backup_dir" -name "*.tar.gz" -type f ! -name "$filename" -delete
+
+        echo -e "${TXT_GREEN}✅ BACKUP CRIADO E ANTIGOS REMOVIDOS!${RESET}"
+        echo -e "📂 Arquivo atual: ${TXT_CYAN}$filename${RESET}"
     else
-        echo -e "${TXT_RED}❌ Falha ao criar arquivo de backup.${RESET}"
+        echo -e "${TXT_RED}❌ Falha ao criar backup. O anterior foi mantido (se existir).${RESET}"
     fi
     echo "========================================="
     read -rp "Pressione ENTER para voltar..."
@@ -154,78 +143,75 @@ func_restore_system() {
     
     local backup_dir="/root/backups"
 
-    # 1. VERIFICAÇÃO INICIAL: Pasta existe? Tem arquivos?
-    # O comando 'ls' verifica se existe pelo menos um .tar.gz
-    if [ ! -d "$backup_dir" ] || ! ls "$backup_dir"/*.tar.gz 1> /dev/null 2>&1; then
-        echo -e "${TXT_YELLOW}⚠️  AVISO:${RESET}"
-        echo "Não existe nenhum arquivo de backup na pasta ${TXT_CYAN}/root/backups/${RESET}"
+    # --- VERIFICAÇÃO SE EXISTE ARQUIVO ---
+    # Verifica se a pasta existe E se tem pelo menos um arquivo .tar.gz dentro
+    if [ ! -d "$backup_dir" ] || [ -z "$(ls -A "$backup_dir"/*.tar.gz 2>/dev/null)" ]; then
+        echo -e "${TXT_YELLOW}⚠️  AVISO IMPORTANTE:${RESET}"
+        echo "Não existe nenhum arquivo de backup na pasta:"
+        echo -e "${TXT_CYAN}/root/backups/${RESET}"
         echo ""
-        echo "Para restaurar, você precisa primeiro:"
-        echo "1. Criar um backup (Opção 9), OU"
-        echo "2. Enviar um arquivo .tar.gz para esta pasta via FileZilla."
+        echo "O cliente nunca realizou um backup ou o arquivo foi excluído."
         echo ""
-        read -rp "Pressione ENTER para voltar ao Menu Principal..."
+        read -rp "Pressione ENTER para retornar ao menu principal..."
         return
     fi
 
-    # Se chegou aqui, é porque TEM backup. Mostra o aviso de perigo.
+    # Se chegou aqui, existe backup.
     echo -e "${TXT_YELLOW}⚠️  ATENÇÃO:${RESET} Isso irá substituir o banco de dados"
     echo "e as configurações atuais pelos dados do backup."
     echo ""
-    echo "📂 Backups encontrados na pasta /root/backups:"
-    echo ""
 
-    # Busca arquivos .tar.gz
+    # Lista arquivos
     shopt -s nullglob
     local backups=("$backup_dir"/*.tar.gz)
     shopt -u nullglob
+    local total_backups=${#backups[@]}
 
-    # Lista os arquivos numerados
-    local i=1
-    for bkp in "${backups[@]}"; do
-        filename=$(basename "$bkp")
-        echo -e "${TXT_CYAN}[$i]${RESET} $filename"
-        ((i++))
-    done
+    local selected_file=""
 
-    echo ""
-    echo -e "${TXT_CYAN}[0]${RESET} Cancelar e Voltar"
-    echo ""
+    # --- LÓGICA INTELIGENTE ---
+    if [ "$total_backups" -eq 1 ]; then
+        # Se só tem 1 arquivo (cenário ideal), seleciona direto
+        selected_file="${backups[0]}"
+        echo -e "Backup encontrado: ${TXT_CYAN}$(basename "$selected_file")${RESET}"
+        echo ""
+        read -rp "Deseja restaurar este backup agora? [s/n]: " confirm_auto
+        if [[ "$confirm_auto" != "s" ]]; then return; fi
 
-    # Seleção do usuário
-    read -rp "Digite o número do arquivo para restaurar: " choice
-
-    # Validações
-    if [ "$choice" == "0" ] || [ -z "$choice" ]; then return; fi
-    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then echo -e "${TXT_RED}❌ Opção inválida!${RESET}"; sleep 2; return; fi
-
-    local index=$((choice - 1))
-    if [ -z "${backups[$index]}" ]; then echo -e "${TXT_RED}❌ Arquivo inválido!${RESET}"; sleep 2; return; fi
-
-    local selected_file="${backups[$index]}"
-
-    echo ""
-    echo -e "Você selecionou: ${TXT_YELLOW}$(basename "$selected_file")${RESET}"
-    echo "Isto irá reiniciar o Xray e o Bot Telegram."
-    read -rp "Tem certeza absoluta? [s/n]: " confirm
-
-    if [[ "$confirm" != "s" ]]; then return; fi
+    else
+        # Se tiver mais de 1 (caso o usuário tenha colocado manualmente), mostra lista
+        echo "📂 Backups encontrados:"
+        local i=1
+        for bkp in "${backups[@]}"; do
+            echo -e "${TXT_CYAN}[$i]${RESET} $(basename "$bkp")"
+            ((i++))
+        done
+        echo ""
+        echo -e "${TXT_CYAN}[0]${RESET} Cancelar"
+        echo ""
+        read -rp "Escolha o número do arquivo: " choice
+        
+        if [ "$choice" == "0" ] || [ -z "$choice" ]; then return; fi
+        if ! [[ "$choice" =~ ^[0-9]+$ ]]; then echo -e "${TXT_RED}❌ Opção inválida!${RESET}"; sleep 2; return; fi
+        
+        local index=$((choice - 1))
+        selected_file="${backups[$index]}"
+        
+        if [ -z "$selected_file" ]; then echo -e "${TXT_RED}❌ Arquivo inválido!${RESET}"; sleep 2; return; fi
+    fi
 
     # Executa a restauração
     echo ""
-    echo "1. Parando serviços..."
+    echo "⏳ Restaurando..."
     systemctl stop xray
     systemctl stop botxray
 
-    echo "2. Restaurando arquivos..."
+    # Extrai sobrescrevendo arquivos na raiz /
     tar -xzPf "$selected_file" -C /
 
     if [ $? -eq 0 ]; then
-        echo "3. Reiniciando serviços..."
         systemctl restart xray
         systemctl restart botxray
-        
-        echo ""
         echo -e "${TXT_GREEN}✅ RESTAURAÇÃO CONCLUÍDA!${RESET}"
         echo "Seus usuários e configurações foram recuperados."
     else
@@ -251,11 +237,9 @@ func_install_bot() {
     echo ""
     echo -e "${TXT_YELLOW}Instalando Python e Dependências...${RESET}"
     
-    # Atualiza e instala Python 3 e PIP
     apt-get update
-    apt-get install python3 python3-pip 
+    apt-get install python3 python3-pip -y
     
-    # Remove restrição de pip em sistemas Debian 12+/Ubuntu 23+ (EXTERNALLY-MANAGED)
     rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
     
     echo "Instalando biblioteca python-telegram-bot..."
@@ -277,7 +261,6 @@ func_install_bot() {
     echo "Baixando código do bot do GitHub..."
     rm -f /opt/XrayTools/botxray.py
     
-    # [LINK ATUALIZADO PARA SEU REPOSITÓRIO]
     curl -s -L -o /opt/XrayTools/botxray.py "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/botxray.py"
     
     if [ ! -f "/opt/XrayTools/botxray.py" ]; then
@@ -286,11 +269,9 @@ func_install_bot() {
         return
     fi
 
-    # Injeta o Token e o ID dentro do arquivo Python
     sed -i "s/SEU_TOKEN_AQUI/$bot_token/g" /opt/XrayTools/botxray.py
     sed -i "s/123456789/$admin_id/g" /opt/XrayTools/botxray.py
 
-    # Criação do Serviço Systemd (Para rodar em segundo plano e iniciar com o sistema)
     echo "Criando serviço do sistema..."
     cat <<EOF > /etc/systemd/system/botxray.service
 [Unit]
@@ -321,7 +302,7 @@ EOF
     read -rp "Pressione ENTER para voltar..."
 }
 
-# --- GERAÇÃO DE CONFIG, RESUMO E LINK UNIVERSAL ---
+# --- GERAÇÃO DE CONFIG E LINK ---
 func_generate_config() {
     local port="$1"
     local network="$2"
@@ -367,7 +348,6 @@ func_generate_config() {
         fi
     fi
 
-    # [FIX] ADICIONADO "stats": {}
     jq -n --argjson stream "$stream_settings" --arg port "$port" --arg api "$api_port" --argjson pol "$policy" \
       '{log: {loglevel: "warning"}, stats: {}, api: {services: ["HandlerService", "LoggerService", "StatsService"], tag: "api"}, policy: $pol, inbounds: [{tag: "api", port: ($api | tonumber), protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, listen: "127.0.0.1"}, {tag: "inbound-dragoncore", port: ($port | tonumber), protocol: "vless", settings: {clients: [], decryption: "none", fallbacks: []}, streamSettings: $stream}], outbounds: [{protocol: "freedom", tag: "direct"}, {protocol: "blackhole", tag: "blocked"}], routing: {domainStrategy: "AsIs", rules: [{type: "field", inboundTag: ["api"], outboundTag: "api"}]}}' > "$CONFIG_PATH"
 
@@ -389,11 +369,9 @@ func_generate_config() {
         journalctl -u xray -n 5 --no-pager
     fi
 
-    # Tratamento visual do status TLS
     local tls_msg="${TXT_RED}DESATIVADO (Porta Padrão)${RESET}"
     if [ "$use_tls" == "true" ]; then tls_msg="${TXT_GREEN}ATIVADO (TLS/SSL)${RESET}"; fi
 
-    # [NOVO] PAINEL DE RESUMO DAS CONFIGURAÇÕES
     echo ""
     echo "========================================="
     echo -e " PROTOCOLO:      ${TXT_CYAN}${network^^}${RESET}"
@@ -404,7 +382,6 @@ func_generate_config() {
     echo "========================================="
     echo ""
 
-    # Gera UUID válido para o template
     local universal_uuid=$(uuidgen)
     local link=""
     local sec_param="none"
@@ -450,7 +427,6 @@ func_add_user_logic() {
     echo "$nick|$uuid|$expiry" >> "$USER_DB"
     systemctl restart xray > /dev/null 2>&1
     
-    # --- OUTPUT SIMPLIFICADO (SEM LINK) ---
     clear
     echo -e "${TXT_GREEN}✅ Usuário criado com sucesso!${RESET}"
     echo "-----------------------------------------"
@@ -504,15 +480,20 @@ func_page_remove_user() {
 
 func_page_list_users() {
     header_blue "LISTAR USUÁRIOS"
+    # Ajustei o alinhamento para caber o UUID (36 chars)
     printf "%-15s | %-37s | %s\n" "USUÁRIO" "UUID" "VENCIMENTO"
-    echo "------------------------------------------------------------------"
+    echo "-----------------------------------------------------------------------"
+    
     if [ -f "$USER_DB" ]; then
         while IFS='|' read -r nick uuid expiry; do
-            if [ -n "$nick" ]; then printf "%-15s | %-37s | %s\n" "$nick" "$uuid" "$expiry"; fi
+            if [ -n "$nick" ]; then 
+                printf "%-15s | %-37s | %s\n" "$nick" "$uuid" "$expiry"
+            fi
         done < "$USER_DB"
     else
         echo "Nenhum usuário registrado."
     fi
+    echo "-----------------------------------------------------------------------"
     echo ""; read -rp "Pressione ENTER para voltar..."
 }
 
@@ -546,7 +527,7 @@ func_page_uninstall() {
     echo " • O Bot do Telegram e o Banco de Dados (users.db)"
     echo " • Todos os usuários criados"
     echo " • Serviços do sistema (Systemd) e Logs"
-    echo " • Todos os arquivos de Backup (/root/backups)" # <--- AVISO NOVO
+    echo " • Todos os arquivos de Backup (/root/backups)"
     echo ""
     read -rp "Tem certeza que deseja continuar? [s/n]: " confirm
     
@@ -560,19 +541,17 @@ func_page_uninstall() {
     systemctl disable botxray > /dev/null 2>&1
 
     echo "2. Removendo arquivos do sistema..."
-    # Remove serviços do Systemd
     rm -f /etc/systemd/system/xray.service
     rm -f /etc/systemd/system/xray@.service
     rm -f /etc/systemd/system/botxray.service
     systemctl daemon-reload
 
-    # Remove binários, pastas do Xray e Backups
     rm -rf /usr/local/bin/xray
     rm -rf /usr/local/share/xray
     rm -rf /usr/local/etc/xray
     rm -rf /var/log/xray
     rm -rf /opt/XrayTools
-    rm -rf /root/backups  # <--- COMANDO NOVO (LIMPEZA TOTAL)
+    rm -rf /root/backups 
 
     echo "3. Limpando agendamentos (Cron)..."
     crontab -l | grep -v "menuxray" | grep -v "limiter" | crontab -
@@ -616,7 +595,6 @@ func_wizard_install() {
     local domain_val=""
     if [ "$use_tls" == "true" ]; then
         echo -e "${TXT_CYAN}MODO SUPREMO ATIVADO!${RESET}"
-        # [ALTERAÇÃO AQUI] Texto do exemplo mudado
         read -rp "Domínio (Ex: seudominio.azion.app): " domain_val
         func_xray_cert "$domain_val" 
     else
@@ -681,7 +659,7 @@ func_call_limiter() {
 # --- MENU PRINCIPAL ---
 menu_display() {
     clear
-    echo -e "${TITLE_BAR}        DRAGONCORE XRAY MANAGER        ${RESET}"
+    echo -e "${TITLE_BAR}         DRAGONCORE XRAY MANAGER         ${RESET}"
     echo ""
     local status_txt="${TXT_RED}DESATIVADO${RESET}"
     local proto_info="${TXT_RED}---${RESET}"
