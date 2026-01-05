@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Estados da Conversa
 (SELECTING_ACTION, GET_USERNAME_CREATE, GET_EXPIRY_DAYS_CREATE, GET_USER_TO_DELETE, GET_USER_TO_BLOCK, GET_USER_TO_UNBLOCK) = range(6)
 
-# --- FUNÇÕES DE SISTEMA (COMPATIBILIDADE V7.3) ---
+# --- FUNÇÕES DE SISTEMA ---
 
 def restart_xray():
     subprocess.run(["systemctl", "restart", XRAY_SERVICE], check=False)
@@ -42,7 +42,6 @@ def save_config(data):
         json.dump(data, f, indent=2)
 
 def core_create_user(nick, days):
-    # Verifica duplicidade no DB
     if os.path.exists(USER_DB):
         with open(USER_DB, 'r') as f:
             if f"{nick}|" in f.read(): return False, "❌ Usuário já existe!"
@@ -56,15 +55,12 @@ def core_create_user(nick, days):
     if not data: return False, "❌ Erro ao ler config.json"
 
     inbounds = data.get('inbounds', [])
-    # Procura inbound-dragoncore
     target = next((i for i in inbounds if i.get('tag') == 'inbound-dragoncore'), None)
     
     if target:
-        # Adiciona ao JSON
         target['settings']['clients'].append({"id": user_uuid, "email": nick, "level": 0})
         save_config(data)
         
-        # Adiciona ao Banco de Dados (Backup Seguro)
         with open(USER_DB, 'a') as f:
             f.write(f"{nick}|{user_uuid}|{expiry_date}\n")
         
@@ -76,19 +72,16 @@ def core_delete_user(nick):
     data = load_config()
     found = False
     
-    # 1. Remove do JSON (Remove normal ou LOCKED)
     if data:
         inbounds = data.get('inbounds', [])
         for inbound in inbounds:
             if inbound.get('tag') == 'inbound-dragoncore':
                 clients = inbound['settings']['clients']
-                # Filtra removendo o nick ou LOCKED_nick
                 new_clients = [c for c in clients if c.get('email') != nick and c.get('email') != f"LOCKED_{nick}"]
                 if len(clients) != len(new_clients): found = True
                 inbound['settings']['clients'] = new_clients
         save_config(data)
     
-    # 2. Remove do Banco de Dados
     if os.path.exists(USER_DB):
         with open(USER_DB, 'r') as f: lines = f.readlines()
         with open(USER_DB, 'w') as f:
@@ -99,7 +92,6 @@ def core_delete_user(nick):
     return "✅ Usuário removido do sistema."
 
 def core_block_user(nick):
-    # LÓGICA V7.3: SCRAMBLE (Não toca no DB, altera JSON)
     data = load_config()
     if not data: return "❌ Erro config."
 
@@ -111,23 +103,19 @@ def core_block_user(nick):
                 if client.get('email') == f"LOCKED_{nick}":
                     return "⚠️ Usuário já está bloqueado."
                 if client.get('email') == nick:
-                    # Aplica Bloqueio: Muda nome e UUID
                     client['email'] = f"LOCKED_{nick}"
-                    client['id'] = str(uuid.uuid4()) # UUID Falso
+                    client['id'] = str(uuid.uuid4())
                     found = True
                     break
     
     if found:
         save_config(data)
         restart_xray()
-        return f"⛔ Usuário `{nick}` foi SUSPENSO (Scramble)."
+        return f"⛔ Usuário `{nick}` foi SUSPENSO."
     else:
         return "❌ Usuário não encontrado no Config."
 
 def core_unblock_user(nick):
-    # LÓGICA V7.3: RESTORE (Pega UUID do DB, restaura JSON)
-    
-    # 1. Busca UUID Original no DB
     real_uuid = None
     if os.path.exists(USER_DB):
         with open(USER_DB, 'r') as f:
@@ -139,7 +127,6 @@ def core_unblock_user(nick):
     
     if not real_uuid: return "❌ Erro: UUID original não encontrado no Backup (DB)."
 
-    # 2. Restaura no JSON
     data = load_config()
     found = False
     inbounds = data.get('inbounds', [])
@@ -148,7 +135,7 @@ def core_unblock_user(nick):
             for client in inbound['settings']['clients']:
                 if client.get('email') == f"LOCKED_{nick}":
                     client['email'] = nick
-                    client['id'] = real_uuid # Restaura UUID Real
+                    client['id'] = real_uuid
                     found = True
                     break
     
@@ -159,10 +146,10 @@ def core_unblock_user(nick):
     else:
         return "❌ Usuário não estava bloqueado no sistema."
 
-def core_list_users():
-    if not os.path.exists(USER_DB): return "Nenhum usuário."
+def core_list_users_text():
+    # Esta função gera o conteúdo TEXTO PURO para o arquivo .txt
+    if not os.path.exists(USER_DB): return "Nenhum usuário cadastrado."
     
-    # Carrega config para checar status (quem está LOCKED)
     data = load_config()
     locked_users = []
     if data:
@@ -174,7 +161,12 @@ def core_list_users():
                 if email.startswith("LOCKED_"):
                     locked_users.append(email.replace("LOCKED_", ""))
 
-    msg = "📋 *LISTA DE USUÁRIOS*\n\n"
+    # Cabeçalho do arquivo TXT
+    msg = "LISTA DE USUARIOS - DRAGONCORE\n"
+    msg += "=================================================================================\n"
+    msg += "NOME            | VENCIMENTO  | UUID                                 | STATUS\n"
+    msg += "=================================================================================\n"
+
     with open(USER_DB, 'r') as f:
         for line in f:
             parts = line.strip().split('|')
@@ -183,13 +175,14 @@ def core_list_users():
                 uuid_real = parts[1]
                 expiry = parts[2]
                 
-                # Definição do ícone de status
                 status = "✅"
                 if nick in locked_users:
                     status = "⛔️"
                 
-                # Formato: Nome | Vencimento | UUID | Icone
-                msg += f"`{nick}` | {expiry} | `{uuid_real}` | {status}\n"
+                # Formatação alinhada para TXT (sem markdown)
+                # %-15s significa: reservar 15 espaços e alinhar à esquerda
+                msg += f"{nick:<15} | {expiry:<11} | {uuid_real:<36} | {status}\n"
+    
     return msg
 
 # --- FUNÇÕES DO TELEGRAM ---
@@ -204,7 +197,7 @@ def build_menu():
          InlineKeyboardButton("🗑️ REMOVER", callback_data='delete_start')],
         [InlineKeyboardButton("⛔ SUSPENDER", callback_data='block_start'),
          InlineKeyboardButton("✅ REATIVAR", callback_data='unblock_start')],
-        [InlineKeyboardButton("📋 LISTAR", callback_data='list_users'),
+        [InlineKeyboardButton("📋 LISTAR (TXT)", callback_data='list_users'),
          InlineKeyboardButton("📥 BACKUP", callback_data='backup_start')],
         [InlineKeyboardButton("❌ SAIR", callback_data='cancel')]
     ]
@@ -227,15 +220,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Nome para ⛔ SUSPENDER:", parse_mode='Markdown'); return GET_USER_TO_BLOCK
     elif query.data == 'unblock_start':
         await query.edit_message_text("Nome para ✅ REATIVAR:", parse_mode='Markdown'); return GET_USER_TO_UNBLOCK
+    
     elif query.data == 'list_users':
-        report = core_list_users()
-        # Se a lista for muito grande, envia arquivo txt, senão manda mensagem
-        if len(report) > 4000:
-            f = io.BytesIO(report.encode()); f.name = "users.txt"
-            await context.bot.send_document(chat_id=ADMIN_ID, document=f)
-        else:
-            await query.edit_message_text(report, parse_mode='Markdown', reply_markup=build_menu())
+        # Gera o relatório em texto puro
+        report = core_list_users_text()
+        
+        # Cria o arquivo em memória
+        f = io.BytesIO(report.encode('utf-8'))
+        f.name = "usuarios.txt"
+        
+        # Envia como documento
+        await query.message.reply_document(
+            document=f, 
+            caption="📂 *Lista de Usuários Gerada*", 
+            parse_mode='Markdown',
+            reply_markup=build_menu()
+        )
         return SELECTING_ACTION
+        
     elif query.data == 'backup_start':
         await query.message.reply_text("📦 Gerando Backup...")
         date_str = datetime.now().strftime('%Y%m%d_%H%M')
@@ -254,19 +256,13 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode
     text = update.message.text.strip().split()[0] # Pega só a primeira palavra
 
     if mode == 'create_nick':
-        # --- VALIDAÇÃO RIGOROSA (5 a 9 caracteres, alfanumérico) ---
+        # Validação 5-9 chars e alfanumérico
         if not re.match(r'^[a-zA-Z0-9]{5,9}$', text):
             await update.message.reply_text(
-                "❌ *Nome Inválido!*\n\n"
-                "Regras:\n"
-                "• Entre 5 e 9 caracteres\n"
-                "• Apenas letras e números\n"
-                "• Sem símbolos ou espaços\n\n"
-                "Tente outro nome:",
+                "❌ *Nome Inválido!*\n\nRegras:\n• Entre 5 e 9 caracteres\n• Apenas letras e números\n\nTente outro:",
                 parse_mode='Markdown'
             )
-            return GET_USERNAME_CREATE # Mantém no mesmo estado para tentar de novo
-        # -----------------------------------------------------------
+            return GET_USERNAME_CREATE
 
         context.user_data['nick'] = text
         await update.message.reply_text(f"Validade (dias) para `{text}`:", parse_mode='Markdown'); return GET_EXPIRY_DAYS_CREATE
