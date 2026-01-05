@@ -173,19 +173,22 @@ def core_list_users():
                 if email.startswith("LOCKED_"):
                     locked_users.append(email.replace("LOCKED_", ""))
 
-    msg = "📋 *LISTA DE USUÁRIOS*\n_(Nome | Vencimento | Status)_\n\n"
+    msg = "📋 *LISTA DE USUÁRIOS*\n\n"
     with open(USER_DB, 'r') as f:
         for line in f:
             parts = line.strip().split('|')
             if len(parts) >= 3:
                 nick = parts[0]
+                uuid_real = parts[1]
                 expiry = parts[2]
                 
-                status = "✅ Ativo"
+                # Definição do ícone de status
+                status = "✅"
                 if nick in locked_users:
-                    status = "⛔ SUSPENSO"
+                    status = "⛔️"
                 
-                msg += f"`{nick}` | {expiry} | {status}\n"
+                # Formato: Nome | Vencimento | UUID | Icone
+                msg += f"`{nick}` | {expiry} | `{uuid_real}` | {status}\n"
     return msg
 
 # --- FUNÇÕES DO TELEGRAM ---
@@ -225,6 +228,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Nome para ✅ REATIVAR:", parse_mode='Markdown'); return GET_USER_TO_UNBLOCK
     elif query.data == 'list_users':
         report = core_list_users()
+        # Se a lista for muito grande, envia arquivo txt, senão manda mensagem
         if len(report) > 4000:
             f = io.BytesIO(report.encode()); f.name = "users.txt"
             await context.bot.send_document(chat_id=ADMIN_ID, document=f)
