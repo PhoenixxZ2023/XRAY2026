@@ -4,6 +4,7 @@ import uuid
 import logging
 import subprocess
 import asyncio
+import re
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -251,9 +252,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode):
     text = update.message.text.strip().split()[0] # Pega só a primeira palavra
+
     if mode == 'create_nick':
+        # --- VALIDAÇÃO RIGOROSA (5 a 9 caracteres, alfanumérico) ---
+        if not re.match(r'^[a-zA-Z0-9]{5,9}$', text):
+            await update.message.reply_text(
+                "❌ *Nome Inválido!*\n\n"
+                "Regras:\n"
+                "• Entre 5 e 9 caracteres\n"
+                "• Apenas letras e números\n"
+                "• Sem símbolos ou espaços\n\n"
+                "Tente outro nome:",
+                parse_mode='Markdown'
+            )
+            return GET_USERNAME_CREATE # Mantém no mesmo estado para tentar de novo
+        # -----------------------------------------------------------
+
         context.user_data['nick'] = text
         await update.message.reply_text(f"Validade (dias) para `{text}`:", parse_mode='Markdown'); return GET_EXPIRY_DAYS_CREATE
+
     elif mode == 'create_days':
         if not text.isdigit(): await update.message.reply_text("Só números."); return GET_EXPIRY_DAYS_CREATE
         res, msg = core_create_user(context.user_data['nick'], text)
