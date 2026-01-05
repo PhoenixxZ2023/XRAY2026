@@ -1,5 +1,5 @@
 #!/bin/bash
-# menuxray.sh - Versão V7.1 (Link Universal + Stats Fix + Auto-Repair)
+# menuxray.sh - Versão V7.2 (Backup/Restore Auto-Detect)
 
 # --- CONFIGURAÇÃO ---
 XRAY_BIN="/usr/local/bin/xray"
@@ -35,6 +35,12 @@ RESET='\033[0m'
 header_blue() {
     clear
     echo -e "${TITLE_BAR}   $1   ${RESET}"
+    echo ""
+}
+
+header_red() {
+    clear
+    echo -e "\033[1;41;37m   $1   ${RESET}"
     echo ""
 }
 
@@ -111,6 +117,7 @@ func_backup_system() {
     if [ -f "$backup_file" ]; then
         echo ""
         echo -e "${TXT_GREEN}✅ BACKUP CRIADO COM SUCESSO!${RESET}"
+        # Correção visual do echo colorido (-e)
         echo -e "📂 Local: ${TXT_CYAN}$backup_file${RESET}"
         echo ""
         echo "Baixe este arquivo para seu PC para garantir a segurança."
@@ -131,31 +138,36 @@ func_restore_system() {
 
     local backup_dir="/root/backups"
 
-    # 1. Verifica se a pasta existe
+    # Se a pasta não existe, cria ela para o usuário poder jogar o arquivo lá
     if [ ! -d "$backup_dir" ]; then
-        echo -e "${TXT_RED}❌ Pasta de backups não encontrada ($backup_dir).${RESET}"
-        echo "Você precisa criar um backup primeiro (Opção 9)."
-        read -rp "Pressione ENTER..."
+        mkdir -p "$backup_dir"
+        echo -e "${TXT_CYAN}ℹ️  Pasta '/root/backups' criada.${RESET}"
+        echo "Coloque seu arquivo .tar.gz dentro dela e tente novamente."
+        echo ""
+        read -rp "Pressione ENTER para voltar..."
         return
     fi
 
-    # 2. Busca arquivos .tar.gz automaticamente
-    # (shopt nullglob evita erros se a pasta estiver vazia)
+    # Busca arquivos .tar.gz automaticamente
     shopt -s nullglob
     local backups=("$backup_dir"/*.tar.gz)
     shopt -u nullglob
 
-    # 3. Se não achar nada, avisa e sai
+    # Se não achar nada
     if [ ${#backups[@]} -eq 0 ]; then
-        echo -e "${TXT_RED}❌ Nenhum arquivo de backup encontrado em $backup_dir.${RESET}"
-        read -rp "Pressione ENTER..."
+        echo -e "${TXT_RED}❌ Nenhum arquivo encontrado em ${TXT_YELLOW}$backup_dir${RESET}"
+        echo ""
+        echo "👉 DICA: Envie seu arquivo de backup para essa pasta usando"
+        echo "   o FileZilla ou MobaXterm e tente novamente."
+        echo ""
+        read -rp "Pressione ENTER para voltar..."
         return
     fi
 
-    echo "📂 Backups encontrados:"
+    echo "📂 Backups encontrados na pasta /root/backups:"
     echo ""
 
-    # 4. Lista os arquivos numerados
+    # Lista os arquivos numerados
     local i=1
     for bkp in "${backups[@]}"; do
         filename=$(basename "$bkp")
@@ -167,41 +179,32 @@ func_restore_system() {
     echo -e "${TXT_CYAN}[0]${RESET} Cancelar"
     echo ""
 
-    # 5. Seleção do usuário
+    # Seleção do usuário
     read -rp "Digite o número do arquivo para restaurar: " choice
 
     # Validações
     if [ "$choice" == "0" ] || [ -z "$choice" ]; then return; fi
-    
-    # Verifica se digitou número
-    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
-        echo -e "${TXT_RED}❌ Opção inválida!${RESET}"; sleep 2; return
-    fi
+    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then echo -e "${TXT_RED}❌ Opção inválida!${RESET}"; sleep 2; return; fi
 
-    # Ajusta o índice (array começa em 0, menu em 1)
     local index=$((choice - 1))
-
-    # Verifica se o número escolhido existe na lista
-    if [ -z "${backups[$index]}" ]; then
-        echo -e "${TXT_RED}❌ Arquivo inválido!${RESET}"; sleep 2; return
-    fi
+    if [ -z "${backups[$index]}" ]; then echo -e "${TXT_RED}❌ Arquivo inválido!${RESET}"; sleep 2; return; fi
 
     local selected_file="${backups[$index]}"
 
     echo ""
     echo -e "Você selecionou: ${TXT_YELLOW}$(basename "$selected_file")${RESET}"
+    echo "Isto irá reiniciar o Xray e o Bot Telegram."
     read -rp "Tem certeza absoluta? [s/n]: " confirm
 
     if [[ "$confirm" != "s" ]]; then return; fi
 
-    # 6. Executa a restauração
+    # Executa a restauração
     echo ""
     echo "1. Parando serviços..."
     systemctl stop xray
     systemctl stop botxray
 
     echo "2. Restaurando arquivos..."
-    # Extrai sobrescrevendo os arquivos originais
     tar -xzPf "$selected_file" -C /
 
     if [ $? -eq 0 ]; then
@@ -214,7 +217,6 @@ func_restore_system() {
         echo "Seus usuários e configurações foram recuperados."
     else
         echo -e "${TXT_RED}❌ Falha crítica ao extrair arquivos.${RESET}"
-        # Tenta religar serviços para não deixar off
         systemctl start xray
         systemctl start botxray
     fi
@@ -429,8 +431,8 @@ func_add_user_logic() {
     local expiry=$(date -d "+$expiry_days days" +%F)
 
     jq --arg uuid "$uuid" --arg nick_arg "$nick" \
-       '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) += [{"id": $uuid, "email": $nick_arg, "level": 0}]' \
-       "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
+        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) += [{"id": $uuid, "email": $nick_arg, "level": 0}]' \
+        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
     echo "$nick|$uuid|$expiry" >> "$USER_DB"
     systemctl restart xray > /dev/null 2>&1
@@ -451,8 +453,8 @@ func_remove_user_logic() {
     local identifier="$1"
     if [ ! -f "$CONFIG_PATH" ]; then echo "❌ Erro config."; return; fi
     jq --arg id "$identifier" \
-       '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id and .email != $id))' \
-       "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
+        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id and .email != $id))' \
+        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
     if [ -f "$USER_DB" ]; then sed -i "/$identifier/d" "$USER_DB"; fi
     systemctl restart xray > /dev/null 2>&1
@@ -704,7 +706,7 @@ menu_display() {
     echo -e "${TXT_CYAN}[6]. DESINSTALAR (COMPLETO)${RESET}"
     echo -e "${TXT_GREEN}[7]. LIMITAR CONSUMO GIGAS (MÓDULO GITHUB)${RESET}"
     echo -e "${TXT_CYAN}[8]. ATIVAR BOT TELEGRAM${RESET}"
-    echo -e "${TXT_CYAN}[9]. CRIAR BACKUP${RESET}"   
+    echo -e "${TXT_CYAN}[9]. CRIAR BACKUP${RESET}"    
     echo -e "${TXT_CYAN}[10]. RESTAURAR BACKUP${RESET}" 
     echo -e "${TXT_CYAN}[11]. BLOQUEAR USUÁRIO${RESET}"
     echo -e "${TXT_CYAN}[12]. DESBLOQUEAR USUÁRIO${RESET}"
