@@ -1,5 +1,5 @@
 #!/bin/bash
-# installxray.sh - Instalador Premium v6.9 (Visual + Automação)
+# installxray.sh - Instalador Premium V7.3 (Visual + Automação)
 # Repositório: https://github.com/PhoenixxZ2023/XrayX-TLS
 
 # --- CORES ---
@@ -39,7 +39,7 @@ fun_bar() {
 # --- INÍCIO ---
 clear
 echo -e "${AZUL}==================================================${RESET}"
-echo -e "${AMARELO}🚀 DRAGONCORE XRAY MANAGER - INSTALADOR v6.9${RESET}"
+echo -e "${AMARELO}🚀 DRAGONCORE XRAY MANAGER - INSTALADOR V7.3${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
 
 if [ "$EUID" -ne 0 ]; then 
@@ -51,37 +51,39 @@ fi
 (apt-get update -y) > /dev/null 2>&1 &
 fun_bar $! "Atualizando Sistema"
 
-# 2. Instalando Dependências
-PACKAGES="curl jq bc cron git"
+# 2. Instalando Dependências (ADICIONADO uuid-runtime)
+PACKAGES="curl jq bc cron git uuid-runtime"
 (apt-get install -y $PACKAGES) > /dev/null 2>&1 &
 fun_bar $! "Instalando Dependências"
 
 # 3. Baixando e Instalando Scripts
 (
-    # Menu Principal
-    rm -f /bin/menuxray.sh
-    curl -s -L -o /bin/menuxray.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/menuxray.sh"
-    chmod +x /bin/menuxray.sh
+    # Remove versões antigas em pastas variadas para evitar conflito
+    rm -f /bin/menuxray.sh /usr/local/bin/menuxray.sh
+    rm -f /bin/limiterxray.sh /usr/local/bin/limiterxray.sh
+    rm -f /bin/xray-menu /usr/bin/xray-menu
+
+    # Menu Principal (Instala em /usr/local/bin - Padrão correto)
+    curl -s -L -o /usr/local/bin/menuxray.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/menuxray.sh"
+    chmod +x /usr/local/bin/menuxray.sh
 
     # Limitador (Módulo)
-    rm -f /bin/limiterxray.sh
-    curl -s -L -o /bin/limiterxray.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/limiterxray.sh"
-    chmod +x /bin/limiterxray.sh
+    curl -s -L -o /usr/local/bin/limiterxray.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/limiterxray.sh"
+    chmod +x /usr/local/bin/limiterxray.sh
 
-    # Atalho 'xray-menu' (O comando que você pediu)
-    rm -f /bin/xray-menu
-    cat <<EOF > /bin/xray-menu
-#!/bin/bash
-bash /bin/menuxray.sh
-EOF
-    chmod +x /bin/xray-menu
+    # Atalho Global 'xray-menu'
+    ln -s /usr/local/bin/menuxray.sh /usr/bin/xray-menu
+    chmod +x /usr/bin/xray-menu
 ) > /dev/null 2>&1 &
-fun_bar $! "Baixando Scripts"
+fun_bar $! "Baixando Scripts (V7.3)"
 
 # 4. Configurando Automação (Robô Cron - 2 MINUTOS)
 (
+    # Remove cron antigo (inclusive se estiver apontando para /bin)
     crontab -l 2>/dev/null | grep -v "limiterxray.sh" | crontab -
-    (crontab -l 2>/dev/null; echo "*/2 * * * * bash /bin/limiterxray.sh --cron") | crontab -
+    
+    # Adiciona novo cron apontando para o caminho correto
+    (crontab -l 2>/dev/null; echo "*/2 * * * * bash /usr/local/bin/limiterxray.sh --cron") | crontab -
 ) > /dev/null 2>&1 &
 fun_bar $! "Ativando Robô (2 min)"
 
@@ -95,4 +97,4 @@ echo ""
 sleep 2
 
 # Executa o menu automaticamente
-bash /bin/xray-menu
+xray-menu
