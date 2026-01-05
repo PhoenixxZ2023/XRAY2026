@@ -61,6 +61,24 @@ func_xray_cert() {
     chmod 777 "$SSL_DIR"; chmod 777 "$KEY_FILE"; chmod 644 "$CRT_FILE"
 }
 
+# --- MÓDULO: SUSPENDER USUÁRIO ---
+func_module_block() {
+    # Baixa o módulo do GitHub
+    curl -s -L -o /tmp/block_user.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/block_user.sh"
+    chmod +x /tmp/block_user.sh
+    bash /tmp/block_user.sh
+    rm -f /tmp/block_user.sh # Limpa depois de usar
+}
+
+# --- MÓDULO: DESBLOQUEAR USUÁRIO ---
+func_module_unblock() {
+    # Baixa o módulo do GitHub
+    curl -s -L -o /tmp/unblock_user.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/unblock_user.sh"
+    chmod +x /tmp/unblock_user.sh
+    bash /tmp/unblock_user.sh
+    rm -f /tmp/unblock_user.sh # Limpa depois de usar
+}
+
 # --- FUNÇÃO DE BACKUP DO SISTEMA ---
 func_backup_system() {
     clear
@@ -635,6 +653,8 @@ menu_display() {
     echo -e "${TXT_CYAN}[8]. ATIVAR BOT TELEGRAM${RESET}"
     echo -e "${TXT_CYAN}[9]. CRIAR BACKUP${RESET}"   
     echo -e "${TXT_CYAN}[10]. RESTAURAR BACKUP${RESET}" 
+    echo -e "${TXT_CYAN}[11]. BLOQUEAR USUÁRIO${RESET}"
+    echo -e "${TXT_CYAN}[12]. DESBLOQUEAR USUÁRIO${RESET}"
     echo -e "${TXT_CYAN}[0]. SAIR${RESET}"
     echo "-----------------------------------------"
     read -rp "Opção: " choice
@@ -653,7 +673,9 @@ if [ -z "$1" ]; then
             7) func_call_limiter ;;
             8) func_install_bot ;;
             9) func_backup_system ;;    
-            10) func_restore_system ;;  
+            10) func_restore_system ;;
+            11) func_module_block ;;
+            12) func_module_unblock ;;
             0) exit 0 ;;
         esac
     done
