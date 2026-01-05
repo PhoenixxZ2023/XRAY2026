@@ -111,7 +111,7 @@ func_backup_system() {
     if [ -f "$backup_file" ]; then
         echo ""
         echo -e "${TXT_GREEN}✅ BACKUP CRIADO COM SUCESSO!${RESET}"
-        echo "📂 Local: ${TXT_CYAN}$backup_file${RESET}"
+        echo -e "📂 Local: ${TXT_CYAN}$backup_file${RESET}"
         echo ""
         echo "Baixe este arquivo para seu PC para garantir a segurança."
     else
