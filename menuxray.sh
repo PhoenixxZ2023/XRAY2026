@@ -85,7 +85,7 @@ func_module_unblock() {
     rm -f /tmp/unblock_user.sh # Limpa depois de usar
 }
 
-# --- FUNÇÃO DE BACKUP DO SISTEMA ---
+# --- FUNÇÃO DE BACKUP DO SISTEMA (MANTÉM APENAS O ÚLTIMO) ---
 func_backup_system() {
     clear
     header_blue "SISTEMA DE BACKUP"
@@ -101,7 +101,15 @@ func_backup_system() {
     
     mkdir -p "$backup_dir"
 
-    echo "📦 Criando arquivo de backup..."
+    # --- LIMPEZA DE BACKUPS ANTIGOS ---
+    # Verifica se já existem arquivos .tar.gz e os remove
+    if ls "$backup_dir"/*.tar.gz 1> /dev/null 2>&1; then
+        echo "🧹 Removendo backups antigos para economizar espaço..."
+        rm -f "$backup_dir"/*.tar.gz
+    fi
+    # ----------------------------------
+
+    echo "📦 Criando novo arquivo de backup..."
     
     # Verifica se os arquivos existem antes de tentar salvar
     if [ ! -f "/opt/XrayTools/users.db" ] && [ ! -d "/usr/local/etc/xray" ]; then
@@ -110,17 +118,16 @@ func_backup_system() {
         return
     fi
 
-    # Cria o arquivo compactado (tar.gz) preservando os caminhos absolutos
-    # Salva: Pasta do Bot/DB e Pasta de Config/Certificados do Xray
+    # Cria o arquivo compactado (tar.gz)
     tar -czPf "$backup_file" /opt/XrayTools /usr/local/etc/xray > /dev/null 2>&1
 
     if [ -f "$backup_file" ]; then
         echo ""
         echo -e "${TXT_GREEN}✅ BACKUP CRIADO COM SUCESSO!${RESET}"
-        # Correção visual do echo colorido (-e)
         echo -e "📂 Local: ${TXT_CYAN}$backup_file${RESET}"
         echo ""
-        echo "Baixe este arquivo para seu PC para garantir a segurança."
+        echo "Este é agora o único backup salvo no sistema."
+        echo "Baixe-o para o seu computador para garantir a segurança."
     else
         echo -e "${TXT_RED}❌ Falha ao criar arquivo de backup.${RESET}"
     fi
@@ -128,44 +135,38 @@ func_backup_system() {
     read -rp "Pressione ENTER para voltar..."
 }
 
-# --- FUNÇÃO DE RESTAURAÇÃO DO SISTEMA (AUTO-DETECT) ---
+# --- FUNÇÃO DE RESTAURAÇÃO DO SISTEMA (INTELIGENTE) ---
 func_restore_system() {
     clear
     header_red "RESTAURAÇÃO DE SISTEMA"
+    
+    local backup_dir="/root/backups"
+
+    # 1. VERIFICAÇÃO INICIAL: Pasta existe? Tem arquivos?
+    # O comando 'ls' verifica se existe pelo menos um .tar.gz
+    if [ ! -d "$backup_dir" ] || ! ls "$backup_dir"/*.tar.gz 1> /dev/null 2>&1; then
+        echo -e "${TXT_YELLOW}⚠️  AVISO:${RESET}"
+        echo "Não existe nenhum arquivo de backup na pasta ${TXT_CYAN}/root/backups/${RESET}"
+        echo ""
+        echo "Para restaurar, você precisa primeiro:"
+        echo "1. Criar um backup (Opção 9), OU"
+        echo "2. Enviar um arquivo .tar.gz para esta pasta via FileZilla."
+        echo ""
+        read -rp "Pressione ENTER para voltar ao Menu Principal..."
+        return
+    fi
+
+    # Se chegou aqui, é porque TEM backup. Mostra o aviso de perigo.
     echo -e "${TXT_YELLOW}⚠️  ATENÇÃO:${RESET} Isso irá substituir o banco de dados"
     echo "e as configurações atuais pelos dados do backup."
     echo ""
+    echo "📂 Backups encontrados na pasta /root/backups:"
+    echo ""
 
-    local backup_dir="/root/backups"
-
-    # Se a pasta não existe, cria ela para o usuário poder jogar o arquivo lá
-    if [ ! -d "$backup_dir" ]; then
-        mkdir -p "$backup_dir"
-        echo -e "${TXT_CYAN}ℹ️  Pasta '/root/backups' criada.${RESET}"
-        echo "Coloque seu arquivo .tar.gz dentro dela e tente novamente."
-        echo ""
-        read -rp "Pressione ENTER para voltar..."
-        return
-    fi
-
-    # Busca arquivos .tar.gz automaticamente
+    # Busca arquivos .tar.gz
     shopt -s nullglob
     local backups=("$backup_dir"/*.tar.gz)
     shopt -u nullglob
-
-    # Se não achar nada
-    if [ ${#backups[@]} -eq 0 ]; then
-        echo -e "${TXT_RED}❌ Nenhum arquivo encontrado em ${TXT_YELLOW}$backup_dir${RESET}"
-        echo ""
-        echo "👉 DICA: Envie seu arquivo de backup para essa pasta usando"
-        echo "   o FileZilla ou MobaXterm e tente novamente."
-        echo ""
-        read -rp "Pressione ENTER para voltar..."
-        return
-    fi
-
-    echo "📂 Backups encontrados na pasta /root/backups:"
-    echo ""
 
     # Lista os arquivos numerados
     local i=1
@@ -176,7 +177,7 @@ func_restore_system() {
     done
 
     echo ""
-    echo -e "${TXT_CYAN}[0]${RESET} Cancelar"
+    echo -e "${TXT_CYAN}[0]${RESET} Cancelar e Voltar"
     echo ""
 
     # Seleção do usuário
