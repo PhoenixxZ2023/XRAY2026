@@ -85,7 +85,7 @@ func_module_unblock() {
     rm -f /tmp/unblock_user.sh # Limpa depois de usar
 }
 
-# --- FUNÇÃO DE BACKUP DO SISTEMA (MANTÉM APENAS O ÚLTIMO) ---
+# --- FUNÇÃO DE BACKUP DO SISTEMA (OPCIONAL + AUTO-LIMPEZA) ---
 func_backup_system() {
     clear
     header_blue "SISTEMA DE BACKUP"
@@ -95,6 +95,18 @@ func_backup_system() {
     echo " • Certificados e Chaves (na pasta padrão)"
     echo ""
     
+    # --- MENU DE DECISÃO ---
+    echo -e "${TXT_CYAN}[1] CONFIRMAR E CRIAR BACKUP${RESET}"
+    echo -e "${TXT_CYAN}[0] VOLTAR AO MENU PRINCIPAL${RESET}"
+    echo ""
+    read -rp "Escolha uma opção: " bkp_opt
+
+    # Se não for 1, sai da função e volta pro menu
+    if [[ "$bkp_opt" != "1" ]]; then
+        return
+    fi
+    # -----------------------
+
     local backup_dir="/root/backups"
     local date_now=$(date +%Y%m%d_%H%M%S)
     local backup_file="${backup_dir}/backup_dragoncore_${date_now}.tar.gz"
@@ -102,12 +114,12 @@ func_backup_system() {
     mkdir -p "$backup_dir"
 
     # --- LIMPEZA DE BACKUPS ANTIGOS ---
-    # Verifica se já existem arquivos .tar.gz e os remove
+    # Verifica se já existem arquivos .tar.gz e os remove para manter apenas o atual
     if ls "$backup_dir"/*.tar.gz 1> /dev/null 2>&1; then
+        echo ""
         echo "🧹 Removendo backups antigos para economizar espaço..."
         rm -f "$backup_dir"/*.tar.gz
     fi
-    # ----------------------------------
 
     echo "📦 Criando novo arquivo de backup..."
     
@@ -118,7 +130,7 @@ func_backup_system() {
         return
     fi
 
-    # Cria o arquivo compactado (tar.gz)
+    # Cria o arquivo compactado (tar.gz) preservando caminhos absolutos
     tar -czPf "$backup_file" /opt/XrayTools /usr/local/etc/xray > /dev/null 2>&1
 
     if [ -f "$backup_file" ]; then
