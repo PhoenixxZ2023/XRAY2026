@@ -546,6 +546,7 @@ func_page_uninstall() {
     echo " • O Bot do Telegram e o Banco de Dados (users.db)"
     echo " • Todos os usuários criados"
     echo " • Serviços do sistema (Systemd) e Logs"
+    echo " • Todos os arquivos de Backup (/root/backups)" # <--- AVISO NOVO
     echo ""
     read -rp "Tem certeza que deseja continuar? [s/n]: " confirm
     
@@ -555,8 +556,6 @@ func_page_uninstall() {
     echo "1. Parando serviços..."
     systemctl stop xray > /dev/null 2>&1
     systemctl disable xray > /dev/null 2>&1
-    
-    # [NOVO] Para o serviço do Bot
     systemctl stop botxray > /dev/null 2>&1
     systemctl disable botxray > /dev/null 2>&1
 
@@ -564,35 +563,30 @@ func_page_uninstall() {
     # Remove serviços do Systemd
     rm -f /etc/systemd/system/xray.service
     rm -f /etc/systemd/system/xray@.service
-    rm -f /etc/systemd/system/botxray.service  # [NOVO]
+    rm -f /etc/systemd/system/botxray.service
     systemctl daemon-reload
 
-    # Remove binários e pastas do Xray
+    # Remove binários, pastas do Xray e Backups
     rm -rf /usr/local/bin/xray
     rm -rf /usr/local/share/xray
     rm -rf /usr/local/etc/xray
     rm -rf /var/log/xray
-    
-    # [NOVO] Remove a pasta do DragonCore (Bot e DB)
     rm -rf /opt/XrayTools
+    rm -rf /root/backups  # <--- COMANDO NOVO (LIMPEZA TOTAL)
 
     echo "3. Limpando agendamentos (Cron)..."
-    # [NOVO] Remove qualquer linha do crontab que tenha "menuxray" ou scripts relacionados
     crontab -l | grep -v "menuxray" | grep -v "limiter" | crontab -
     
     echo "4. Removendo atalhos..."
     rm -f /usr/bin/xray-menu
-    rm -f /usr/local/bin/uuidgen  # (Opcional, se o script baixou um binário isolado)
+    rm -f /usr/local/bin/uuidgen
 
     echo ""
     echo "========================================="
     echo -e "${TXT_GREEN}✅ DESINSTALAÇÃO CONCLUÍDA!${RESET}"
-    echo "O sistema está limpo. O script será encerrado."
+    echo "O sistema está completamente limpo."
     echo "========================================="
     echo ""
-    
-    # Auto-destruição do script atual (Opcional - remove o próprio arquivo do menu)
-    # rm -- "$0"
     
     exit 0
 }
