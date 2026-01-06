@@ -1,5 +1,6 @@
 #!/bin/bash
 # menuxray.sh - Versao V7.3 Visual Premium (Vertical)
+# CORRIGIDO: Dependencia lsof e Definição de Função Menu
 
 # --- CONFIGURACAO ---
 XRAY_BIN="/usr/local/bin/xray"
@@ -23,6 +24,7 @@ touch "$USER_DB"
 if ! command -v jq &> /dev/null; then apt-get install jq -y > /dev/null 2>&1; fi
 if ! command -v bc &> /dev/null; then apt-get install bc -y > /dev/null 2>&1; fi
 if ! command -v uuidgen &> /dev/null; then apt-get install uuid-runtime -y > /dev/null 2>&1; fi
+if ! command -v lsof &> /dev/null; then apt-get install lsof -y > /dev/null 2>&1; fi # <--- ADICIONADO LSOF
 
 # --- CORES ---
 TITLE_BAR='\033[1;47;34m'
@@ -524,36 +526,6 @@ func_wizard_install() {
 }
 
 # --- MENU ---
-func_add_user_logic() {
-    local nick="$1"
-    local expiry_days="$2"
-    if [ -z "$nick" ]; then return 1; fi
-    if [ ! -f "$CONFIG_PATH" ]; then echo "❌ Xray não configurado."; return 1; fi
-
-    local uuid=$(uuidgen)
-    local expiry=$(date -d "+$expiry_days days" +%F)
-
-    # Adiciona no JSON do Xray
-    jq --arg uuid "$uuid" --arg nick_arg "$nick" \
-        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) += [{"id": $uuid, "email": $nick_arg, "level": 0}]' \
-        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
-
-    # Salva no Banco de Dados
-    echo "$nick|$uuid|$expiry" >> "$USER_DB"
-    systemctl restart xray > /dev/null 2>&1
-    
-    # --- EXIBIÇÃO FINAL BONITA ---
-    clear
-    echo -e "${TXT_GREEN}✅ USUÁRIO CRIADO COM SUCESSO!${RESET}"
-    echo "-----------------------------------------"
-    echo -e "👤 Usuário: ${TXT_CYAN}$nick${RESET}"
-    echo -e "🔑 UUID:    ${TXT_YELLOW}$uuid${RESET}"
-    echo -e "📅 Expira:  ${TXT_CYAN}$expiry${RESET}"
-    echo "-----------------------------------------"
-    echo "Copie o UUID acima e cole no seu Link Universal."
-    echo "-----------------------------------------"
-}
-
 func_page_create_user() {
     header_blue "CRIAR NOVO USUÁRIO"
     echo "⚠️  Regras para o nome:"
@@ -764,8 +736,9 @@ func_call_limiter() {
     bash "$LIMITER_LOCAL"
 }
 
-# --- MENU PRINCIPAL ---
-clear
+# --- MENU PRINCIPAL (CORRIGIDO: NOME DA FUNÇÃO ADICIONADO) ---
+menu_display() {
+    clear
     echo -e "${TITLE_BAR}      DRAGONCORE XRAY MANAGER      ${RESET}"
     echo ""
     
