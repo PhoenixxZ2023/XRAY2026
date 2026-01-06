@@ -1,7 +1,7 @@
 #!/bin/bash
-# menuxray.sh - Versão V7.3 (Backup Seguro + UUID na Lista)
+# menuxray.sh - Versao V7.3 Visual Premium (Vertical)
 
-# --- CONFIGURAÇÃO ---
+# --- CONFIGURACAO ---
 XRAY_BIN="/usr/local/bin/xray"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
 SSL_DIR="/opt/DragonCoreSSL"
@@ -11,15 +11,15 @@ XRAY_DIR="/opt/XrayTools"
 ACTIVE_DOMAIN_FILE="$XRAY_DIR/active_domain"
 USER_DB="$XRAY_DIR/users.db"
 
-# CONFIGURAÇÃO DO LIMITADOR EXTERNO
-LIMITER_LOCAL="/bin/limiterxray.sh"
-LIMITER_URL="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/limiterxray.sh"
+# CONFIGURACAO DO LIMITADOR EXTERNO
+LIMITER_LOCAL="/usr/local/bin/limiterxray.sh"
+LIMITER_URL="https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/limiterxray.sh"
 
 mkdir -p "$XRAY_DIR"
 mkdir -p "$SSL_DIR"
 touch "$USER_DB"
 
-# Instala dependências silenciosamente se faltarem
+# Instala dependencias
 if ! command -v jq &> /dev/null; then apt-get install jq -y > /dev/null 2>&1; fi
 if ! command -v bc &> /dev/null; then apt-get install bc -y > /dev/null 2>&1; fi
 if ! command -v uuidgen &> /dev/null; then apt-get install uuid-runtime -y > /dev/null 2>&1; fi
@@ -46,11 +46,41 @@ header_red() {
 }
 
 # --- SISTEMA ---
+
+# Instalacao Robusta do Xray
 func_install_official_core() {
     header_blue "INSTALANDO XRAY CORE"
-    echo "Aguarde..."
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
-    if [ $? -eq 0 ]; then echo -e "${TXT_GREEN}✅ Sucesso!${RESET}"; sleep 1; else echo -e "${TXT_RED}❌ Falha.${RESET}"; sleep 2; fi
+    
+    echo "1. Instalando dependencias (unzip)..."
+    apt-get update -y > /dev/null 2>&1
+    apt-get install unzip curl socat -y > /dev/null 2>&1
+
+    echo "2. Baixando instalador oficial..."
+    rm -f /tmp/install_xray.sh
+    
+    curl -L -o /tmp/install_xray.sh "https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+    
+    if [ ! -f "/tmp/install_xray.sh" ]; then
+        echo -e "${TXT_RED}Erro: Nao foi possivel baixar o instalador.${RESET}"
+        sleep 3
+        return
+    fi
+
+    echo "3. Executando instalacao..."
+    chmod +x /tmp/install_xray.sh
+    bash /tmp/install_xray.sh install
+    
+    local ret_val=$?
+    rm -f /tmp/install_xray.sh
+
+    echo "------------------------------------------------"
+    if [ $ret_val -eq 0 ] && [ -f "/usr/local/bin/xray" ]; then
+        echo -e "${TXT_GREEN}SUCESSO! Xray Core Instalado.${RESET}"
+        sleep 2
+    else
+        echo -e "${TXT_RED}FALHA NA INSTALACAO.${RESET}"
+        sleep 5
+    fi
 }
 
 func_check_cert() {
@@ -65,38 +95,36 @@ func_xray_cert() {
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
         -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$domain" \
         -keyout "$KEY_FILE" -out "$CRT_FILE" > /dev/null 2>&1
-    chmod 777 "$SSL_DIR"; chmod 777 "$KEY_FILE"; chmod 644 "$CRT_FILE"
+    chmod 777 "$SSL_DIR"; chmod 777 "$KEY_FILE"; chmod 777 "$CRT_FILE"
 }
 
-# --- MÓDULOS EXTERNOS ---
+# --- MODULOS EXTERNOS ---
 func_module_block() {
-    curl -s -L -o /tmp/block_user.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/block_user.sh"
+    curl -s -L -o /tmp/block_user.sh "https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/block_user.sh"
     chmod +x /tmp/block_user.sh
     bash /tmp/block_user.sh
     rm -f /tmp/block_user.sh
 }
 
 func_module_unblock() {
-    curl -s -L -o /tmp/unblock_user.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/unblock_user.sh"
+    curl -s -L -o /tmp/unblock_user.sh "https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/unblock_user.sh"
     chmod +x /tmp/unblock_user.sh
     bash /tmp/unblock_user.sh
     rm -f /tmp/unblock_user.sh
 }
 
-# --- FUNÇÃO DE BACKUP DO SISTEMA (SEGURO E OTIMIZADO) ---
+# --- BACKUP ---
 func_backup_system() {
     clear
     header_blue "SISTEMA DE BACKUP"
-    echo "Isso irá salvar:"
-    echo " • Banco de Dados de Usuários (users.db)"
-    echo " • Configurações do Xray (config.json)"
-    echo " • Certificados e Chaves"
+    echo "Isso ira salvar:"
+    echo " - Banco de Dados"
+    echo " - Configs e Certificados"
     echo ""
-    
-    echo -e "${TXT_CYAN}[1] CRIAR NOVO BACKUP (Substitui o anterior)${RESET}"
+    echo -e "${TXT_CYAN}[1] CRIAR NOVO BACKUP${RESET}"
     echo -e "${TXT_CYAN}[0] VOLTAR${RESET}"
     echo ""
-    read -rp "Opção: " bkp_opt
+    read -rp "Opcao: " bkp_opt
 
     if [[ "$bkp_opt" != "1" ]]; then return; fi
 
@@ -106,178 +134,115 @@ func_backup_system() {
     local filename=$(basename "$backup_file")
     
     mkdir -p "$backup_dir"
-
     echo ""
-    echo "📦 Criando novo arquivo de backup..."
+    echo "Criando backup..."
     
-    # Verifica se os arquivos cruciais existem
     if [ ! -f "/opt/XrayTools/users.db" ] && [ ! -d "/usr/local/etc/xray" ]; then
-        echo -e "${TXT_RED}❌ Erro: Arquivos do sistema não encontrados!${RESET}"
-        read -rp "Pressione ENTER..."
+        echo -e "${TXT_RED}Erro: Arquivos nao encontrados!${RESET}"
+        read -rp "Enter..."
         return
     fi
 
-    # 1. Cria o backup NOVO primeiro (tentativa segura)
     tar -czPf "$backup_file" /opt/XrayTools /usr/local/etc/xray > /dev/null 2>&1
 
-    # 2. Verifica se criou com sucesso antes de apagar os antigos
     if [ -f "$backup_file" ]; then
         echo ""
-        echo "🧹 Limpando backups antigos..."
-        # Remove todos os .tar.gz nesta pasta que NÃO sejam o arquivo que acabamos de criar
+        echo "Limpando backups antigos..."
         find "$backup_dir" -name "*.tar.gz" -type f ! -name "$filename" -delete
-
-        echo -e "${TXT_GREEN}✅ BACKUP CRIADO E ANTIGOS REMOVIDOS!${RESET}"
-        echo -e "📂 Arquivo atual: ${TXT_CYAN}$filename${RESET}"
+        echo -e "${TXT_GREEN}BACKUP CRIADO!${RESET}"
+        echo -e "Arquivo: ${TXT_CYAN}$filename${RESET}"
     else
-        echo -e "${TXT_RED}❌ Falha ao criar backup. O anterior foi mantido (se existir).${RESET}"
+        echo -e "${TXT_RED}Falha ao criar backup.${RESET}"
     fi
     echo "========================================="
-    read -rp "Pressione ENTER para voltar..."
+    read -rp "Enter para voltar..."
 }
 
-# --- FUNÇÃO DE RESTAURAÇÃO DO SISTEMA (INTELIGENTE) ---
+# --- RESTAURACAO ---
 func_restore_system() {
     clear
-    header_red "RESTAURAÇÃO DE SISTEMA"
-    
+    header_red "RESTAURACAO DE SISTEMA"
     local backup_dir="/root/backups"
 
-    # --- VERIFICAÇÃO SE EXISTE ARQUIVO ---
-    # Verifica se a pasta existe E se tem pelo menos um arquivo .tar.gz dentro
     if [ ! -d "$backup_dir" ] || [ -z "$(ls -A "$backup_dir"/*.tar.gz 2>/dev/null)" ]; then
-        echo -e "${TXT_YELLOW}⚠️  AVISO IMPORTANTE:${RESET}"
-        echo "Não existe nenhum arquivo de backup na pasta:"
-        echo -e "${TXT_CYAN}/root/backups/${RESET}"
-        echo ""
-        echo "O cliente nunca realizou um backup ou o arquivo foi excluído."
-        echo ""
-        read -rp "Pressione ENTER para retornar ao menu principal..."
+        echo -e "${TXT_YELLOW}AVISO:${RESET} Nenhum backup encontrado."
+        read -rp "Enter para voltar..."
         return
     fi
 
-    # Se chegou aqui, existe backup.
-    echo -e "${TXT_YELLOW}⚠️  ATENÇÃO:${RESET} Isso irá substituir o banco de dados"
-    echo "e as configurações atuais pelos dados do backup."
+    echo -e "${TXT_YELLOW}ATENCAO:${RESET} Substituira dados atuais."
     echo ""
-
-    # Lista arquivos
     shopt -s nullglob
     local backups=("$backup_dir"/*.tar.gz)
     shopt -u nullglob
     local total_backups=${#backups[@]}
-
     local selected_file=""
 
-    # --- LÓGICA INTELIGENTE ---
     if [ "$total_backups" -eq 1 ]; then
-        # Se só tem 1 arquivo (cenário ideal), seleciona direto
         selected_file="${backups[0]}"
-        echo -e "Backup encontrado: ${TXT_CYAN}$(basename "$selected_file")${RESET}"
+        echo -e "Backup: ${TXT_CYAN}$(basename "$selected_file")${RESET}"
         echo ""
-        read -rp "Deseja restaurar este backup agora? [s/n]: " confirm_auto
+        read -rp "Restaurar agora? [s/n]: " confirm_auto
         if [[ "$confirm_auto" != "s" ]]; then return; fi
-
     else
-        # Se tiver mais de 1 (caso o usuário tenha colocado manualmente), mostra lista
-        echo "📂 Backups encontrados:"
+        echo "Backups encontrados:"
         local i=1
         for bkp in "${backups[@]}"; do
             echo -e "${TXT_CYAN}[$i]${RESET} $(basename "$bkp")"
             ((i++))
         done
         echo ""
-        echo -e "${TXT_CYAN}[0]${RESET} Cancelar"
-        echo ""
-        read -rp "Escolha o número do arquivo: " choice
-        
+        read -rp "Escolha o numero (0 cancela): " choice
         if [ "$choice" == "0" ] || [ -z "$choice" ]; then return; fi
-        if ! [[ "$choice" =~ ^[0-9]+$ ]]; then echo -e "${TXT_RED}❌ Opção inválida!${RESET}"; sleep 2; return; fi
-        
         local index=$((choice - 1))
         selected_file="${backups[$index]}"
-        
-        if [ -z "$selected_file" ]; then echo -e "${TXT_RED}❌ Arquivo inválido!${RESET}"; sleep 2; return; fi
     fi
 
-    # Executa a restauração
-    echo ""
-    echo "⏳ Restaurando..."
+    echo "Restaurando..."
     systemctl stop xray
     systemctl stop botxray
-
-    # Extrai sobrescrevendo arquivos na raiz /
     tar -xzPf "$selected_file" -C /
-
     if [ $? -eq 0 ]; then
         systemctl restart xray
         systemctl restart botxray
-        echo -e "${TXT_GREEN}✅ RESTAURAÇÃO CONCLUÍDA!${RESET}"
-        echo "Seus usuários e configurações foram recuperados."
+        echo -e "${TXT_GREEN}RESTAURACAO CONCLUIDA!${RESET}"
     else
-        echo -e "${TXT_RED}❌ Falha crítica ao extrair arquivos.${RESET}"
+        echo -e "${TXT_RED}Falha critica.${RESET}"
         systemctl start xray
-        systemctl start botxray
     fi
-    
-    echo "========================================="
-    read -rp "Pressione ENTER para voltar..."
+    read -rp "Enter para voltar..."
 }
 
-# --- INSTALAÇÃO DO BOT TELEGRAM ---
+# --- BOT TELEGRAM ---
 func_install_bot() {
-    header_blue "INSTALADOR DO BOT TELEGRAM"
-    
-    echo "Esta opção irá instalar o Python e configurar seu Bot."
-    echo "Tenha em mãos o TOKEN do BotFather e seu ID numérico."
+    header_blue "CONFIGURAR BOT TELEGRAM"
+    echo "Dependencias verificadas."
     echo ""
     read -rp "Deseja continuar? [s/n]: " continue_opt
     if [[ "$continue_opt" != "s" ]]; then return; fi
-
     echo ""
-    echo -e "${TXT_YELLOW}Instalando Python e Dependências...${RESET}"
-    
-    apt-get update
-    apt-get install python3 python3-pip -y
-    
-    rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
-    
-    echo "Instalando biblioteca python-telegram-bot..."
-    pip3 install python-telegram-bot  
-
-    echo -e "${TXT_GREEN}Dependências instaladas!${RESET}"
-    echo ""
-    
-    # Coleta de Dados
-    read -rp "Digite o TOKEN do Bot (BotFather): " bot_token
-    read -rp "Digite o SEU ID (Admin ID): " admin_id
+    read -rp "Token do BotFather: " bot_token
+    read -rp "Seu ID (Admin): " admin_id
 
     if [ -z "$bot_token" ] || [ -z "$admin_id" ]; then
-        echo -e "${TXT_RED}Dados inválidos!${RESET}"
-        sleep 2
-        return
+        echo -e "${TXT_RED}Dados invalidos!${RESET}"; sleep 2; return
     fi
 
-    echo "Baixando código do bot do GitHub..."
+    echo "Baixando bot..."
     rm -f /opt/XrayTools/botxray.py
-    
-    curl -s -L -o /opt/XrayTools/botxray.py "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/botxray.py"
+    curl -s -L -o /opt/XrayTools/botxray.py "https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/botxray.py"
     
     if [ ! -f "/opt/XrayTools/botxray.py" ]; then
-        echo -e "${TXT_RED}Erro ao baixar botxray.py! Verifique seu GitHub.${RESET}"
-        sleep 3
-        return
+        echo -e "${TXT_RED}Erro no download!${RESET}"; sleep 3; return
     fi
 
     sed -i "s/SEU_TOKEN_AQUI/$bot_token/g" /opt/XrayTools/botxray.py
     sed -i "s/123456789/$admin_id/g" /opt/XrayTools/botxray.py
 
-    echo "Criando serviço do sistema..."
     cat <<EOF > /etc/systemd/system/botxray.service
 [Unit]
 Description=DragonCore Telegram Bot
 After=network.target
-
 [Service]
 Type=simple
 User=root
@@ -285,7 +250,6 @@ WorkingDirectory=/opt/XrayTools
 ExecStart=/usr/bin/python3 /opt/XrayTools/botxray.py
 Restart=always
 RestartSec=10
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -293,16 +257,11 @@ EOF
     systemctl daemon-reload
     systemctl enable botxray
     systemctl restart botxray
-
-    echo ""
-    echo "========================================="
-    echo -e "${TXT_GREEN}✅ BOT ATIVADO COM SUCESSO!${RESET}"
-    echo "Vá no Telegram e mande /start para ele."
-    echo "========================================="
-    read -rp "Pressione ENTER para voltar..."
+    echo -e "${TXT_GREEN}BOT ATIVADO!${RESET}"
+    read -rp "Enter para voltar..."
 }
 
-# --- GERAÇÃO DE CONFIG E LINK ---
+# --- GERACAO DE CONFIG ---
 func_generate_config() {
     local port="$1"
     local network="$2"
@@ -312,14 +271,8 @@ func_generate_config() {
     
     mkdir -p "$(dirname "$CONFIG_PATH")"
     local stream_settings=""
-    
-    # Policy para STATS
-    local policy='{
-        "levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}},
-        "system": {"statsInboundUplink": true, "statsInboundDownlink": true}
-    }'
+    local policy='{"levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}}, "system": {"statsInboundUplink": true, "statsInboundDownlink": true}}'
 
-    # Configura o Stream (Protocolo)
     if [ "$network" == "xhttp" ]; then
         if [ "$use_tls" = "true" ]; then
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "xhttp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], alpn: ["h2", "http/1.1"]}, xhttpSettings: {path: "/", scMaxBufferedPosts: 30}}')
@@ -358,27 +311,26 @@ func_generate_config() {
     systemctl restart xray > /dev/null 2>&1
     sleep 2
     
-    # --- RESUMO E LINK ---
+    # --- RESULTADO FINAL ---
     clear
-    header_blue "INSTALAÇÃO CONCLUÍDA"
+    header_blue "INSTALACAO CONCLUIDA COM SUCESSO"
     
     if systemctl is-active --quiet xray; then
-        echo -e "${TXT_GREEN}✅ Xray Ativo e Configurado!${RESET}"
+        echo -e "STATUS: ${TXT_GREEN}ATIVO E RODANDO${RESET}"
     else
-        echo -e "${TXT_RED}❌ Falha ao iniciar.${RESET}"
+        echo -e "STATUS: ${TXT_RED}FALHA AO INICIAR${RESET}"
         journalctl -u xray -n 5 --no-pager
     fi
 
-    local tls_msg="${TXT_RED}DESATIVADO (Porta Padrão)${RESET}"
+    local tls_msg="${TXT_RED}DESATIVADO${RESET}"
     if [ "$use_tls" == "true" ]; then tls_msg="${TXT_GREEN}ATIVADO (TLS/SSL)${RESET}"; fi
 
     echo ""
     echo "========================================="
-    echo -e " PROTOCOLO:      ${TXT_CYAN}${network^^}${RESET}"
-    echo -e " DOMÍNIO (SNI):  ${TXT_CYAN}${domain}${RESET}"
-    echo -e " PORTA PÚBLICA:  ${TXT_CYAN}${port}${RESET}"
-    echo -e " PORTA INTERNA:  ${TXT_CYAN}${api_port}${RESET}"
-    echo -e " CRIPTOGRAFIA:   ${tls_msg}"
+    echo -e " ${TXT_YELLOW}PROTOCOLO:${RESET}       ${TXT_CYAN}${network^^}${RESET}"
+    echo -e " ${TXT_YELLOW}DOMINIO (SNI):${RESET}   ${TXT_CYAN}${domain}${RESET}"
+    echo -e " ${TXT_YELLOW}PORTA:${RESET}           ${TXT_CYAN}${port}${RESET}"
+    echo -e " ${TXT_YELLOW}CRIPTOGRAFIA:${RESET}    ${tls_msg}"
     echo "========================================="
     echo ""
 
@@ -403,14 +355,139 @@ func_generate_config() {
         link="vless://${universal_uuid}@${domain}:${port}?security=${sec_param}&encryption=none&type=tcp&sni=${domain}#VLESS_BASE"
     fi
 
-    echo -e "${TXT_YELLOW}⚠️  LINK VLESS BASE (TEMPLATE) ⚠️${RESET}"
-    echo "Copie e importe este link vless para o seu aplicativo vpn."
+    echo -e "${TXT_YELLOW}UUID UNIVERSAL:${RESET}"
+    echo -e "${TXT_CYAN}${universal_uuid}${RESET}"
     echo ""
+    echo -e "${TXT_YELLOW}LINK VLESS (TEMPLATE):${RESET}"
     echo -e "${TXT_BLUE}$link${RESET}"
+    echo ""
     echo "========================================="
-    read -rp "Pressione ENTER após salvar..."
+    echo "NOTA: Crie um usuario real na Opcao 1."
+    echo "========================================="
+    read -rp "Enter para finalizar..."
 }
 
+func_add_user_logic() {
+    local nick="$1"
+    local expiry_days="$2"
+    if [ -z "$nick" ]; then return 1; fi
+    if [ ! -f "$CONFIG_PATH" ]; then echo "Erro config."; return 1; fi
+    local uuid=$(uuidgen)
+    local expiry=$(date -d "+$expiry_days days" +%F)
+    jq --arg uuid "$uuid" --arg nick_arg "$nick" \
+        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) += [{"id": $uuid, "email": $nick_arg, "level": 0}]' \
+        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
+    echo "$nick|$uuid|$expiry" >> "$USER_DB"
+    systemctl restart xray > /dev/null 2>&1
+    clear
+    echo -e "${TXT_GREEN}Usuario criado!${RESET}"
+    echo "-----------------------------------------"
+    echo -e "User: ${TXT_CYAN}$nick${RESET}"
+    echo -e "UUID: ${TXT_YELLOW}$uuid${RESET}"
+    echo -e "Expira: $expiry"
+    echo "-----------------------------------------"
+}
+
+func_remove_user_logic() {
+    local identifier="$1"
+    if [ ! -f "$CONFIG_PATH" ]; then echo "Erro config."; return; fi
+    jq --arg id "$identifier" \
+        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id and .email != $id))' \
+        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
+    if [ -f "$USER_DB" ]; then sed -i "/$identifier/d" "$USER_DB"; fi
+    systemctl restart xray > /dev/null 2>&1
+    echo -e "${TXT_GREEN}Removido.${RESET}"; sleep 1
+}
+
+# --- ASSISTENTE DE INSTALACAO (WIZARD DETALHADO) ---
+func_wizard_install() {
+    clear
+    header_blue "PASSO 1: INSTALACAO DO NUCLEO"
+    echo -e "${TXT_YELLOW}DESEJA INSTALAR OU ATUALIZAR O XRAY CORE AGORA?${RESET}"
+    echo "Isso ira baixar a versao oficial mais recente."
+    echo ""
+    read -rp "Digite [s] para Sim ou [n] para Nao: " install_opt
+    if [[ "$install_opt" =~ ^[Ss]$ ]]; then func_install_official_core; fi
+
+    clear
+    header_blue "PASSO 2: CRIPTOGRAFIA E SEGURANCA"
+    echo -e "${TXT_YELLOW}DESEJA UTILIZAR CRIPTOGRAFIA TLS/SSL (HTTPS)?${RESET}"
+    echo "Recomendado para: SNI, CDN (Cloudflare/Azion)."
+    echo ""
+    echo " [1] SIM - (MODO SEGURO / SUPREMO)"
+    echo " [2] NAO - (MODO SIMPLES / HTTP)"
+    echo ""
+    read -rp "Escolha uma opcao [1-2]: " tls_opt
+    local use_tls="false"
+    if [ "$tls_opt" == "1" ]; then use_tls="true"; fi
+
+    clear
+    header_blue "PASSO 3: PORTAS DE CONEXAO"
+    echo -e "${TXT_YELLOW}DIGITE A PORTA INTERNA DO XRAY (API):${RESET}"
+    echo "Padrao: 1080 (Se tiver duvidas, aperte ENTER)"
+    read -rp "Porta Interna: " api_port
+    if [ -z "$api_port" ]; then api_port="1080"; fi
+    
+    echo ""
+    echo -e "${TXT_YELLOW}DIGITE A PORTA DE CONEXAO PUBLICA (LISTEN):${RESET}"
+    echo "Exemplos: 80 (Para sem TLS) ou 443 (Para com TLS)"
+    read -rp "Porta Publica: " pub_port
+    if [ -z "$pub_port" ]; then pub_port="80"; fi
+
+    clear
+    header_blue "PASSO 4: DOMINIO E SNI"
+    local domain_val=""
+    if [ "$use_tls" == "true" ]; then
+        echo -e "${TXT_GREEN}MODO SUPREMO ATIVADO!${RESET}"
+        echo -e "${TXT_YELLOW}DIGITE O SEU DOMINIO OU SUBDOMINIO:${RESET}"
+        echo "Exemplo: suacdn.azion.app ou vpn.site.com"
+        echo "AVISO: O dominio deve estar apontado para este IP!"
+        echo ""
+        read -rp "Dominio: " domain_val
+        func_xray_cert "$domain_val" 
+    else
+        echo "Modo sem TLS selecionado."
+        echo -e "${TXT_YELLOW}DIGITE O DOMINIO OU IP DA VPS:${RESET}"
+        read -rp "Endereco: " domain_val
+        if [ -z "$domain_val" ]; then domain_val=$(curl -s icanhazip.com); fi
+    fi
+    echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
+
+    clear
+    header_blue "PASSO 5: PROTOCOLO DE TRANSPORTE"
+    echo -e "${TXT_YELLOW}QUAL PROTOCOLO VOCE DESEJA UTILIZAR?${RESET}"
+    echo ""
+    echo " [1] WS      (WEBSOCKET - Compativel com tudo)"
+    echo " [2] GRPC    (GRPC - Baixa latencia)"
+    echo " [3] XHTTP   (HTTP/2 - Novo padrao)"
+    echo " [4] TCP     (TCP HTTP - Simples)"
+    echo " [5] VISION  (XTLS-VISION - Reality/Direct)"
+    echo " [0] CANCELAR"
+    echo ""
+    read -rp "Escolha uma opcao [1-5]: " prot_opt
+    
+    local selected_net=""
+    case "$prot_opt" in
+        1) selected_net="ws" ;;
+        2) selected_net="grpc" ;;
+        3) selected_net="xhttp" ;;
+        4) selected_net="tcp" ;;
+        5) 
+            selected_net="vision"
+            if [ "$use_tls" == "false" ]; then
+                echo ""
+                echo -e "${TXT_YELLOW}VISION EXIGE TLS! VAMOS CONFIGURAR:${RESET}"
+                read -rp "Digite um Dominio Fake (Ex: microsoft.com): " domain_val
+                func_xray_cert "$domain_val"; use_tls="true"; echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
+            fi ;;
+        0) return ;;
+        *) echo "Opcao Invalida."; sleep 2; return ;;
+    esac
+
+    func_generate_config "$pub_port" "$selected_net" "$domain_val" "$api_port" "$use_tls"
+}
+
+# --- MENU ---
 func_add_user_logic() {
     local nick="$1"
     local expiry_days="$2"
@@ -420,60 +497,49 @@ func_add_user_logic() {
     local uuid=$(uuidgen)
     local expiry=$(date -d "+$expiry_days days" +%F)
 
+    # Adiciona no JSON do Xray
     jq --arg uuid "$uuid" --arg nick_arg "$nick" \
         '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) += [{"id": $uuid, "email": $nick_arg, "level": 0}]' \
         "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
+    # Salva no Banco de Dados
     echo "$nick|$uuid|$expiry" >> "$USER_DB"
     systemctl restart xray > /dev/null 2>&1
     
+    # --- EXIBIÇÃO FINAL BONITA ---
     clear
-    echo -e "${TXT_GREEN}✅ Usuário criado com sucesso!${RESET}"
+    echo -e "${TXT_GREEN}✅ USUÁRIO CRIADO COM SUCESSO!${RESET}"
     echo "-----------------------------------------"
     echo -e "👤 Usuário: ${TXT_CYAN}$nick${RESET}"
     echo -e "🔑 UUID:    ${TXT_YELLOW}$uuid${RESET}"
-    echo -e "📅 Expira:  $expiry"
+    echo -e "📅 Expira:  ${TXT_CYAN}$expiry${RESET}"
     echo "-----------------------------------------"
     echo "Copie o UUID acima e cole no seu Link Universal."
     echo "-----------------------------------------"
 }
 
-func_remove_user_logic() {
-    local identifier="$1"
-    if [ ! -f "$CONFIG_PATH" ]; then echo "❌ Erro config."; return; fi
-    jq --arg id "$identifier" \
-        '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id and .email != $id))' \
-        "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
-
-    if [ -f "$USER_DB" ]; then sed -i "/$identifier/d" "$USER_DB"; fi
-    systemctl restart xray > /dev/null 2>&1
-    echo -e "${TXT_GREEN}✅ Usuário removido.${RESET}"
-    sleep 1
-}
-
-# --- PÁGINA: CRIAR USUÁRIO (COM VALIDAÇÃO 5-9 CARACTERES) ---
 func_page_create_user() {
-    header_blue "CRIAR USUÁRIO"
-    echo "⚠️  Regras para o nome do usuário:"
+    header_blue "CRIAR NOVO USUÁRIO"
+    echo "⚠️  Regras para o nome:"
     echo " • Mínimo 5 e Máximo 9 caracteres"
     echo " • Apenas letras e números (sem símbolos)"
     echo ""
     
-    read -rp "Nome do usuário (0 p/ voltar): " raw_nick
+    echo -e "${TXT_YELLOW}DIGITE O NOME DO USUÁRIO (0 p/ voltar):${RESET}"
+    read -rp "Nome: " raw_nick
+    
     if [ "$raw_nick" == "0" ] || [ -z "$raw_nick" ]; then return; fi
 
-    # --- VALIDAÇÃO RIGOROSA ---
-    # Verifica se contém apenas letras/números E se tem entre 5 e 9 chars
+    # Validação Rigorosa
     if ! [[ "$raw_nick" =~ ^[a-zA-Z0-9]{5,9}$ ]]; then
         echo ""
         echo -e "${TXT_RED}❌ ERRO: Formato inválido!${RESET}"
         echo "O usuário deve ter entre 5 e 9 caracteres."
-        echo "Use apenas letras e números (sem espaços ou símbolos)."
+        echo "Use apenas letras e números."
         echo ""
         read -rp "Pressione ENTER para tentar novamente..."
         return
     fi
-    # --------------------------
 
     if grep -q "$raw_nick" "$USER_DB"; then 
         echo -e "${TXT_RED}❌ Usuário já existe!${RESET}"
@@ -481,10 +547,11 @@ func_page_create_user() {
         return
     fi
     
-    read -rp "Dias de validade (Padrão 30): " days
+    echo ""
+    echo -e "${TXT_YELLOW}DIGITE OS DIAS DE VALIDADE (Padrão 30):${RESET}"
+    read -rp "Dias: " days
     [ -z "$days" ] && days=30
     
-    # Validação extra para dias (apenas números)
     if ! [[ "$days" =~ ^[0-9]+$ ]]; then days=30; fi
 
     func_add_user_logic "$raw_nick" "$days"
@@ -492,50 +559,106 @@ func_page_create_user() {
 }
 
 func_page_remove_user() {
-    header_blue "REMOVER USUÁRIO"
-    echo "Digite o Nome (nick) ou UUID para remover."
-    read -rp "Identificador: " id_input
+    header_blue "REMOVER USUARIO"
+    read -rp "Nome ou UUID: " id_input
     if [ -n "$id_input" ]; then func_remove_user_logic "$id_input"; fi
 }
 
 func_page_list_users() {
-    header_blue "LISTAR USUÁRIOS"
-    # Ajustei o alinhamento para caber o UUID (36 chars)
-    printf "%-15s | %-37s | %s\n" "USUÁRIO" "UUID" "VENCIMENTO"
+    header_blue "LISTA"
+    printf "%-15s | %-37s | %s\n" "USER" "UUID" "EXPIRA"
     echo "-----------------------------------------------------------------------"
-    
     if [ -f "$USER_DB" ]; then
         while IFS='|' read -r nick uuid expiry; do
-            if [ -n "$nick" ]; then 
-                printf "%-15s | %-37s | %s\n" "$nick" "$uuid" "$expiry"
-            fi
+            if [ -n "$nick" ]; then printf "%-15s | %-37s | %s\n" "$nick" "$uuid" "$expiry"; fi
         done < "$USER_DB"
-    else
-        echo "Nenhum usuário registrado."
-    fi
+    else echo "Vazio."; fi
     echo "-----------------------------------------------------------------------"
-    echo ""; read -rp "Pressione ENTER para voltar..."
+    echo ""; read -rp "Enter para voltar..."
 }
 
 func_page_purge_expired() {
     header_blue "LIMPEZA DE EXPIRADOS"
+    
     local today=$(date +%F)
     local count=0
-    if [ -f "$USER_DB" ]; then
-        touch "${USER_DB}.tmp"
-        while IFS='|' read -r nick uuid expiry; do
-            if [[ "$expiry" < "$today" ]]; then
-                echo "Removendo: $nick ($expiry)"
-                jq --arg id "$uuid" '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id))' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
-                ((count++))
-            else
-                echo "$nick|$uuid|$expiry" >> "${USER_DB}.tmp"
-            fi
-        done < "$USER_DB"
-        mv "${USER_DB}.tmp" "$USER_DB"
-        if [ $count -gt 0 ]; then systemctl restart xray > /dev/null 2>&1; echo "✅ $count usuários removidos."; else echo "✅ Nenhum usuário expirado."; fi
+    local found_expired=false
+
+    # --- 1. LISTAGEM (APENAS MOSTRA) ---
+    echo -e "${TXT_YELLOW}Verificando banco de dados...${RESET}"
+    echo ""
+    
+    if [ ! -f "$USER_DB" ]; then
+        echo "Banco de dados vazio."
+        read -rp "Pressione ENTER..."
+        return
     fi
-    echo ""; read -rp "Pressione ENTER para voltar..."
+
+    # Cabeçalho da Lista
+    printf "%-20s | %s\n" "USUÁRIO" "VENCIMENTO"
+    echo "-----------------------------------"
+
+    while IFS='|' read -r nick uuid expiry; do
+        if [[ "$expiry" < "$today" ]]; then
+            printf "${TXT_RED}%-20s${RESET} | ${TXT_RED}%s${RESET}\n" "$nick" "$expiry"
+            found_expired=true
+            ((count++))
+        fi
+    done < "$USER_DB"
+
+    echo "-----------------------------------"
+    echo ""
+
+    # --- 2. TRAVA DE SEGURANÇA ---
+    if [ "$found_expired" = false ]; then
+        echo -e "${TXT_GREEN}✅ Nenhum usuário vencido encontrado!${RESET}"
+        echo "Todos os clientes estão com dias ativos."
+        echo ""
+        read -rp "Pressione ENTER para voltar..."
+        return
+    fi
+
+    echo -e "Foram encontrados ${TXT_RED}$count usuários vencidos${RESET}."
+    echo -e "${TXT_YELLOW}⚠️  ATENÇÃO: A remoção é IRREVERSÍVEL!${RESET}"
+    echo ""
+    read -rp "Deseja realmente excluir estes usuários? [s/n]: " confirm
+
+    if [[ "$confirm" != "s" ]]; then
+        echo ""
+        echo "Operação cancelada. Nenhum usuário foi removido."
+        sleep 2
+        return
+    fi
+
+    # --- 3. EXECUÇÃO (REMOÇÃO REAL) ---
+    echo ""
+    echo "Limpando sistema..."
+    
+    # Cria arquivo temporário para salvar apenas os ATIVOS
+    > "${USER_DB}.tmp"
+
+    while IFS='|' read -r nick uuid expiry; do
+        if [[ "$expiry" < "$today" ]]; then
+            # Remove do JSON do Xray (Config)
+            echo -e "Removendo: ${TXT_RED}$nick${RESET}..."
+            jq --arg id "$uuid" '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id))' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
+        else
+            # Mantém no Banco de Dados (Salva no Temp)
+            echo "$nick|$uuid|$expiry" >> "${USER_DB}.tmp"
+        fi
+    done < "$USER_DB"
+
+    # Substitui o banco antigo pelo novo (limpo)
+    mv "${USER_DB}.tmp" "$USER_DB"
+
+    # Reinicia o Xray para aplicar
+    systemctl restart xray > /dev/null 2>&1
+
+    echo ""
+    echo -e "${TXT_GREEN}✅ LIMPEZA CONCLUÍDA!${RESET}"
+    echo "Os usuários expirados foram removidos do sistema."
+    echo "========================================="
+    read -rp "Pressione ENTER para voltar..."
 }
 
 func_page_uninstall() {
@@ -562,7 +685,6 @@ func_page_uninstall() {
 
     echo "2. Removendo arquivos do sistema..."
     rm -f /etc/systemd/system/xray.service
-    rm -f /etc/systemd/system/xray@.service
     rm -f /etc/systemd/system/botxray.service
     systemctl daemon-reload
 
@@ -590,88 +712,18 @@ func_page_uninstall() {
     exit 0
 }
 
-func_wizard_install() {
-    header_blue "INSTALAÇÃO GUIADA (1/5)"
-    read -rp "Deseja instalar/atualizar o Xray Core? [s/n]: " install_opt
-    if [[ "$install_opt" =~ ^[Ss]$ ]]; then func_install_official_core; fi
-
-    header_blue "CONFIGURAÇÃO (2/5)"
-    echo "Deseja usar criptografia TLS/SSL (HTTPS)?"
-    echo "1) SIM - (SUPREMO/AZION)"
-    echo "2) NÃO - Conexão simples"
-    read -rp "Opção [1/2]: " tls_opt
-    local use_tls="false"
-    if [ "$tls_opt" == "1" ]; then use_tls="true"; fi
-
-    header_blue "CONFIGURAÇÃO (3/5)"
-    read -rp "Digite a porta interna do Xray [Padrão 1080]: " api_port
-    if [ -z "$api_port" ]; then api_port="1080"; fi
-
-    header_blue "CONFIGURAÇÃO (4/5)"
-    read -rp "Digite a porta de conexão pública (Ex: 443, 80): " pub_port
-    if [ -z "$pub_port" ]; then pub_port="80"; fi
-
-    header_blue "CONFIGURAÇÃO (5/5)"
-    local domain_val=""
-    if [ "$use_tls" == "true" ]; then
-        echo -e "${TXT_CYAN}MODO SUPREMO ATIVADO!${RESET}"
-        read -rp "Domínio (Ex: seudominio.azion.app): " domain_val
-        func_xray_cert "$domain_val" 
-    else
-        echo "ℹ️  Modo sem TLS."
-        read -rp "Domínio ou IP: " domain_val
-        if [ -z "$domain_val" ]; then domain_val=$(curl -s icanhazip.com); fi
-    fi
-    echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
-
-    header_blue "SELECIONE O PROTOCOLO"
-    echo "1. ws (WebSocket)"
-    echo "2. grpc (gRPC)"
-    echo "3. xhttp (HTTP/2)"
-    echo "4. tcp (Simples)"
-    echo "5. vision (XTLS-Vision)"
-    echo "0. Cancelar"
-    echo ""
-    read -rp "Digite o número da opção: " prot_opt
-    local selected_net=""
-    case "$prot_opt" in
-        1) selected_net="ws" ;;
-        2) selected_net="grpc" ;;
-        3) selected_net="xhttp" ;;
-        4) selected_net="tcp" ;;
-        5) 
-            selected_net="vision"
-            if [ "$use_tls" == "false" ]; then
-                read -rp "Domínio Fake (Vision): " domain_val
-                func_xray_cert "$domain_val"; use_tls="true"; echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
-            fi ;;
-        0) return ;;
-        *) echo "❌ Inválido."; sleep 2; return ;;
-    esac
-    func_generate_config "$pub_port" "$selected_net" "$domain_val" "$api_port" "$use_tls"
-}
-
-# --- FUNÇÃO CHAMADA EXTERNA (DOWNLOADER + AUTO-REPAIR) ---
 func_call_limiter() {
-    echo "Verificando Módulo Limitador..."
+    echo "Verificando Limitador..."
     if [ -f "$CONFIG_PATH" ]; then
         if ! grep -q '"stats":' "$CONFIG_PATH"; then
-            echo -e "${TXT_RED}⚠️ Correção detectada! Aplicando patch Stats...${RESET}"
             systemctl stop xray
             jq '.stats = {}' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
             systemctl restart xray
-            echo "✅ Configuração corrigida automaticamente."
-            sleep 2
         fi
     fi
-
-    echo "Baixando atualização do GitHub..."
+    echo "Baixando do Gitea..."
     curl -s -L -o "$LIMITER_LOCAL" "$LIMITER_URL"
-    if [ $? -ne 0 ]; then
-        echo -e "${TXT_RED}Erro ao baixar o módulo!${RESET}"
-        sleep 2
-        return
-    fi
+    if [ $? -ne 0 ]; then echo -e "${TXT_RED}Erro download!${RESET}"; sleep 2; return; fi
     chmod +x "$LIMITER_LOCAL"
     bash "$LIMITER_LOCAL"
 }
@@ -679,7 +731,7 @@ func_call_limiter() {
 # --- MENU PRINCIPAL ---
 menu_display() {
     clear
-    echo -e "${TITLE_BAR}         DRAGONCORE XRAY MANAGER         ${RESET}"
+    echo -e "${TITLE_BAR}      DRAGONCORE XRAY MANAGER      ${RESET}"
     echo ""
     local status_txt="${TXT_RED}DESATIVADO${RESET}"
     local proto_info="${TXT_RED}---${RESET}"
@@ -693,31 +745,39 @@ menu_display() {
             local net=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.network' "$CONFIG_PATH" 2>/dev/null)
             [ -z "$port" ] && port="?"
             [ -z "$net" ] && net="?"
-            proto_info="${TXT_BLUE}${net^^} (Porta: $port)${RESET}"
+            proto_info="${TXT_CYAN}${net^^}${RESET} (Porta: ${TXT_CYAN}$port${RESET})"
         fi
     fi
 
+    # --- VERIFICAÇÃO DO BOT (NOVO) ---
+    local bot_status="${TXT_RED}DESATIVADO${RESET}"
+    if systemctl is-active --quiet botxray; then
+        bot_status="${TXT_GREEN}ATIVADO${RESET}"
+    fi
+
+    # --- EXIBIÇÃO DO CABEÇALHO ---
     echo "-----------------------------------------"
-    echo -e " Estado:    $status_txt"
-    echo -e " Clientes:  ${TXT_BLUE}$users_count${RESET}"
-    echo -e " Info:      $proto_info"
+    echo -e "${TXT_CYAN}XRAY:${RESET}      $status_txt"
+    echo -e "${TXT_CYAN}CLIENTES:${RESET}  $users_count"
+    echo -e "${TXT_CYAN}INFO:${RESET}      $proto_info"
+    echo -e "${TXT_CYAN}BOT XRAY:${RESET}  $bot_status"
     echo "-----------------------------------------"
     echo ""
-    echo -e "${TXT_CYAN}[01]. CRIAR USUÁRIO${RESET}"
-    echo -e "${TXT_CYAN}[02]. REMOVER USUÁRIO${RESET}"
-    echo -e "${TXT_CYAN}[03]. LISTAR USUÁRIOS${RESET}"
-    echo -e "${TXT_CYAN}[04]. INSTALAR E CONFIGURAR XRAY (ASSISTENTE)${RESET}"
-    echo -e "${TXT_CYAN}[05]. LIMPAR EXPIRADOS${RESET}"
-    echo -e "${TXT_CYAN}[06]. DESINSTALAR (COMPLETO)${RESET}"
-    echo -e "${TXT_CYAN}[07]. LIMITAR CONSUMO GIGAS (MÓDULO GITHUB)${RESET}"
-    echo -e "${TXT_CYAN}[08]. ATIVAR BOT TELEGRAM${RESET}"
-    echo -e "${TXT_CYAN}[09]. CRIAR BACKUP${RESET}"    
-    echo -e "${TXT_CYAN}[10]. RESTAURAR BACKUP${RESET}" 
-    echo -e "${TXT_CYAN}[11]. BLOQUEAR USUÁRIO${RESET}"
-    echo -e "${TXT_CYAN}[12]. DESBLOQUEAR USUÁRIO${RESET}"
-    echo -e "${TXT_CYAN}[00]. SAIR${RESET}"
+    echo -e "${TXT_CYAN}[01] CRIAR USUÁRIO${RESET}"
+    echo -e "${TXT_CYAN}[02] REMOVER USUÁRIO${RESET}"
+    echo -e "${TXT_CYAN}[03] LISTAR USUARIOS${RESET}"
+    echo -e "${TXT_CYAN}[04] INSTALAR/CONFIGURAR XRAY${RESET}"
+    echo -e "${TXT_CYAN}[05] LIMPAR EXPIRADOS${RESET}"
+    echo -e "${TXT_CYAN}[06] DESINSTALAR XRAY${RESET}"
+    echo -e "${TXT_CYAN}[07] LIMITADOR CONSUMO (GB)${RESET}"
+    echo -e "${TXT_CYAN}[08] BOT TELEGRAM${RESET}"
+    echo -e "${TXT_CYAN}[09] CRIAR BACKUP${RESET}"    
+    echo -e "${TXT_CYAN}[10] RESTAURAR BACKUP${RESET}" 
+    echo -e "${TXT_CYAN}[11] BLOQUEAR USUÁRIOS${RESET}"
+    echo -e "${TXT_CYAN}[12] DESBLOQUEAR USUÁRIOS${RESET}"
+    echo -e "${TXT_CYAN}[00] SAIR${RESET}"
     echo "-----------------------------------------"
-    read -rp "Opção: " choice
+    read -rp "Opcao: " choice
 }
 
 if [ -z "$1" ]; then

@@ -1,41 +1,50 @@
-# ⚡ XrayX-TLS | Gerenciador Xray Core Avançado
+# ⚡ DragonCore Xray Manager | V7.3
 
+![Version](https://img.shields.io/badge/Version-7.3-blue?style=for-the-badge&labelColor=black)
 ![Bash](https://img.shields.io/badge/Language-Bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white)
-![Xray](https://img.shields.io/badge/Core-Xray-blue?style=for-the-badge)
-![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL-336791?style=for-the-badge&logo=postgresql&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
+![Python](https://img.shields.io/badge/Bot-Python3-yellow?style=for-the-badge&logo=python&logoColor=white)
+![Xray](https://img.shields.io/badge/Core-Xray-purple?style=for-the-badge)
+![Security](https://img.shields.io/badge/Security-UUID_Scramble-red?style=for-the-badge)
 
-> Uma solução robusta, leve e automatizada escrita 100% em **Bash Puro** para gerenciamento profissional do Xray Core. Integração nativa com banco de dados PostgreSQL e manipulação direta de JSON.
-
----
-
-## 🚀 Sobre o Projeto
-
-O **XrayX-TLS** foi desenvolvido para substituir sistemas legados baseados em PHP, oferecendo maior performance e segurança ao remover dependências de interpretadores web. O sistema gerencia usuários, configurações de rede, certificados SSL e limpeza automática de contas expiradas.
-
-### ✨ Principais Funcionalidades
-
-* ✅ **Instalação Automática:** Configura dependências (`jq`, `psql`, `uuidgen`), binário Xray e ambiente.
-* ✅ **Gestão de Usuários VLESS:** Criação, remoção e listagem com UUIDs gerados dinamicamente.
-* ✅ **Integração PostgreSQL:** Armazenamento persistente e seguro de credenciais e validade.
-* ✅ **Manipulação JSON Nativa:** Edição segura do `config.json` do Xray utilizando `jq`.
-* ✅ **Certificados TLS:** Geração automática de certificados autoassinados para protocolos seguros (XHTTP/TLS).
-* ✅ **Auto-Purge:** Tarefa automática (Cron) para remover usuários expirados diariamente.
-* ✅ **Interface CLI:** Menu interativo intuitivo e colorido.
+> **A evolução do gerenciamento Xray.** Uma solução híbrida (Bash + Python) robusta, offline-ready e focada em segurança para provedores de VPN profissional.
 
 ---
 
-## 🛠️ Instalação
+## 🚀 O Que Há de Novo na V7.3?
 
-Siga os passos abaixo para instalar em seu servidor VPS (Ubuntu 20.04+ recomendado).
+O **DragonCore Xray Manager** foi reescrito para eliminar dependências externas críticas. Diferente de scripts comuns, ele possui um ecossistema integrado:
 
-### 1. Preparar e Clonar o Repositório
+### 🛡️ Segurança e Estabilidade
+* **Offline-Ready:** As funções de bloquear/desbloquear agora vivem dentro do script. O painel não quebra se o GitHub/Gitea cair.
+* **Bloqueio "Scramble":** O sistema **não deleta** o usuário ao bloquear. Ele altera o UUID para um falso e renomeia para `LOCKED_`, mantendo o histórico e backup seguros.
+* **Validação Rigorosa:** Impede criação de usuários com nomes quebrados (Regra: 5-9 caracteres, apenas letras/números).
+
+### 🤖 Automação e Bot Telegram
+* **Bot Python Nativo:** Painel de controle completo via Telegram.
+* **Relatórios em TXT:** Gera listas de usuários em arquivo `.txt` limpo para evitar poluição visual no chat.
+* **Anti-Freeze:** Sistema de conversação inteligente que não trava se o usuário clicar em botões errados.
+
+### ⚡ Funcionalidades do Core
+* **Protocolos Modernos:** Suporte nativo a VLESS, XTLS-Vision, gRPC, WebSocket e TCP.
+* **Limitador de Consumo:** Monitoramento em tempo real com bloqueio automático ao exceder a franquia (GB).
+* **Backup Inteligente:** Sistema que verifica a integridade do arquivo antes de substituir o backup anterior.
+* **Auto-Instalação:** Configura tudo (Xray, Certificados, Python, Cron) com um único comando.
+
+---
+
+## 🛠️ Instalação Rápida
+
+Compatível com **Ubuntu 20.04+** (Recomendado) e Debian 11+.
+Execute **um** dos comandos abaixo no terminal da sua VPS (como root):
+
+### Opção 1 (Recomendada - via wget)
 
 ````
-sudo apt update && sudo apt install -y wget && wget -qO installxray.sh https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/installxray.sh && sudo chmod +x installxray.sh && sudo ./installxray.sh
+apt update -y && apt install -y wget && wget -O installxray.sh https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/installxray.sh && chmod +x installxray.sh && ./installxray.sh
 ````
 
+### Opção 2 ( via bash)
 
 ````
-bash <(wget -qO- https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/installxray.sh) && xray-menu
+bash <(curl -s https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/installxray.sh)
 ````

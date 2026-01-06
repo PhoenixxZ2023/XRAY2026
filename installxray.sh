@@ -1,6 +1,6 @@
 #!/bin/bash
 # installxray.sh - Instalador Premium V7.3 (Visual + Automação)
-# Repositório: https://github.com/PhoenixxZ2023/XrayX-TLS
+# Repositório: https://gitea.com/KAKAROTO/Xray2026
 
 # --- CORES ---
 VERMELHO='\033[1;31m'
@@ -51,24 +51,35 @@ fi
 (apt-get update -y) > /dev/null 2>&1 &
 fun_bar $! "Atualizando Sistema"
 
-# 2. Instalando Dependências (ADICIONADO uuid-runtime)
-PACKAGES="curl jq bc cron git uuid-runtime"
+# 2. Instalando Dependências do Sistema + Python
+# Adicionado python3 e python3-pip na lista
+PACKAGES="curl jq bc cron git uuid-runtime python3 python3-pip"
 (apt-get install -y $PACKAGES) > /dev/null 2>&1 &
-fun_bar $! "Instalando Dependências"
+fun_bar $! "Instalando Dependências e Python"
 
-# 3. Baixando e Instalando Scripts
+# 3. Instalando Bibliotecas do Bot (Pip)
+(
+    # Remove trava de pacotes externos (Debian 12/Ubuntu 23+)
+    rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
+    
+    # Instala a biblioteca do Telegram
+    pip3 install python-telegram-bot
+) > /dev/null 2>&1 &
+fun_bar $! "Configurando Bibliotecas do Bot"
+
+# 4. Baixando e Instalando Scripts
 (
     # Remove versões antigas em pastas variadas para evitar conflito
     rm -f /bin/menuxray.sh /usr/local/bin/menuxray.sh
     rm -f /bin/limiterxray.sh /usr/local/bin/limiterxray.sh
     rm -f /bin/xray-menu /usr/bin/xray-menu
 
-    # Menu Principal (Instala em /usr/local/bin - Padrão correto)
-    curl -s -L -o /usr/local/bin/menuxray.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/menuxray.sh"
+    # Menu Principal (Instala em /usr/local/bin)
+    curl -s -L -o /usr/local/bin/menuxray.sh "https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/menuxray.sh"
     chmod +x /usr/local/bin/menuxray.sh
 
     # Limitador (Módulo)
-    curl -s -L -o /usr/local/bin/limiterxray.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/limiterxray.sh"
+    curl -s -L -o /usr/local/bin/limiterxray.sh "https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/limiterxray.sh"
     chmod +x /usr/local/bin/limiterxray.sh
 
     # Atalho Global 'xray-menu'
@@ -77,7 +88,7 @@ fun_bar $! "Instalando Dependências"
 ) > /dev/null 2>&1 &
 fun_bar $! "Baixando Scripts (V7.3)"
 
-# 4. Configurando Automação (Robô Cron - 2 MINUTOS)
+# 5. Configurando Automação (Robô Cron - 2 MINUTOS)
 (
     # Remove cron antigo (inclusive se estiver apontando para /bin)
     crontab -l 2>/dev/null | grep -v "limiterxray.sh" | crontab -
@@ -91,6 +102,7 @@ echo -e "${AZUL}==================================================${RESET}"
 echo -e "${VERDE}🎉 INSTALAÇÃO CONCLUÍDA COM SUCESSO!${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
 echo -e "O Robô de bloqueio já está ativo em segundo plano."
+echo -e "As dependências do Bot Telegram já foram instaladas."
 echo -e "Para acessar o sistema, digite: ${VERDE}xray-menu${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
 echo ""
