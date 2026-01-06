@@ -40,11 +40,10 @@ Execute **um** dos comandos abaixo no terminal da sua VPS (como root):
 ### Opção 1 (Recomendada - via wget)
 
 ````
-apt update -y && apt install -y wget && wget -O installxray.sh https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/installxray.sh && chmod +x installxray.sh && ./installxray.sh
+sudo apt update && sudo apt install -y wget && wget -qO installxray.sh https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/installxray.sh && sudo chmod +x installxray.sh && sudo ./installxray.sh
 ````
 
-### Opção 2 ( via bash)
 
 ````
-bash <(curl -s https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/installxray.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/installxray.sh) && xray-menu
 ````
