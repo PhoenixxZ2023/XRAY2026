@@ -75,11 +75,11 @@ fun_bar $! "Configurando Bibliotecas do Bot"
     rm -f /bin/xray-menu /usr/bin/xray-menu
 
     # Menu Principal (Instala em /usr/local/bin)
-    curl -s -L -o /usr/local/bin/menuxray.sh "https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/menuxray.sh"
+    curl -s -L -o /usr/local/bin/menuxray.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/menuxray.sh"
     chmod +x /usr/local/bin/menuxray.sh
 
     # Limitador (Módulo)
-    curl -s -L -o /usr/local/bin/limiterxray.sh "https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/limiterxray.sh"
+    curl -s -L -o /usr/local/bin/limiterxray.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/limiterxray.sh"
     chmod +x /usr/local/bin/limiterxray.sh
 
     # Atalho Global 'xray-menu'
