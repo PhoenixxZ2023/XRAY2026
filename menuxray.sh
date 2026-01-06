@@ -671,14 +671,12 @@ func_page_purge_expired() {
 
 func_page_uninstall() {
     clear
-    header_red "⚠️  DESINSTALAÇÃO COMPLETA ⚠️"
+    header_red "⚠️  DESINSTALAÇÃO E LIMPEZA ⚠️"
     echo -e "${TXT_RED}ATENÇÃO:${RESET} Esta ação é irreversível."
     echo "Isso irá remover:"
-    echo " • O Xray Core e todas as configurações"
-    echo " • O Bot do Telegram e o Banco de Dados (users.db)"
-    echo " • Todos os usuários criados"
-    echo " • Serviços do sistema (Systemd) e Logs"
-    echo " • Todos os arquivos de Backup (/root/backups)"
+    echo " • O Xray Core, Configs, Usuários e Logs"
+    echo " • O Bot Telegram e Backups"
+    echo " • Lixo do sistema (Cache APT, Logs antigos, Temporários)"
     echo ""
     read -rp "Tem certeza que deseja continuar? [s/n]: " confirm
     
@@ -691,7 +689,7 @@ func_page_uninstall() {
     systemctl stop botxray > /dev/null 2>&1
     systemctl disable botxray > /dev/null 2>&1
 
-    echo "2. Removendo arquivos do sistema..."
+    echo "2. Removendo arquivos do Xray..."
     rm -f /etc/systemd/system/xray.service
     rm -f /etc/systemd/system/botxray.service
     systemctl daemon-reload
@@ -710,10 +708,26 @@ func_page_uninstall() {
     rm -f /usr/bin/xray-menu
     rm -f /usr/local/bin/uuidgen
 
+    # --- PARTE NOVA: A FAXINA DO SISTEMA ---
+    echo "5. Executando limpeza profunda do Sistema..."
+    
+    # Remove pacotes que foram instalados automaticamente e não são mais usados
+    apt-get autoremove -y > /dev/null 2>&1
+    
+    # Limpa o cache de instaladores (.deb)
+    apt-get clean > /dev/null 2>&1
+    
+    # Limpa logs do sistema maiores que 50M ou mais velhos que 1 dia
+    journalctl --vacuum-size=50M --vacuum-time=1d > /dev/null 2>&1
+    
+    # Limpa arquivos temporários
+    rm -rf /tmp/*
+    # ---------------------------------------
+
     echo ""
     echo "========================================="
-    echo -e "${TXT_GREEN}✅ DESINSTALAÇÃO CONCLUÍDA!${RESET}"
-    echo "O sistema está completamente limpo."
+    echo -e "${TXT_GREEN}✅ DESINSTALAÇÃO E LIMPEZA CONCLUÍDAS!${RESET}"
+    echo "Espaço liberado e sistema otimizado."
     echo "========================================="
     echo ""
     
