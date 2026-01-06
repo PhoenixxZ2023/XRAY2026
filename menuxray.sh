@@ -259,6 +259,7 @@ EOF
     systemctl restart botxray
     echo -e "${TXT_GREEN}BOT ATIVADO!${RESET}"
     read -rp "Enter para voltar..."
+
 }
 
 # --- GERACAO DE CONFIG ---
@@ -273,11 +274,19 @@ func_generate_config() {
     local stream_settings=""
     local policy='{"levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}}, "system": {"statsInboundUplink": true, "statsInboundDownlink": true}}'
 
+    # Regras de Roteamento (Bloqueio Torrent e LAN)
+    local routing_rules='[
+        {"type": "field", "inboundTag": ["api"], "outboundTag": "api"},
+        {"type": "field", "protocol": ["bittorrent"], "outboundTag": "blocked"},
+        {"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"}
+    ]'
+
+    # --- AQUI ESTÁ O PADDING DO XHTTP (CONFIRMADO) ---
     if [ "$network" == "xhttp" ]; then
         if [ "$use_tls" = "true" ]; then
-            stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "xhttp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], alpn: ["h2", "http/1.1"]}, xhttpSettings: {path: "/", scMaxBufferedPosts: 30}}')
+            stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "xhttp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], alpn: ["h2", "http/1.1"]}, xhttpSettings: {path: "/", scMaxBufferedPosts: 30, xPaddingBytes: "100-1000"}}')
         else
-            stream_settings=$(jq -n '{network: "xhttp", security: "none", xhttpSettings: {path: "/", scMaxBufferedPosts: 30}}')
+            stream_settings=$(jq -n '{network: "xhttp", security: "none", xhttpSettings: {path: "/", scMaxBufferedPosts: 30, xPaddingBytes: "100-1000"}}')
         fi
     elif [ "$network" == "ws" ]; then
         if [ "$use_tls" = "true" ]; then
@@ -301,12 +310,24 @@ func_generate_config() {
         fi
     fi
 
-    jq -n --argjson stream "$stream_settings" --arg port "$port" --arg api "$api_port" --argjson pol "$policy" \
-      '{log: {loglevel: "warning"}, stats: {}, api: {services: ["HandlerService", "LoggerService", "StatsService"], tag: "api"}, policy: $pol, inbounds: [{tag: "api", port: ($api | tonumber), protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, listen: "127.0.0.1"}, {tag: "inbound-dragoncore", port: ($port | tonumber), protocol: "vless", settings: {clients: [], decryption: "none", fallbacks: []}, streamSettings: $stream}], outbounds: [{protocol: "freedom", tag: "direct"}, {protocol: "blackhole", tag: "blocked"}], routing: {domainStrategy: "AsIs", rules: [{type: "field", inboundTag: ["api"], outboundTag: "api"}]}}' > "$CONFIG_PATH"
+    jq -n --argjson stream "$stream_settings" --arg port "$port" --arg api "$api_port" --argjson pol "$policy" --argjson rules "$routing_rules" \
+      '{log: {loglevel: "warning"}, stats: {}, api: {services: ["HandlerService", "LoggerService", "StatsService"], tag: "api"}, policy: $pol, inbounds: [{tag: "api", port: ($api | tonumber), protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, listen: "127.0.0.1"}, {tag: "inbound-dragoncore", port: ($port | tonumber), protocol: "vless", settings: {clients: [], decryption: "none", fallbacks: []}, streamSettings: $stream}], outbounds: [{protocol: "freedom", tag: "direct"}, {protocol: "blackhole", tag: "blocked"}], routing: {domainStrategy: "AsIs", rules: $rules}}' > "$CONFIG_PATH"
 
     if [ "$network" == "vision" ]; then
         jq '(.inbounds[] | select(.tag == "inbound-dragoncore").settings) += {"flow": "xtls-rprx-vision"}' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
     fi
+
+    # --- CRIA O ARQUIVO PRESET.JSON (NOVO) ---
+    local preset_file="/usr/local/etc/xray/preset.json"
+    cat > "$preset_file" <<EOF
+{
+  "network": "$network",
+  "port": "$port",
+  "domain": "$domain",
+  "tls": "$use_tls"
+}
+EOF
+    # -----------------------------------------
 
     systemctl restart xray > /dev/null 2>&1
     sleep 2
@@ -331,6 +352,7 @@ func_generate_config() {
     echo -e " ${TXT_YELLOW}DOMINIO (SNI):${RESET}   ${TXT_CYAN}${domain}${RESET}"
     echo -e " ${TXT_YELLOW}PORTA:${RESET}           ${TXT_CYAN}${port}${RESET}"
     echo -e " ${TXT_YELLOW}CRIPTOGRAFIA:${RESET}    ${tls_msg}"
+    echo -e " ${TXT_YELLOW}PROTEÇÃO:${RESET}        ${TXT_GREEN}TORRENT & LAN BLOQUEADOS${RESET}"
     echo "========================================="
     echo ""
 
@@ -406,7 +428,7 @@ func_wizard_install() {
     echo -e "${TXT_YELLOW}DESEJA INSTALAR OU ATUALIZAR O XRAY CORE AGORA?${RESET}"
     echo "Isso ira baixar a versao oficial mais recente."
     echo ""
-    read -rp "Digite [s] para Sim ou [n] para Nao: " install_opt
+    read -rp "Digite [s] para SIM ou [n] para NÃO: " install_opt
     if [[ "$install_opt" =~ ^[Ss]$ ]]; then func_install_official_core; fi
 
     clear
@@ -433,6 +455,20 @@ func_wizard_install() {
     echo "Exemplos: 80 (Para sem TLS) ou 443 (Para com TLS)"
     read -rp "Porta Publica: " pub_port
     if [ -z "$pub_port" ]; then pub_port="80"; fi
+
+    # --- VERIFICAÇÃO DE PORTA EM USO (NOVO) ---
+    echo "Verificando disponibilidade da porta $pub_port..."
+    if lsof -Pi :$pub_port -sTCP:LISTEN -t >/dev/null ; then
+        echo ""
+        echo -e "${TXT_RED}❌ ERRO CRÍTICO: A PORTA $pub_port JÁ ESTÁ EM USO!${RESET}"
+        echo "Serviço ocupando a porta:"
+        lsof -i :$pub_port
+        echo ""
+        echo "Pare o serviço conflitante (Apache/Nginx) ou escolha outra porta."
+        read -rp "Pressione ENTER para voltar..."
+        return
+    fi
+    # -------------------------------------------
 
     clear
     header_blue "PASSO 4: DOMINIO E SNI"
@@ -729,27 +765,38 @@ func_call_limiter() {
 }
 
 # --- MENU PRINCIPAL ---
-menu_display() {
-    clear
+clear
     echo -e "${TITLE_BAR}      DRAGONCORE XRAY MANAGER      ${RESET}"
     echo ""
+    
     local status_txt="${TXT_RED}DESATIVADO${RESET}"
     local proto_info="${TXT_RED}---${RESET}"
     local users_count="0"
+    local preset_file="/usr/local/etc/xray/preset.json"
+    
     if [ -f "$USER_DB" ]; then users_count=$(wc -l < "$USER_DB"); fi
 
     if systemctl is-active --quiet xray; then
         status_txt="${TXT_GREEN}ATIVADO${RESET}"
-        if [ -f "$CONFIG_PATH" ]; then
-            local port=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").port' "$CONFIG_PATH" 2>/dev/null)
-            local net=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.network' "$CONFIG_PATH" 2>/dev/null)
+        
+        # --- AQUI ELE LÊ O PRESET.JSON (MAIS RÁPIDO) ---
+        if [ -f "$preset_file" ]; then
+            local net=$(jq -r '.network' "$preset_file" 2>/dev/null)
+            local port=$(jq -r '.port' "$preset_file" 2>/dev/null)
+            
+            # Se falhar ao ler o preset, tenta ler o config original (backup)
+            if [ -z "$net" ] || [ "$net" == "null" ]; then
+                 net=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.network' "$CONFIG_PATH" 2>/dev/null)
+                 port=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").port' "$CONFIG_PATH" 2>/dev/null)
+            fi
+            
             [ -z "$port" ] && port="?"
             [ -z "$net" ] && net="?"
             proto_info="${TXT_CYAN}${net^^}${RESET} (Porta: ${TXT_CYAN}$port${RESET})"
         fi
+        # ------------------------------------------------
     fi
 
-    # --- VERIFICAÇÃO DO BOT (NOVO) ---
     local bot_status="${TXT_RED}DESATIVADO${RESET}"
     if systemctl is-active --quiet botxray; then
         bot_status="${TXT_GREEN}ATIVADO${RESET}"
