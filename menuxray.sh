@@ -13,7 +13,7 @@ USER_DB="$XRAY_DIR/users.db"
 
 # CONFIGURACAO DO LIMITADOR EXTERNO
 LIMITER_LOCAL="/usr/local/bin/limiterxray.sh"
-LIMITER_URL="https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/limiterxray.sh"
+LIMITER_URL="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/limiterxray.sh"
 
 mkdir -p "$XRAY_DIR"
 mkdir -p "$SSL_DIR"
@@ -100,14 +100,14 @@ func_xray_cert() {
 
 # --- MODULOS EXTERNOS ---
 func_module_block() {
-    curl -s -L -o /tmp/block_user.sh "https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/block_user.sh"
+    curl -s -L -o /tmp/block_user.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/block_user.sh"
     chmod +x /tmp/block_user.sh
     bash /tmp/block_user.sh
     rm -f /tmp/block_user.sh
 }
 
 func_module_unblock() {
-    curl -s -L -o /tmp/unblock_user.sh "https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/unblock_user.sh"
+    curl -s -L -o /tmp/unblock_user.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/unblock_user.sh"
     chmod +x /tmp/unblock_user.sh
     bash /tmp/unblock_user.sh
     rm -f /tmp/unblock_user.sh
@@ -230,7 +230,7 @@ func_install_bot() {
 
     echo "Baixando bot..."
     rm -f /opt/XrayTools/botxray.py
-    curl -s -L -o /opt/XrayTools/botxray.py "https://gitea.com/KAKAROTO/Xray2026/raw/branch/main/botxray.py"
+    curl -s -L -o /opt/XrayTools/botxray.py "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/botxray.py"
     
     if [ ! -f "/opt/XrayTools/botxray.py" ]; then
         echo -e "${TXT_RED}Erro no download!${RESET}"; sleep 3; return
