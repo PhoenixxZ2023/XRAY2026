@@ -93,9 +93,34 @@ func_install_official_core() {
     fi
 }
 
-func_check_cert() {
-    if [ ! -f "$KEY_FILE" ] || [ ! -f "$CRT_FILE" ]; then return 1; fi
-    return 0
+# --- CERTIFICADO EXTERNO ---
+func_xray_cert() {
+    local domain_arg="$1"
+    
+    # URL do seu script (TROQUE PELO SEU LINK GITHUB)
+    local CERT_URL="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/certxray.sh"
+    local CERT_SCRIPT="/tmp/certxray.sh"
+
+    echo "Baixando gerenciador de certificados..."
+    curl -s -L -o "$CERT_SCRIPT" "$CERT_URL"
+    
+    if [ ! -f "$CERT_SCRIPT" ]; then
+        echo -e "${TXT_RED}Erro ao baixar certxray.sh!${RESET}"
+        echo "Verifique sua conexão ou o link do repositório."
+        sleep 3
+        # Fallback de emergência (Gera um fake rapidinho só pra não travar)
+        openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+        -subj "/CN=$domain_arg" -keyout "$KEY_FILE" -out "$CRT_FILE" > /dev/null 2>&1
+        return
+    fi
+
+    chmod +x "$CERT_SCRIPT"
+    
+    # Executa o script externo passando o domínio como argumento
+    bash "$CERT_SCRIPT" "$domain_arg"
+    
+    # Remove o script temporário depois de usar
+    rm -f "$CERT_SCRIPT"
 }
 
 func_xray_cert() {
