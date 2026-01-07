@@ -225,12 +225,13 @@ func_restore_system() {
 
 # --- BOT TELEGRAM ---
 func_install_bot() {
-    header_blue "CONFIGURAR BOT TELEGRAM (COM VALIDAÇÃO)"
+    header_blue "CONFIGURAR BOT TELEGRAM"
     echo "Dependencias verificadas."
     echo ""
     read -rp "Deseja continuar? [s/n]: " continue_opt
     if [[ "$continue_opt" != "s" ]]; then return; fi
     
+    # --- PASSO 1: DADOS TÉCNICOS (SÓ PEDE UMA VEZ) ---
     echo ""
     echo -e "${TXT_YELLOW}1. Digite o Token do BotFather:${RESET}"
     read -rp "Token: " bot_token
@@ -240,66 +241,71 @@ func_install_bot() {
     echo "Exemplo: 123456789"
     read -rp "ID Admin: " admin_id
 
-    echo ""
-    echo -e "${TXT_YELLOW}3. Digite o SEU Username (Sem @):${RESET}"
-    echo "Exemplo: seunome (Isso serve para validar se o ID é seu mesmo)"
-    read -rp "Username: " admin_user
-
-    # Limpeza básica (remove espaços e @ se o usuario colocar)
-    admin_user=$(echo "$admin_user" | sed 's/@//g' | sed 's/ //g')
-
-    if [ -z "$bot_token" ] || [ -z "$admin_id" ] || [ -z "$admin_user" ]; then
+    if [ -z "$bot_token" ] || [ -z "$admin_id" ]; then
         echo -e "${TXT_RED}❌ Dados incompletos!${RESET}"; sleep 2; return
     fi
 
-    # --- VALIDAÇÃO DE SEGURANÇA (A MÁGICA ACONTECE AQUI) ---
+    # --- VALIDAÇÃO API (O SCRIPT DESCOBRE O USERNAME REAL EM SEGREDO) ---
     echo ""
-    echo "Validando identidade no Telegram..."
+    echo "Consultando dados..."
     
-    # Consulta a API do Telegram usando o Token e o ID informado
     local api_response=$(curl -s "https://api.telegram.org/bot$bot_token/getChat?chat_id=$admin_id")
-    
-    # 1. Verifica se o Token é valido e se o ID existe
     local is_ok=$(echo "$api_response" | jq -r '.ok')
+
+    # Se Token ou ID estiverem errados, cancela tudo.
     if [ "$is_ok" != "true" ]; then
-        echo -e "${TXT_RED}❌ ERRO: Falha ao consultar o Telegram.${RESET}"
-        echo "Possíveis causas:"
-        echo " • Token inválido."
-        echo " • ID inválido ou o bot nunca falou com esse ID."
-        echo ""
-        read -rp "Enter para tentar novamente..."
+        echo -e "${TXT_RED}❌ ERRO: O Token ou ID informados são inválidos.${RESET}"
+        read -rp "Enter para voltar..."
         return
     fi
 
-    # 2. Pega o Username real vinculado a esse ID na API
     local real_username=$(echo "$api_response" | jq -r '.result.username')
 
-    # Trata caso o usuário não tenha username configurado no Telegram
+    # Se a pessoa não tiver username configurado no Telegram
     if [ "$real_username" == "null" ]; then
-        echo -e "${TXT_YELLOW}⚠️  AVISO: Esse ID ($admin_id) não tem um Username (@) configurado no Telegram.${RESET}"
-        echo "Por segurança, configure um Username no seu App do Telegram e tente novamente."
+        echo -e "${TXT_YELLOW}⚠️  ERRO: O ID $admin_id não tem Username (@) definido no Telegram.${RESET}"
+        echo "Configure um username no seu perfil e tente novamente."
         read -rp "Enter para voltar..."
         return
     fi
 
-    # 3. Compara o digitado com o real (ignorando maiusculas/minusculas)
-    if [[ "${real_username,,}" != "${admin_user,,}" ]]; then
-        echo -e "${TXT_RED}❌ SEGURANÇA: DADOS NÃO CONFEREM!${RESET}"
-        echo "O ID informado ($admin_id) pertence ao usuário: @$real_username"
-        echo "Mas você digitou: @$admin_user"
+    # --- PASSO 2: O LOOP DE VALIDAÇÃO (INSISTÊNCIA NO USERNAME) ---
+    while true; do
         echo ""
-        echo "Certifique-se de que o ID e o Usuário são da mesma pessoa."
-        read -rp "Enter para voltar..."
-        return
-    fi
+        echo "-------------------------------------------------------"
+        echo -e "${TXT_YELLOW}3. Confirmação de Segurança:${RESET}"
+        echo "Para validar que o ID $admin_id é realmente seu,"
+        echo "digite o seu Username do Telegram (sem @)."
+        echo "-------------------------------------------------------"
+        read -rp "Username: " input_user
 
-    echo -e "${TXT_GREEN}✅ IDENTIDADE CONFIRMADA! (@$real_username)${RESET}"
-    sleep 2
-    # -------------------------------------------------------
+        # Opção de saída caso a pessoa tenha errado o ID lá em cima
+        if [ "$input_user" == "0" ]; then return; fi
 
-    echo "Baixando bot..."
+        # Limpeza (remove @ e espaços)
+        input_user=$(echo "$input_user" | sed 's/@//g' | sed 's/ //g')
+
+        # COMPARAÇÃO (Ignora maiúsculas/minúsculas)
+        if [[ "${real_username,,}" == "${input_user,,}" ]]; then
+            echo ""
+            echo -e "${TXT_GREEN}✅ IDENTIDADE CONFIRMADA!${RESET}"
+            sleep 1
+            break # SAI DO LOOP E VAI INSTALAR
+        else
+            echo ""
+            echo -e "${TXT_RED}❌ INCORRETO!${RESET}"
+            echo "O usuário digitado não corresponde ao dono do ID informado."
+            echo "Tente novamente ou digite 0 para cancelar."
+            # O LOOP CONTINUA AQUI (PEDE O USERNAME DE NOVO)
+        fi
+    done
+
+    # --- INSTALAÇÃO FINAL ---
+    echo ""
+    echo "Baixando e configurando bot..."
     rm -f /opt/XrayTools/botxray.py
-    # LEMBRE-SE DE ALTERAR O LINK ABAIXO PARA O SEU GITHUB QUANDO SUBIR
+    
+    # SEU LINK GITHUB AQUI
     curl -s -L -o /opt/XrayTools/botxray.py "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/botxray.py"
     
     if [ ! -f "/opt/XrayTools/botxray.py" ]; then
@@ -330,6 +336,7 @@ EOF
     echo -e "${TXT_GREEN}BOT ATIVADO COM SUCESSO!${RESET}"
     read -rp "Enter para voltar..."
 }
+
 # --- GERACAO DE CONFIG ---
 func_generate_config() {
     local port="$1"
