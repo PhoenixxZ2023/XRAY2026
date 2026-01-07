@@ -53,9 +53,17 @@ header_red() {
 func_install_official_core() {
     header_blue "INSTALANDO XRAY CORE"
     
-    echo "1. Instalando dependencias (unzip)..."
-    apt-get update -y > /dev/null 2>&1
-    apt-get install unzip curl socat -y > /dev/null 2>&1
+    # --- VERIFICAÇÃO INTELIGENTE DE DEPENDÊNCIAS ---
+    # Verifica se unzip, curl e socat já existem
+    if command -v unzip > /dev/null 2>&1 && command -v curl > /dev/null 2>&1 && command -v socat > /dev/null 2>&1; then
+        echo -e "1. Dependências encontradas: ${TXT_GREEN}OK${RESET}"
+        echo "   (Pulando etapa do apt-get para ganhar tempo...)"
+    else
+        echo "1. Instalando dependencias (unzip, curl, socat)..."
+        apt-get update -y > /dev/null 2>&1
+        apt-get install unzip curl socat -y > /dev/null 2>&1
+    fi
+    # ------------------------------------------------
 
     echo "2. Baixando instalador oficial..."
     rm -f /tmp/install_xray.sh
@@ -671,12 +679,12 @@ func_page_purge_expired() {
 
 func_page_uninstall() {
     clear
-    header_red "⚠️  DESINSTALAÇÃO E LIMPEZA ⚠️"
+    header_red "⚠️  DESINSTALAÇÃO E LIMPEZA TOTAL ⚠️"
     echo -e "${TXT_RED}ATENÇÃO:${RESET} Esta ação é irreversível."
     echo "Isso irá remover:"
     echo " • O Xray Core, Configs, Usuários e Logs"
     echo " • O Bot Telegram e Backups"
-    echo " • Lixo do sistema (Cache APT, Logs antigos, Temporários)"
+    echo " • FAXINA PROFUNDA (Snaps antigos, Cache APT, Logs)"
     echo ""
     read -rp "Tem certeza que deseja continuar? [s/n]: " confirm
     
@@ -708,26 +716,35 @@ func_page_uninstall() {
     rm -f /usr/bin/xray-menu
     rm -f /usr/local/bin/uuidgen
 
-    # --- PARTE NOVA: A FAXINA DO SISTEMA ---
-    echo "5. Executando limpeza profunda do Sistema..."
+    # --- FAXINA PESADA (SEUS COMANDOS EFICIENTES) ---
+    echo "5. Executando limpeza profunda de disco..."
     
-    # Remove pacotes que foram instalados automaticamente e não são mais usados
-    apt-get autoremove -y > /dev/null 2>&1
-    
-    # Limpa o cache de instaladores (.deb)
+    # Limpeza do APT e Listas Corrompidas
+    echo "   - Limpando cache e listas do APT..."
     apt-get clean > /dev/null 2>&1
-    
-    # Limpa logs do sistema maiores que 50M ou mais velhos que 1 dia
-    journalctl --vacuum-size=50M --vacuum-time=1d > /dev/null 2>&1
-    
-    # Limpa arquivos temporários
+    apt-get autoremove -y > /dev/null 2>&1
+    rm -rf /var/lib/apt/lists/*
+
+    # Limpeza de Temporários e Logs (Vacuum 1s)
+    echo "   - Zerando logs do sistema e temporários..."
     rm -rf /tmp/*
-    # ---------------------------------------
+    journalctl --vacuum-time=1s > /dev/null 2>&1
+
+    # Limpeza de Snaps Antigos (O Grande Vilão do Espaço)
+    if command -v snap > /dev/null 2>&1; then
+        echo "   - Removendo revisões antigas do Snap (Isso libera muito espaço)..."
+        # Loop seguro para remover versões 'disabled'
+        snap list --all 2>/dev/null | awk '/disabled/{print $1, $3}' | \
+        while read snapname revision; do
+            snap remove "$snapname" --revision="$revision" > /dev/null 2>&1
+        done
+    fi
+    # ------------------------------------------------
 
     echo ""
     echo "========================================="
     echo -e "${TXT_GREEN}✅ DESINSTALAÇÃO E LIMPEZA CONCLUÍDAS!${RESET}"
-    echo "Espaço liberado e sistema otimizado."
+    echo "Seu disco foi totalmente liberado."
     echo "========================================="
     echo ""
     
