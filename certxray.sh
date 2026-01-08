@@ -89,8 +89,8 @@ systemctl stop xray
 certbot renew --quiet
 cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
 cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
-chmod 644 "$SSL_DIR/fullchain.pem"
-chmod 600 "$SSL_DIR/privkey.pem"
+chmod 777 "$SSL_DIR/fullchain.pem"
+chmod 777 "$SSL_DIR/privkey.pem"
 systemctl restart xray
 EOF
     chmod +x "$RENEW_SCRIPT"
@@ -113,6 +113,6 @@ else
         -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
         -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" > /dev/null 2>&1
         
-    chmod 644 "$SSL_DIR/fullchain.pem"
-    chmod 600 "$SSL_DIR/privkey.pem"
+    chmod 777 "$SSL_DIR/fullchain.pem"
+    chmod 777 "$SSL_DIR/privkey.pem"
 fi
