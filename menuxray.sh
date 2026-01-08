@@ -99,8 +99,7 @@ func_xray_cert() {
     local domain_arg="$1"
     
     # ATENÇÃO: Coloque o link RAW do seu arquivo certxray.sh no GitHub
-    local REPO_URL="https://raw.githubusercontent.com/SEU_USUARIO/SEU_REPO/main/certxray.sh"
-    
+    local REPO_URL="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/certxray.sh"   
     echo -e "Iniciando módulo de certificados (certxray)..."
     
     # Baixa e executa
@@ -109,7 +108,7 @@ func_xray_cert() {
     /usr/local/bin/certxray "$domain_arg"
 }
 
-func_xray_cert() {
+func_xray_cert1000() {
     local domain="$1"
     mkdir -p "$SSL_DIR"
     echo "Gerando Certificado para: $domain..."
