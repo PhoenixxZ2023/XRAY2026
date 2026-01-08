@@ -1,6 +1,6 @@
 #!/bin/bash
-# certxray.sh - Gerenciador de Certificados DragonCore (Pro Edition)
-# Baseado na logica de renovacao segura e Snap
+# certxray.sh - Gerenciador de Certificados DragonCore (Versão Final Automática)
+# Inclui instalação via Snap e Automação total sem perguntas
 
 DOMAIN="$1"
 
@@ -31,107 +31,109 @@ fi
 
 mkdir -p "$SSL_DIR"
 
-header_blue "GERANDO CERTIFICADO SSL (SNAP + RENOVAÇÃO)"
+header_blue "PREPARANDO AMBIENTE CERTBOT"
 
-# 1. VERIFICA PORTA 80
-echo "Verificando porta 80..."
-if ! command -v lsof &> /dev/null; then apt-get install lsof -y > /dev/null 2>&1; fi
-port80_pid=$(lsof -t -i:80)
+# 1. INSTALAÇÃO AUTOMÁTICA DO SNAP E CERTBOT (O que fizemos manualmente)
+echo -e "${TXT_YELLOW}🔧 Verificando/Instalando Certbot via Snap...${RESET}"
 
-if [ -n "$port80_pid" ]; then
-    echo -e "${TXT_RED}❌ AVISO: A porta 80 está ocupada!${RESET}"
-    echo "O Certbot precisa dela livre."
-    read -rp "Parar serviço temporariamente? [s/n]: " stop_opt
-    if [[ "$stop_opt" == "s" ]]; then
-        kill -9 $port80_pid > /dev/null 2>&1
-        systemctl stop nginx > /dev/null 2>&1
-        systemctl stop apache2 > /dev/null 2>&1
-        systemctl stop xray > /dev/null 2>&1
-        sleep 2
-    else
-        echo "Cancelando Certbot. Usando OpenSSL..."
-        certbot_failed=true
-    fi
+# Atualiza pacotes básicos
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y > /dev/null 2>&1
+apt-get install lsof -y > /dev/null 2>&1
+
+# Instala Snap se não tiver
+if ! command -v snap &> /dev/null; then
+    echo "Instalando Snapd..."
+    apt-get install snapd -y > /dev/null 2>&1
 fi
 
-# 2. INSTALAÇÃO VIA SNAP (A MELHOR PRÁTICA)
-if [ "$certbot_failed" != "true" ]; then
-    echo -e "${TXT_YELLOW}🔧 Verificando Certbot (Snap)...${RESET}"
-    
-    if ! command -v snap &> /dev/null; then
-        apt-get update -qq
-        apt-get install snapd -y > /dev/null 2>&1
-    fi
-
-    # Instala/Atualiza Certbot via Snap
+# Instala Core e Certbot (Comandos manuais automatizados)
+if ! snap list | grep -q "certbot"; then
+    echo "Configurando Snap Core..."
     snap install core > /dev/null 2>&1
     snap refresh core > /dev/null 2>&1
+    
+    echo "Baixando Certbot Oficial..."
     snap install --classic certbot > /dev/null 2>&1
     ln -sf /snap/bin/certbot /usr/bin/certbot
-
-    # 3. GERA O CERTIFICADO
-    echo -e "${TXT_GREEN}🟢 Gerando certificado para $DOMAIN...${RESET}"
-    
-    if certbot certonly --standalone -d "$DOMAIN" --register-unsafely-without-email --agree-tos --non-interactive; then
-        echo -e "${TXT_GREEN}✅ SUCESSO! Certificado Gerado.${RESET}"
-        
-        # 4. A ZONA SEGURA (COPIA OS ARQUIVOS)
-        # O Xray vai ler daqui, onde as permissões são garantidas
-        LE_DIR="/etc/letsencrypt/live/$DOMAIN"
-        cp "$LE_DIR/fullchain.pem" "$CRT_FILE"
-        cp "$LE_DIR/privkey.pem" "$KEY_FILE"
-        chmod 644 "$CRT_FILE"
-        chmod 600 "$KEY_FILE"
-        
-        # 5. CRIA O SCRIPT DE RENOVAÇÃO AUTOMÁTICA
-        echo -e "${TXT_YELLOW}🕒 Criando script de renovação inteligente...${RESET}"
-        cat > "$RENEW_SCRIPT" <<EOF
-#!/bin/bash
-# Script de Renovacao Automatica DragonCore
-DOMAIN="$DOMAIN"
-SSL_DIR="$SSL_DIR"
-LE_DIR="/etc/letsencrypt/live/\$DOMAIN"
-
-# Para o Xray se ele estiver usando a porta 80 (Opcional, mas seguro)
-systemctl stop xray
-
-# Tenta renovar
-certbot renew --quiet
-
-# Copia os novos arquivos para a pasta do DragonCore
-cp "\$LE_DIR/fullchain.pem" "\$SSL_DIR/fullchain.pem"
-cp "\$LE_DIR/privkey.pem" "\$SSL_DIR/privkey.pem"
-
-# Ajusta permissoes
-chmod 644 "\$SSL_DIR/fullchain.pem"
-chmod 600 "\$SSL_DIR/privkey.pem"
-
-# Reinicia o Xray para aplicar
-systemctl restart xray
-EOF
-        chmod +x "$RENEW_SCRIPT"
-
-        # 6. AGENDA NO CRON (TODO DIA 1, ÀS 3 DA MANHÃ)
-        if ! crontab -l 2>/dev/null | grep -q "renew_cert.sh"; then
-            (crontab -l 2>/dev/null; echo "0 3 1 * * $RENEW_SCRIPT >/dev/null 2>&1") | crontab -
-            echo -e "${TXT_GREEN}✔ Renovação automática agendada.${RESET}"
-        fi
-        
-        exit 0
-    else
-        echo -e "${TXT_RED}❌ FALHA NO CERTBOT.${RESET}"
-        echo "Caindo para OpenSSL..."
-        certbot_failed=true
-    fi
+else
+    echo -e "${TXT_GREEN}✔ Certbot já instalado via Snap.${RESET}"
 fi
 
-# 7. FALLBACK OPENSSL (PLANO B)
-if [ "$certbot_failed" == "true" ]; then
-    echo -e "${TXT_YELLOW}⚠️  Gerando Certificado Autoassinado (OpenSSL)...${RESET}"
+# 2. LIMPEZA BRUTAL DA PORTA 80 (Para garantir que nada atrapalhe)
+echo -e "${TXT_YELLOW}🧹 Liberando a porta 80...${RESET}"
+systemctl stop xray > /dev/null 2>&1
+systemctl stop nginx > /dev/null 2>&1
+systemctl stop apache2 > /dev/null 2>&1
+
+# Mata qualquer processo teimoso na porta 80
+fuser -k 80/tcp > /dev/null 2>&1
+sleep 2
+
+# 3. GERAÇÃO DO CERTIFICADO (SEM PERGUNTAS Y/N)
+header_blue "GERANDO CERTIFICADO SSL (LETS ENCRYPT)"
+echo -e "Domínio: ${TXT_YELLOW}$DOMAIN${RESET}"
+echo ""
+
+# AQUI ESTÁ O SEGREDO: Flags para não perguntar nada ao cliente
+if certbot certonly --standalone \
+    -d "$DOMAIN" \
+    --register-unsafely-without-email \
+    --agree-tos \
+    --non-interactive \
+    --force-renewal; then
+
+    echo ""
+    echo -e "${TXT_GREEN}✅ SUCESSO! Certificado Gerado.${RESET}"
+    
+    # 4. CÓPIA DOS ARQUIVOS (O que você fez com cp)
+    LE_DIR="/etc/letsencrypt/live/$DOMAIN"
+    
+    # Verifica se o arquivo existe antes de copiar
+    if [ -f "$LE_DIR/fullchain.pem" ]; then
+        cp "$LE_DIR/fullchain.pem" "$CRT_FILE"
+        cp "$LE_DIR/privkey.pem" "$KEY_FILE"
+        chmod 777 "$CRT_FILE"
+        chmod 777 "$KEY_FILE"
+        echo -e "${TXT_GREEN}✔ Arquivos copiados para DragonCoreSSL.${RESET}"
+    else
+        # Se por algum motivo o certbot disse OK mas não criou a pasta (raro)
+        echo -e "${TXT_RED}Erro: Arquivos não encontrados em $LE_DIR${RESET}"
+        exit 1
+    fi
+
+    # 5. CRIA O SCRIPT DE RENOVAÇÃO
+    cat > "$RENEW_SCRIPT" <<EOF
+#!/bin/bash
+systemctl stop xray
+certbot renew --quiet
+cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$SSL_DIR/fullchain.pem"
+cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$SSL_DIR/privkey.pem"
+chmod 644 "$SSL_DIR/fullchain.pem"
+chmod 600 "$SSL_DIR/privkey.pem"
+systemctl restart xray
+EOF
+    chmod +x "$RENEW_SCRIPT"
+
+    # Cronjob
+    if ! crontab -l 2>/dev/null | grep -q "renew_cert.sh"; then
+        (crontab -l 2>/dev/null; echo "0 3 1 * * $RENEW_SCRIPT >/dev/null 2>&1") | crontab -
+    fi
+    
+    exit 0
+
+else
+    # 6. FALLBACK (Se der erro mesmo com tudo isso)
+    echo ""
+    echo -e "${TXT_RED}❌ FALHA NO CERTBOT.${RESET}"
+    echo "Motivo provável: Bloqueio de Firewall ou IP incorreto."
+    echo "Gerando certificado autoassinado para não ficar offline..."
+    
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
         -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
         -keyout "$KEY_FILE" -out "$CRT_FILE" > /dev/null 2>&1
+        
     chmod 644 "$CRT_FILE"
     chmod 600 "$KEY_FILE"
-    echo -e "${TXT_GREEN}✔ Certificado Autoassinado criado.${RESET}"
+    echo -e "${TXT_YELLOW}⚠️  Usando Certificado Autoassinado (OpenSSL).${RESET}"
 fi
