@@ -94,33 +94,19 @@ func_install_official_core() {
 }
 
 # --- CERTIFICADO EXTERNO ---
+# Coloque isso junto com as outras funções no início do menuxray.sh
 func_xray_cert() {
     local domain_arg="$1"
     
-    # URL do seu script (TROQUE PELO SEU LINK GITHUB)
-    local CERT_URL="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/certxray.sh"
-    local CERT_SCRIPT="/tmp/certxray.sh"
-
-    echo "Baixando gerenciador de certificados..."
-    curl -s -L -o "$CERT_SCRIPT" "$CERT_URL"
+    # ATENÇÃO: Coloque o link RAW do seu arquivo certxray.sh no GitHub
+    local REPO_URL="https://raw.githubusercontent.com/SEU_USUARIO/SEU_REPO/main/certxray.sh"
     
-    if [ ! -f "$CERT_SCRIPT" ]; then
-        echo -e "${TXT_RED}Erro ao baixar certxray.sh!${RESET}"
-        echo "Verifique sua conexão ou o link do repositório."
-        sleep 3
-        # Fallback de emergência (Gera um fake rapidinho só pra não travar)
-        openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-        -subj "/CN=$domain_arg" -keyout "$KEY_FILE" -out "$CRT_FILE" > /dev/null 2>&1
-        return
-    fi
-
-    chmod +x "$CERT_SCRIPT"
+    echo -e "Iniciando módulo de certificados (certxray)..."
     
-    # Executa o script externo passando o domínio como argumento
-    bash "$CERT_SCRIPT" "$domain_arg"
-    
-    # Remove o script temporário depois de usar
-    rm -f "$CERT_SCRIPT"
+    # Baixa e executa
+    wget -q -O /usr/local/bin/certxray "$REPO_URL"
+    chmod +x /usr/local/bin/certxray
+    /usr/local/bin/certxray "$domain_arg"
 }
 
 func_xray_cert() {
@@ -600,8 +586,9 @@ func_wizard_install() {
     # -------------------------------------------
 
     clear
-    header_blue "PASSO 4: DOMINIO E SNI"
+   header_blue "PASSO 4: DOMINIO E SNI"
     local domain_val=""
+    
     if [ "$use_tls" == "true" ]; then
         echo -e "${TXT_GREEN}MODO SUPREMO ATIVADO!${RESET}"
         echo -e "${TXT_YELLOW}DIGITE O SEU DOMINIO OU SUBDOMINIO:${RESET}"
@@ -609,13 +596,23 @@ func_wizard_install() {
         echo "AVISO: O dominio deve estar apontado para este IP!"
         echo ""
         read -rp "Dominio: " domain_val
-        func_xray_cert "$domain_val" 
+        
+        # --- AQUI É A CHAMADA DO CERTXRAY ---
+        # Verifica se o usuário não deixou em branco antes de chamar
+        if [ -n "$domain_val" ]; then
+            func_xray_cert "$domain_val"
+        else
+            echo "Dominio vazio, pulando etapa do certxray..."
+        fi
+        # ------------------------------------
+
     else
         echo "Modo sem TLS selecionado."
         echo -e "${TXT_YELLOW}DIGITE O DOMINIO OU IP DA VPS:${RESET}"
         read -rp "Endereco: " domain_val
         if [ -z "$domain_val" ]; then domain_val=$(curl -s icanhazip.com); fi
     fi
+    
     echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
 
     clear
