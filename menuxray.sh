@@ -803,11 +803,19 @@ func_page_uninstall() {
     echo "Isso irá remover:"
     echo " • O Xray Core, Configs, Usuários e Logs"
     echo " • O Bot Telegram e Backups"
+    echo " • Certificados SSL e configurações do Certbot"  # <--- ADICIONADO
     echo " • FAXINA PROFUNDA (Snaps antigos, Cache APT, Logs)"
     echo ""
     read -rp "Tem certeza que deseja continuar? [s/n]: " confirm
     
     if [[ "$confirm" != "s" ]]; then return; fi
+
+    # --- NOVO: Tenta descobrir o domínio antes de apagar tudo (para limpar o Certbot) ---
+    local domain_rem=""
+    if [ -f "/usr/local/etc/xray/preset.json" ]; then
+        domain_rem=$(grep -oP '"domain": "\K[^"]+' /usr/local/etc/xray/preset.json)
+    fi
+    # -----------------------------------------------------------------------------------
 
     echo ""
     echo "1. Parando serviços..."
@@ -816,7 +824,7 @@ func_page_uninstall() {
     systemctl stop botxray > /dev/null 2>&1
     systemctl disable botxray > /dev/null 2>&1
 
-    echo "2. Removendo arquivos do Xray..."
+    echo "2. Removendo arquivos do Xray e Certificados..."
     rm -f /etc/systemd/system/xray.service
     rm -f /etc/systemd/system/botxray.service
     systemctl daemon-reload
@@ -827,15 +835,24 @@ func_page_uninstall() {
     rm -rf /var/log/xray
     rm -rf /opt/XrayTools
     rm -rf /root/backups 
+    rm -rf /opt/DragonCoreSSL   # <--- NOVO: Remove a pasta de certificados locais
+
+    # --- NOVO: Limpeza no Certbot (Evita o erro "not yet due" na reinstalação) ---
+    if [ ! -z "$domain_rem" ] && command -v certbot &> /dev/null; then
+        echo "   - Removendo registro do Certbot para: $domain_rem..."
+        certbot delete --cert-name "$domain_rem" --non-interactive > /dev/null 2>&1
+    fi
+    # -----------------------------------------------------------------------------
 
     echo "3. Limpando agendamentos (Cron)..."
-    crontab -l | grep -v "menuxray" | grep -v "limiter" | crontab -
+    # Adicionado grep -v "renew_cert.sh" para remover a renovação automática
+    crontab -l 2>/dev/null | grep -v "menuxray" | grep -v "limiter" | grep -v "renew_cert.sh" | crontab -
     
     echo "4. Removendo atalhos..."
     rm -f /usr/bin/xray-menu
     rm -f /usr/local/bin/uuidgen
 
-    # --- FAXINA PESADA (SEUS COMANDOS EFICIENTES) ---
+    # --- FAXINA PESADA (SEUS COMANDOS) ---
     echo "5. Executando limpeza profunda de disco..."
     
     # Limpeza do APT e Listas Corrompidas
@@ -849,7 +866,7 @@ func_page_uninstall() {
     rm -rf /tmp/*
     journalctl --vacuum-time=1s > /dev/null 2>&1
 
-    # Limpeza de Snaps Antigos (O Grande Vilão do Espaço)
+    # Limpeza de Snaps Antigos
     if command -v snap > /dev/null 2>&1; then
         echo "   - Removendo revisões antigas do Snap (Isso libera muito espaço)..."
         # Loop seguro para remover versões 'disabled'
@@ -863,7 +880,7 @@ func_page_uninstall() {
     echo ""
     echo "========================================="
     echo -e "${TXT_GREEN}✅ DESINSTALAÇÃO E LIMPEZA CONCLUÍDAS!${RESET}"
-    echo "Seu disco foi totalmente liberado."
+    echo "Seu disco foi totalmente liberado e certificados removidos."
     echo "========================================="
     echo ""
     
