@@ -67,9 +67,9 @@ case $cert_opt in
             # --- A CORREÇÃO MÁGICA ---
             # Força a pasta ser acessível e os arquivos serem legíveis
             echo "Ajustando permissões para o Xray..."
-            chmod 777 "$SSL_DIR"
-            chmod 777 "$SSL_DIR/fullchain.pem"
-            chmod 777 "$SSL_DIR/privkey.pem"
+            chmod 755 "$SSL_DIR"
+            chmod 644 "$SSL_DIR/fullchain.pem"
+            chmod 644 "$SSL_DIR/privkey.pem"
             # -------------------------
             
             # Cria script de renovação
@@ -79,8 +79,8 @@ systemctl stop xray
 certbot renew --quiet
 cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
 cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
-chmod 777 "$SSL_DIR/fullchain.pem"
-chmod 777 "$SSL_DIR/privkey.pem"
+chmod 644 "$SSL_DIR/fullchain.pem"
+chmod 644 "$SSL_DIR/privkey.pem"
 systemctl restart xray
 EOF
             chmod +x "$RENEW_SCRIPT"
@@ -105,7 +105,7 @@ EOF
         -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" >/dev/null 2>&1
         
         # Garante permissão no autoassinado também
-        chmod 777 "$SSL_DIR/fullchain.pem"
-        chmod 777 "$SSL_DIR/privkey.pem"
+        chmod 644 "$SSL_DIR/fullchain.pem"
+        chmod 644 "$SSL_DIR/privkey.pem"
         ;;
 esac
