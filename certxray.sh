@@ -1,13 +1,13 @@
 #!/bin/bash
-# certxray.sh - Gerenciador de Certificados DragonCore (Versão Final Automática)
+# certxray.sh - Correção para "Not Yet Due"
+# Lógica: Tenta gerar, mas se já existir, instala do mesmo jeito.
 
 DOMAIN="$1"
 
 # --- CAMINHOS ---
 SSL_DIR="/opt/DragonCoreSSL"
+LE_DIR="/etc/letsencrypt/live/$DOMAIN"
 RENEW_SCRIPT="$SSL_DIR/renew_cert.sh"
-KEY_FILE="$SSL_DIR/privkey.pem"
-CRT_FILE="$SSL_DIR/fullchain.pem"
 
 # --- CORES ---
 TXT_GREEN='\033[1;32m'
@@ -31,7 +31,7 @@ mkdir -p "$SSL_DIR"
 
 header_blue "PREPARANDO AMBIENTE CERTBOT"
 
-# 1. INSTALAÇÃO AUTOMÁTICA (SNAP)
+# 1. INSTALAÇÃO DO SNAP/CERTBOT (Se não tiver)
 export DEBIAN_FRONTEND=noninteractive
 if ! command -v snap &> /dev/null; then
     apt-get update -y > /dev/null 2>&1
@@ -52,50 +52,50 @@ systemctl stop nginx > /dev/null 2>&1
 fuser -k 80/tcp > /dev/null 2>&1
 sleep 2
 
-# 3. GERAÇÃO DO CERTIFICADO (COM FORÇA BRUTA)
-header_blue "GERANDO CERTIFICADO SSL"
+# 3. EXECUÇÃO DO CERTBOT
+header_blue "OBTENDO CERTIFICADO SSL"
 echo -e "Domínio: ${TXT_YELLOW}$DOMAIN${RESET}"
 
-# AQUI ESTÁ A CORREÇÃO: --force-renewal
-# Isso obriga a gerar um novo, evitando o erro "not yet due"
-if certbot certonly --standalone \
+# Tenta obter o certificado (ou renovar, ou manter o atual)
+certbot certonly --standalone \
     -d "$DOMAIN" \
     --register-unsafely-without-email \
     --agree-tos \
-    --non-interactive \
-    --force-renewal; then
+    --non-interactive
 
+# 4. A CORREÇÃO MÁGICA (VERIFICAÇÃO DE ARQUIVO)
+# Aqui mudamos a lógica: Não importa se o comando acima deu "not due",
+# nós verificamos se o arquivo EXISTE na pasta do sistema.
+
+if [ -f "$LE_DIR/fullchain.pem" ]; then
     echo ""
-    echo -e "${TXT_GREEN}✅ SUCESSO! Certificado Gerado.${RESET}"
+    echo -e "${TXT_GREEN}✅ Certificado Válido Encontrado!${RESET}"
+    echo -e "${TXT_YELLOW}🔄 Instalando no DragonCore...${RESET}"
     
-    # 4. CÓPIA OBRIGATÓRIA
-    LE_DIR="/etc/letsencrypt/live/$DOMAIN"
+    # Copia FORÇADA (-f) para garantir que sobrescreva o antigo/falso
+    cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
+    cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
     
-    if [ -f "$LE_DIR/fullchain.pem" ]; then
-        cp -f "$LE_DIR/fullchain.pem" "$CRT_FILE"
-        cp -f "$LE_DIR/privkey.pem" "$KEY_FILE"
-        chmod 644 "$CRT_FILE"
-        chmod 600 "$KEY_FILE"
-        echo -e "${TXT_GREEN}✔ Certificado instalado no DragonCore.${RESET}"
-    else
-        echo -e "${TXT_RED}Erro crítico: Arquivos não encontrados!${RESET}"
-        exit 1
-    fi
+    # Ajusta permissões
+    chmod 644 "$SSL_DIR/fullchain.pem"
+    chmod 600 "$SSL_DIR/privkey.pem"
+    
+    echo -e "${TXT_GREEN}✔ Certificado Oficial Instalado com Sucesso.${RESET}"
 
-    # 5. SCRIPT DE RENOVAÇÃO
+    # Cria script de renovação automática
     cat > "$RENEW_SCRIPT" <<EOF
 #!/bin/bash
 systemctl stop xray
-certbot renew --quiet --force-renewal
-cp -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$SSL_DIR/fullchain.pem"
-cp -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$SSL_DIR/privkey.pem"
+certbot renew --quiet
+cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
+cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
 chmod 644 "$SSL_DIR/fullchain.pem"
 chmod 600 "$SSL_DIR/privkey.pem"
 systemctl restart xray
 EOF
     chmod +x "$RENEW_SCRIPT"
-
-    # Cronjob
+    
+    # Adiciona no Cron (Agendador)
     if ! crontab -l 2>/dev/null | grep -q "renew_cert.sh"; then
         (crontab -l 2>/dev/null; echo "0 3 1 * * $RENEW_SCRIPT >/dev/null 2>&1") | crontab -
     fi
@@ -103,13 +103,16 @@ EOF
     exit 0
 
 else
-    # 6. FALLBACK OPENSSL
+    # 5. FALLBACK (Só entra aqui se realmente NÃO existir certificado nenhum)
     echo ""
-    echo -e "${TXT_RED}❌ FALHA NO CERTBOT.${RESET}"
-    echo "Gerando Autoassinado..."
+    echo -e "${TXT_RED}❌ O Certbot não gerou os arquivos.${RESET}"
+    echo "Verifique Firewall (Porta 80) ou apontamento de DNS."
+    echo "Gerando certificado autoassinado de emergência..."
+    
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
         -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
-        -keyout "$KEY_FILE" -out "$CRT_FILE" > /dev/null 2>&1
-    chmod 644 "$CRT_FILE"
-    chmod 600 "$KEY_FILE"
+        -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" > /dev/null 2>&1
+        
+    chmod 644 "$SSL_DIR/fullchain.pem"
+    chmod 600 "$SSL_DIR/privkey.pem"
 fi
