@@ -384,9 +384,38 @@ func_generate_config() {
     # --- AQUI ESTÁ O PADDING DO XHTTP (CONFIRMADO) ---
     if [ "$network" == "xhttp" ]; then
         if [ "$use_tls" = "true" ]; then
-            stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "xhttp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], alpn: ["h2", "http/1.1"]}, xhttpSettings: {path: "/", scMaxBufferedPosts: 30, xPaddingBytes: "100-1000"}}')
+            # Configuração com TLS + Padding + StreamUp (Anti-Bloqueio)
+            stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
+            '{
+                network: "xhttp", 
+                security: "tls", 
+                tlsSettings: {
+                    serverName: $dom, 
+                    certificates: [{certificateFile: $crt, keyFile: $key}], 
+                    alpn: ["h2", "http/1.1"]
+                }, 
+                xhttpSettings: {
+                    path: "/", 
+                    scMaxBufferedPosts: 30, 
+                    scMaxEachPostBytes: "1000000",
+                    scStreamUpServerSecs: "20-80", 
+                    xPaddingBytes: "100-1000"
+                }
+            }')
         else
-            stream_settings=$(jq -n '{network: "xhttp", security: "none", xhttpSettings: {path: "/", scMaxBufferedPosts: 30, xPaddingBytes: "100-1000"}}')
+            # Configuração sem TLS (Apenas Padding)
+            stream_settings=$(jq -n \
+            '{
+                network: "xhttp", 
+                security: "none", 
+                xhttpSettings: {
+                    path: "/", 
+                    scMaxBufferedPosts: 30, 
+                    scMaxEachPostBytes: "1000000",
+                    scStreamUpServerSecs: "20-80", 
+                    xPaddingBytes: "100-1000"
+                }
+            }')
         fi
     elif [ "$network" == "ws" ]; then
         if [ "$use_tls" = "true" ]; then
