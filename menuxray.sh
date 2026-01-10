@@ -993,14 +993,23 @@ if [ -z "$1" ]; then
             11) func_module_block ;;
             12) func_module_unblock ;;
             13) 
-                if [ -f "/usr/local/bin/onlinexray.sh" ]; then
-                    bash /usr/local/bin/onlinexray.sh
+                echo -e "${TXT_YELLOW}Baixando monitor atualizado...${RESET}"
+                # URL do seu GitHub (Raw)
+                local url_monitor="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/onlinexray.sh"
+                local file_monitor="/usr/local/bin/onlinexray.sh"
+                
+                # Baixa o arquivo sobrescrevendo o antigo (Atualização automática)
+                curl -s -L -o "$file_monitor" "$url_monitor"
+                chmod +x "$file_monitor"
+                
+                if [ -f "$file_monitor" ]; then
+                    bash "$file_monitor"
                 else
-                    echo "Instale o script de monitoramento primeiro!"
-                    sleep 2
+                    echo -e "${TXT_RED}Erro ao baixar o script do GitHub!${RESET}"
+                    echo "Verifique sua internet ou o link do repositório."
+                    sleep 3
                 fi
                 ;;
-            # --------------------
             0) exit 0 ;;
         esac
     done
