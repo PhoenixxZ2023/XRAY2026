@@ -992,11 +992,11 @@ if [ -z "$1" ]; then
             10) func_restore_system ;;
             11) func_module_block ;;
             12) func_module_unblock ;;
-            13) 
+           13) 
                 echo -e "${TXT_YELLOW}Baixando monitor atualizado...${RESET}"
                 # URL do seu GitHub (Raw)
-                local url_monitor="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/onlinexray.sh"
-                local file_monitor="/usr/local/bin/onlinexray.sh"
+                url_monitor="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/onlinexray.sh"
+                file_monitor="/usr/local/bin/onlinexray.sh"
                 
                 # Baixa o arquivo sobrescrevendo o antigo (Atualização automática)
                 curl -s -L -o "$file_monitor" "$url_monitor"
