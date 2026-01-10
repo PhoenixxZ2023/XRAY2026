@@ -939,23 +939,20 @@ menu_display() {
         bot_status="${TXT_GREEN}ATIVADO${RESET}"
     fi
 
-    # --- NOVO BLOCO: CONTADOR DE ONLINE (MODO RÁPIDO) ---
+  # --- CONTADOR DE ONLINE (CORRIGIDO: ss -tn em vez de ss -tqn) ---
     local online_count="00"
-    # Limpa a porta para ficar só números
     local clean_port=$(echo "$port" | tr -dc '0-9')
-    
     if [ -n "$clean_port" ] && [ "$clean_port" != "?" ]; then
-         # Conta conexões estabelecidas na porta do Xray usando 'ss'
-         online_count=$(ss -tqn state established "( sport = :$clean_port )" | wc -l)
+         # Conta conexões estabelecidas na porta do Xray
+         online_count=$(ss -tn state established "( sport = :$clean_port )" | wc -l)
          # Formata com zero a esquerda (ex: 05)
          online_count=$(printf "%02d" $online_count)
     fi
-    # ----------------------------------------------------
+    # ----------------------------------------------
 
-    # --- EXIBIÇÃO DO CABEÇALHO (LINHA ALTERADA) ---
+    # --- EXIBIÇÃO DO CABEÇALHO ---
     echo "-----------------------------------------"
     echo -e "${TXT_CYAN}XRAY:${RESET}       $status_txt"
-    # ESTA LINHA ABAIXO MUDOU (AGORA TEM O ONLINES AO LADO):
     echo -e "${TXT_CYAN}CLIENTES:${RESET}   $users_count      ${TXT_CYAN}ONLINES:${RESET} $online_count"
     echo -e "${TXT_CYAN}INFO:${RESET}       $proto_info"
     echo -e "${TXT_CYAN}BOT XRAY:${RESET}   $bot_status"
