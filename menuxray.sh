@@ -94,6 +94,28 @@ func_install_official_core() {
     fi
 }
 
+func_call_monitor() {
+    local monitor_local="/usr/local/bin/onlinexray.sh"
+    local monitor_url="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/onlinexray.sh"
+
+    echo -e "${TXT_YELLOW}Baixando Monitor Online...${RESET}"
+    
+    # Baixa o arquivo do GitHub
+    curl -s -L -o "$monitor_local" "$monitor_url"
+    
+    if [ $? -eq 0 ]; then
+        # Garante permissão e corrige formato Windows se necessário
+        chmod +x "$monitor_local"
+        sed -i 's/\r$//' "$monitor_local"
+        
+        # Executa o monitor
+        bash "$monitor_local"
+    else
+        echo -e "${TXT_RED}Erro ao baixar o script! Verifique o GitHub.${RESET}"
+        sleep 3
+    fi
+}
+
 # --- CERTIFICADO EXTERNO ---
 # Coloque isso junto com as outras funções no início do menuxray.sh
 func_xray_cert() {
@@ -989,27 +1011,7 @@ if [ -z "$1" ]; then
             10) func_restore_system ;;
             11) func_module_block ;;
             12) func_module_unblock ;;
-            13) 
-                echo -e "${TXT_YELLOW}Baixando monitor atualizado...${RESET}"
-                
-                # Definição de variáveis (SEM "local")
-                url_monitor="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/onlinexray.sh"
-                file_monitor="/usr/local/bin/onlinexray.sh"
-                
-                # 1. Baixa o arquivo
-                if curl -s -L -o "$file_monitor" "$url_monitor"; then
-                    
-                    # 2. Converte formato Windows para Linux (CRLF -> LF)
-                    sed -i 's/\r$//' "$file_monitor"
-                    
-                    # 3. Dá permissão e Executa
-                    chmod +x "$file_monitor"
-                    bash "$file_monitor"
-                else
-                    echo -e "${TXT_RED}Erro fatal: Falha no download!${RESET}"
-                    sleep 3
-                fi
-                ;;
+            13) func_call_monitor ;;
             0) exit 0 ;;
         esac
     done
