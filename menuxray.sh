@@ -943,10 +943,9 @@ menu_display() {
     local online_count="00"
     local clean_port=$(echo "$port" | tr -dc '0-9')
     if [ -n "$clean_port" ] && [ "$clean_port" != "?" ]; then
-         # Conta conexões estabelecidas na porta do Xray
-         online_count=$(ss -tn state established "( sport = :$clean_port )" | wc -l)
-         # Formata com zero a esquerda (ex: 05)
-         online_count=$(printf "%02d" $online_count)
+     # Filtra pelo IP remoto (Coluna 5), remove a porta e conta IPs únicos
+     online_count=$(ss -tn state established "sport = :$clean_port" | awk '{print $5}' | sed 's/:[^:]*$//' | sort | uniq | wc -l)
+     online_count=$(printf "%02d" $online_count)
     fi
     # ----------------------------------------------
 
