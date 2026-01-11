@@ -1,4 +1,3 @@
-cat > /usr/local/bin/onlinexray.sh << 'EOF'
 #!/bin/bash
 # onlinexray.sh - Monitor de Usuários Online (Modo Espião)
 
@@ -24,7 +23,7 @@ trap restaurar_log SIGINT
 
 clear
 echo -e "${CYAN}================================================${RESET}"
-echo -e "${CYAN}        MONITOR DE USUÁRIOS ONLINE (XRAY)       ${RESET}"
+echo -e "${CYAN}         MONITOR DE USUÁRIOS ONLINE (XRAY)      ${RESET}"
 echo -e "${CYAN}================================================${RESET}"
 echo -e "${YELLOW}Ativando modo espião... (Aguarde)${RESET}"
 
@@ -46,6 +45,3 @@ while read line ; do
         echo -e "${CYAN}[$HORA]${RESET} Usuário: ${GREEN}$USER${RESET} ${YELLOW}(Online)${RESET}"
     fi
 done
-EOF
-
-chmod +x /usr/local/bin/onlinexray.sh
