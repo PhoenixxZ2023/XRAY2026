@@ -992,21 +992,24 @@ if [ -z "$1" ]; then
             10) func_restore_system ;;
             11) func_module_block ;;
             12) func_module_unblock ;;
-           13) 
+            13) 
                 echo -e "${TXT_YELLOW}Baixando monitor atualizado...${RESET}"
-                # URL do seu GitHub (Raw)
+                
+                # Definição de variáveis (SEM "local")
                 url_monitor="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/onlinexray.sh"
                 file_monitor="/usr/local/bin/onlinexray.sh"
                 
-                # Baixa o arquivo sobrescrevendo o antigo (Atualização automática)
-                curl -s -L -o "$file_monitor" "$url_monitor"
-                chmod +x "$file_monitor"
-                
-                if [ -f "$file_monitor" ]; then
+                # 1. Baixa o arquivo
+                if curl -s -L -o "$file_monitor" "$url_monitor"; then
+                    
+                    # 2. Converte formato Windows para Linux (CRLF -> LF)
+                    sed -i 's/\r$//' "$file_monitor"
+                    
+                    # 3. Dá permissão e Executa
+                    chmod +x "$file_monitor"
                     bash "$file_monitor"
                 else
-                    echo -e "${TXT_RED}Erro ao baixar o script do GitHub!${RESET}"
-                    echo "Verifique sua internet ou o link do repositório."
+                    echo -e "${TXT_RED}Erro fatal: Falha no download!${RESET}"
                     sleep 3
                 fi
                 ;;
