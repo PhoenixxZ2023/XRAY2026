@@ -900,28 +900,27 @@ func_call_limiter() {
     bash "$LIMITER_LOCAL"
 }
 
-# --- MENU PRINCIPAL (CORRIGIDO: NOME DA FUNÇÃO ADICIONADO) ---
+# --- MENU PRINCIPAL (LAYOUT ATUALIZADO) ---
 menu_display() {
     clear
-    echo -e "${TITLE_BAR}      DRAGONCORE XRAY MANAGER      ${RESET}"
+    echo -e "${TITLE_BAR}       DRAGONCORE XRAY MANAGER       ${RESET}"
     echo ""
     
     local status_txt="${TXT_RED}DESATIVADO${RESET}"
     local proto_info="${TXT_RED}---${RESET}"
     local users_count="0"
     local preset_file="/usr/local/etc/xray/preset.json"
+    local port="?"
     
     if [ -f "$USER_DB" ]; then users_count=$(wc -l < "$USER_DB"); fi
 
     if systemctl is-active --quiet xray; then
         status_txt="${TXT_GREEN}ATIVADO${RESET}"
         
-        # --- AQUI ELE LÊ O PRESET.JSON (MAIS RÁPIDO) ---
         if [ -f "$preset_file" ]; then
             local net=$(jq -r '.network' "$preset_file" 2>/dev/null)
-            local port=$(jq -r '.port' "$preset_file" 2>/dev/null)
+            port=$(jq -r '.port' "$preset_file" 2>/dev/null)
             
-            # Se falhar ao ler o preset, tenta ler o config original (backup)
             if [ -z "$net" ] || [ "$net" == "null" ]; then
                  net=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").streamSettings.network' "$CONFIG_PATH" 2>/dev/null)
                  port=$(jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").port' "$CONFIG_PATH" 2>/dev/null)
@@ -931,7 +930,6 @@ menu_display() {
             [ -z "$net" ] && net="?"
             proto_info="${TXT_CYAN}${net^^}${RESET} (Porta: ${TXT_CYAN}$port${RESET})"
         fi
-        # ------------------------------------------------
     fi
 
     local bot_status="${TXT_RED}DESATIVADO${RESET}"
@@ -939,20 +937,20 @@ menu_display() {
         bot_status="${TXT_GREEN}ATIVADO${RESET}"
     fi
 
-  # --- CONTADOR DE ONLINE (CORRIGIDO: ss -tn em vez de ss -tqn) ---
+    # --- CONTADOR DE ONLINE (Lógica de IPs Únicos) ---
     local online_count="00"
     local clean_port=$(echo "$port" | tr -dc '0-9')
     if [ -n "$clean_port" ] && [ "$clean_port" != "?" ]; then
-     # Filtra pelo IP remoto (Coluna 5), remove a porta e conta IPs únicos
-     online_count=$(ss -tn state established "sport = :$clean_port" | awk '{print $5}' | sed 's/:[^:]*$//' | sort | uniq | wc -l)
-     online_count=$(printf "%02d" $online_count)
+         online_count=$(ss -tn state established "sport = :$clean_port" | awk '{print $5}' | sed 's/:[^:]*$//' | sort | uniq | wc -l)
+         online_count=$(printf "%02d" $online_count)
     fi
-    # ----------------------------------------------
+    # -------------------------------------------------
 
-    # --- EXIBIÇÃO DO CABEÇALHO ---
+    # --- EXIBIÇÃO DO CABEÇALHO (NOVO LAYOUT) ---
     echo "-----------------------------------------"
     echo -e "${TXT_CYAN}XRAY:${RESET}       $status_txt"
-    echo -e "${TXT_CYAN}CLIENTES:${RESET}   $users_count      ${TXT_CYAN}ONLINES:${RESET} $online_count"
+    echo -e "${TXT_CYAN}USUÁRIOS:${RESET}   $users_count"
+    echo -e "${TXT_CYAN}ONLINES:${RESET}    $online_count"
     echo -e "${TXT_CYAN}INFO:${RESET}       $proto_info"
     echo -e "${TXT_CYAN}BOT XRAY:${RESET}   $bot_status"
     echo "-----------------------------------------"
@@ -965,7 +963,7 @@ menu_display() {
     echo -e "${TXT_CYAN}[06] DESINSTALAR XRAY${RESET}"
     echo -e "${TXT_CYAN}[07] LIMITADOR CONSUMO (GB)${RESET}"
     echo -e "${TXT_CYAN}[08] BOT TELEGRAM${RESET}"
-    echo -e "${TXT_CYAN}[09] CRIAR BACKUP${RESET}"    
+    echo -e "${TXT_CYAN}[09] CRIAR BACKUP${RESET}"     
     echo -e "${TXT_CYAN}[10] RESTAURAR BACKUP${RESET}" 
     echo -e "${TXT_CYAN}[11] BLOQUEAR USUÁRIOS${RESET}"
     echo -e "${TXT_CYAN}[12] DESBLOQUEAR USUÁRIOS${RESET}"
