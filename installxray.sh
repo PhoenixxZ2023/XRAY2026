@@ -1,6 +1,6 @@
 #!/bin/bash
 # installxray.sh - Instalador Premium V7.3 (Visual + Automação)
-# Repositório: https://gitea.com/KAKAROTO/Xray2026
+# Repositório: https://github.com/PhoenixxZ2023/XrayX-TLS
 
 # --- CORES ---
 VERMELHO='\033[1;31m'
