@@ -1,6 +1,7 @@
 #!/bin/bash
 # installxray.sh - Instalador Premium V7.3 (Visual + Automação)
 # Repositório: https://github.com/PhoenixxZ2023/XrayX-TLS
+# CORREÇÕES APLICADAS: Segurança Python (PEP 668) e Trava apt-get
 
 # --- CORES ---
 VERMELHO='\033[1;31m'
@@ -47,23 +48,19 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# 1. Atualizando repositórios
-(apt-get update -y) > /dev/null 2>&1 &
+# 1. Atualizando repositórios (Com trava noninteractive)
+(export DEBIAN_FRONTEND=noninteractive; apt-get update -y) > /dev/null 2>&1 &
 fun_bar $! "Atualizando Sistema"
 
 # 2. Instalando Dependências do Sistema + Python
-# Adicionado python3 e python3-pip na lista
 PACKAGES="curl jq bc cron git uuid-runtime python3 python3-pip"
-(apt-get install -y $PACKAGES) > /dev/null 2>&1 &
+(export DEBIAN_FRONTEND=noninteractive; apt-get install -y $PACKAGES) > /dev/null 2>&1 &
 fun_bar $! "Instalando Dependências e Python"
 
-# 3. Instalando Bibliotecas do Bot (Pip)
+# 3. Instalando Bibliotecas do Bot (Pip Seguro)
 (
-    # Remove trava de pacotes externos (Debian 12/Ubuntu 23+)
-    rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
-    
-    # Instala a biblioteca do Telegram
-    pip3 install python-telegram-bot
+    # CORREÇÃO: Usa flag --break-system-packages em vez de deletar arquivos do sistema
+    pip3 install python-telegram-bot --break-system-packages
 ) > /dev/null 2>&1 &
 fun_bar $! "Configurando Bibliotecas do Bot"
 
@@ -76,11 +73,18 @@ fun_bar $! "Configurando Bibliotecas do Bot"
 
     # Menu Principal (Instala em /usr/local/bin)
     curl -s -L -o /usr/local/bin/menuxray.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/menuxray.sh"
-    chmod +x /usr/local/bin/menuxray.sh
+    
+    # Verificação de segurança: Só torna executável se baixou corretamente
+    if [ -s "/usr/local/bin/menuxray.sh" ]; then
+        chmod +x /usr/local/bin/menuxray.sh
+    fi
 
     # Limitador (Módulo)
     curl -s -L -o /usr/local/bin/limiterxray.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/limiterxray.sh"
-    chmod +x /usr/local/bin/limiterxray.sh
+    
+    if [ -s "/usr/local/bin/limiterxray.sh" ]; then
+        chmod +x /usr/local/bin/limiterxray.sh
+    fi
 
     # Atalho Global 'xray-menu'
     ln -s /usr/local/bin/menuxray.sh /usr/bin/xray-menu
