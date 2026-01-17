@@ -785,10 +785,17 @@ func_page_uninstall() {
     
     if [[ "$confirm" != "s" ]]; then return; fi
 
+    # --- MELHORIA: Tenta descobrir o domínio de várias fontes ---
     local domain_rem=""
+    # Tentativa 1: Preset JSON
     if [ -f "/usr/local/etc/xray/preset.json" ]; then
         domain_rem=$(grep -oP '"domain": "\K[^"]+' /usr/local/etc/xray/preset.json)
     fi
+    # Tentativa 2: Arquivo Active Domain (Caso o preset tenha sumido)
+    if [ -z "$domain_rem" ] && [ -f "$ACTIVE_DOMAIN_FILE" ]; then
+        domain_rem=$(cat "$ACTIVE_DOMAIN_FILE")
+    fi
+    # -----------------------------------------------------------
 
     echo ""
     echo "1. Parando serviços..."
@@ -813,9 +820,14 @@ func_page_uninstall() {
     # Remove os scripts em cache
     rm -f "$LIMITER_LOCAL" "$MONITOR_LOCAL" "$BLOCK_LOCAL" "$UNBLOCK_LOCAL" "$CERT_LOCAL"
 
-    if [ ! -z "$domain_rem" ] && command -v certbot &> /dev/null; then
-        echo "   - Removendo registro do Certbot para: $domain_rem..."
-        certbot delete --cert-name "$domain_rem" --non-interactive > /dev/null 2>&1
+    # --- LIMPEZA CERTBOT ---
+    if command -v certbot &> /dev/null; then
+        if [ ! -z "$domain_rem" ]; then
+            echo "   - Removendo certificado do domínio: $domain_rem..."
+            certbot delete --cert-name "$domain_rem" --non-interactive > /dev/null 2>&1
+        else
+            echo "   - Domínio não detectado, pulando limpeza do Certbot."
+        fi
     fi
 
     echo "3. Limpando agendamentos (Cron)..."
