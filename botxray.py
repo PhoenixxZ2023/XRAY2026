@@ -162,7 +162,7 @@ def core_list_users_text():
 
     msg = "LISTA DE USUARIOS - DRAGONCORE\n"
     msg += "=================================================================================\n"
-    msg += "NOME            | VENCIMENTO  | UUID                                 | STATUS\n"
+    msg += "NOME            | VENCIMENTO  | UUID                                     | STATUS\n"
     msg += "=================================================================================\n"
 
     with open(USER_DB, 'r') as f:
@@ -203,12 +203,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SELECTING_ACTION
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- CORREÇÃO DE SEGURANÇA: VERIFICA SE É ADMIN ---
+    if not is_admin(update): 
+        return
+    # --------------------------------------------------
+
     query = update.callback_query
     await query.answer()
     
     # --- AÇÃO ESPECIAL: FECHAR ARQUIVO ---
-    # Se o botão clicado for "close_file", ele apaga a mensagem do arquivo
-    # mas mantem o menu principal intacto.
     if query.data == 'close_file':
         await query.message.delete()
         return SELECTING_ACTION
@@ -232,18 +235,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f = io.BytesIO(report.encode('utf-8'))
         f.name = "usuarios.txt"
         
-        # 1. Manda o arquivo separado, com um botão "Fechar" nele
         close_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Fechar Lista", callback_data='close_file')]])
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
             document=f,
-            caption="📂 *Lista gerada*", # Legenda curta
+            caption="📂 *Lista gerada*",
             parse_mode='Markdown',
-            reply_markup=close_btn # Botão de fechar anexado ao arquivo
+            reply_markup=close_btn
         )
         
-        # 2. Atualiza o Menu Principal (Texto) para avisar
-        # O menu NÃO muda para o arquivo, ele continua sendo texto.
         await query.edit_message_text(
             "✅ *Lista enviada abaixo!*\nVerifique o arquivo ou escolha outra opção:",
             parse_mode='Markdown',
@@ -260,7 +260,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if os.path.exists(bkp_file):
             with open(bkp_file, 'rb') as f:
-                # Manda arquivo separado com botão Fechar
                 close_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Fechar Backup", callback_data='close_file')]])
                 await context.bot.send_document(
                     chat_id=update.effective_chat.id, 
@@ -271,7 +270,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=close_btn
                 )
             os.remove(bkp_file)
-            # Atualiza Menu Principal
             await query.edit_message_text("✅ *Backup enviado abaixo!*", parse_mode='Markdown', reply_markup=build_menu())
         else:
             await query.edit_message_text("❌ Falha ao criar backup.", reply_markup=build_menu())
@@ -286,6 +284,9 @@ async def unexpected_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await button_handler(update, context)
 
 async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode):
+    # Verificação de admin também aqui (boa prática)
+    if not is_admin(update): return
+
     if not update.message or not update.message.text: return
     text = update.message.text.strip().split()[0]
 
