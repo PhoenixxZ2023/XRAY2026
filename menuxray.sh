@@ -1,6 +1,6 @@
 #!/bin/bash
 # menuxray.sh - Versao V7.3 Visual Premium (Vertical)
-# CORRIGIDO: Dependencia lsof e Definição de Função Menu
+# CORREÇÕES: Segurança Token Bot (sed), Permissões SSL (chmod 600), Cache de Scripts e UX
 
 # --- CONFIGURACAO ---
 XRAY_BIN="/usr/local/bin/xray"
@@ -12,15 +12,21 @@ XRAY_DIR="/opt/XrayTools"
 ACTIVE_DOMAIN_FILE="$XRAY_DIR/active_domain"
 USER_DB="$XRAY_DIR/users.db"
 
-# CONFIGURACAO DO LIMITADOR EXTERNO
+# CAMINHOS LOCAIS PARA CACHE (Evita baixar toda hora)
 LIMITER_LOCAL="/usr/local/bin/limiterxray.sh"
-LIMITER_URL="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/limiterxray.sh"
+MONITOR_LOCAL="/usr/local/bin/onlinexray.sh"
+BLOCK_LOCAL="/usr/local/bin/block_user.sh"
+UNBLOCK_LOCAL="/usr/local/bin/unblock_user.sh"
+CERT_LOCAL="/usr/local/bin/certxray.sh"
+
+# URLS GITHUB
+REPO_BASE="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main"
 
 mkdir -p "$XRAY_DIR"
 mkdir -p "$SSL_DIR"
 touch "$USER_DB"
 
-# Instala dependencias
+# Instala dependencias essenciais
 if ! command -v jq &> /dev/null; then apt-get install jq -y > /dev/null 2>&1; fi
 if ! command -v bc &> /dev/null; then apt-get install bc -y > /dev/null 2>&1; fi
 if ! command -v uuidgen &> /dev/null; then apt-get install uuid-runtime -y > /dev/null 2>&1; fi
@@ -48,6 +54,29 @@ header_red() {
     echo ""
 }
 
+# --- FUNÇÃO AUXILIAR DE DOWNLOAD (CACHE) ---
+func_download_exec() {
+    local file_path="$1"
+    local url="$2"
+    local description="$3"
+
+    # Só baixa se não existir ou se estiver vazio
+    if [ ! -s "$file_path" ]; then
+        echo -e "${TXT_YELLOW}Baixando módulo: $description...${RESET}"
+        curl -s -L -o "$file_path" "$url"
+        chmod +x "$file_path"
+        
+        if [ ! -s "$file_path" ]; then
+            echo -e "${TXT_RED}Erro ao baixar $description! Verifique conexão/GitHub.${RESET}"
+            sleep 2
+            return 1
+        fi
+    fi
+    
+    # Executa passando argumentos extras se houver
+    bash "$file_path" "${@:4}"
+}
+
 # --- SISTEMA ---
 
 # Instalacao Robusta do Xray
@@ -55,16 +84,13 @@ func_install_official_core() {
     header_blue "INSTALANDO XRAY CORE"
     
     # --- VERIFICAÇÃO INTELIGENTE DE DEPENDÊNCIAS ---
-    # Verifica se unzip, curl e socat já existem
     if command -v unzip > /dev/null 2>&1 && command -v curl > /dev/null 2>&1 && command -v socat > /dev/null 2>&1; then
         echo -e "1. Dependências encontradas: ${TXT_GREEN}OK${RESET}"
-        echo "   (Pulando etapa do apt-get para ganhar tempo...)"
     else
         echo "1. Instalando dependencias (unzip, curl, socat)..."
         apt-get update -y > /dev/null 2>&1
         apt-get install unzip curl socat -y > /dev/null 2>&1
     fi
-    # ------------------------------------------------
 
     echo "2. Baixando instalador oficial..."
     rm -f /tmp/install_xray.sh
@@ -95,65 +121,22 @@ func_install_official_core() {
 }
 
 func_call_monitor() {
-    local monitor_local="/usr/local/bin/onlinexray.sh"
-    local monitor_url="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/onlinexray.sh"
-
-    echo -e "${TXT_YELLOW}Baixando Monitor Online...${RESET}"
-    
-    # Baixa o arquivo do GitHub
-    curl -s -L -o "$monitor_local" "$monitor_url"
-    
-    if [ $? -eq 0 ]; then
-        # Garante permissão e corrige formato Windows se necessário
-        chmod +x "$monitor_local"
-        sed -i 's/\r$//' "$monitor_local"
-        
-        # Executa o monitor
-        bash "$monitor_local"
-    else
-        echo -e "${TXT_RED}Erro ao baixar o script! Verifique o GitHub.${RESET}"
-        sleep 3
-    fi
+    func_download_exec "$MONITOR_LOCAL" "$REPO_BASE/onlinexray.sh" "Monitor Online"
 }
 
 # --- CERTIFICADO EXTERNO ---
-# Coloque isso junto com as outras funções no início do menuxray.sh
 func_xray_cert() {
     local domain_arg="$1"
-    
-    # ATENÇÃO: Coloque o link RAW do seu arquivo certxray.sh no GitHub
-    local REPO_URL="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/certxray.sh"   
-    echo -e "Iniciando módulo de certificados (certxray)..."
-    
-    # Baixa e executa
-    wget -q -O /usr/local/bin/certxray "$REPO_URL"
-    chmod +x /usr/local/bin/certxray
-    /usr/local/bin/certxray "$domain_arg"
+    func_download_exec "$CERT_LOCAL" "$REPO_BASE/certxray.sh" "Certificados SSL" "$domain_arg"
 }
 
-func_xray_cert1000() {
-    local domain="$1"
-    mkdir -p "$SSL_DIR"
-    echo "Gerando Certificado para: $domain..."
-    openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-        -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$domain" \
-        -keyout "$KEY_FILE" -out "$CRT_FILE" > /dev/null 2>&1
-    chmod 777 "$SSL_DIR"; chmod 777 "$KEY_FILE"; chmod 777 "$CRT_FILE"
-}
-
-# --- MODULOS EXTERNOS ---
+# --- MODULOS EXTERNOS (AGORA COM CACHE) ---
 func_module_block() {
-    curl -s -L -o /tmp/block_user.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/block_user.sh"
-    chmod +x /tmp/block_user.sh
-    bash /tmp/block_user.sh
-    rm -f /tmp/block_user.sh
+    func_download_exec "$BLOCK_LOCAL" "$REPO_BASE/block_user.sh" "Bloqueador"
 }
 
 func_module_unblock() {
-    curl -s -L -o /tmp/unblock_user.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/unblock_user.sh"
-    chmod +x /tmp/unblock_user.sh
-    bash /tmp/unblock_user.sh
-    rm -f /tmp/unblock_user.sh
+    func_download_exec "$UNBLOCK_LOCAL" "$REPO_BASE/unblock_user.sh" "Desbloqueador"
 }
 
 # --- BACKUP ---
@@ -186,6 +169,7 @@ func_backup_system() {
         return
     fi
 
+    # Importante: users.db primeiro para garantir integridade
     tar -czPf "$backup_file" /opt/XrayTools /usr/local/etc/xray > /dev/null 2>&1
 
     if [ -f "$backup_file" ]; then
@@ -264,7 +248,7 @@ func_install_bot() {
     read -rp "Deseja continuar? [s/n]: " continue_opt
     if [[ "$continue_opt" != "s" ]]; then return; fi
     
-    # --- PASSO 1: DADOS TÉCNICOS (SÓ PEDE UMA VEZ) ---
+    # --- PASSO 1: DADOS TÉCNICOS ---
     echo ""
     echo -e "${TXT_YELLOW}1. Digite o Token do BotFather:${RESET}"
     read -rp "Token: " bot_token
@@ -278,14 +262,13 @@ func_install_bot() {
         echo -e "${TXT_RED}❌ Dados incompletos!${RESET}"; sleep 2; return
     fi
 
-    # --- VALIDAÇÃO API (O SCRIPT DESCOBRE O USERNAME REAL EM SEGREDO) ---
+    # --- VALIDAÇÃO API ---
     echo ""
     echo "Consultando dados..."
     
     local api_response=$(curl -s "https://api.telegram.org/bot$bot_token/getChat?chat_id=$admin_id")
     local is_ok=$(echo "$api_response" | jq -r '.ok')
 
-    # Se Token ou ID estiverem errados, cancela tudo.
     if [ "$is_ok" != "true" ]; then
         echo -e "${TXT_RED}❌ ERRO: O Token ou ID informados são inválidos.${RESET}"
         read -rp "Enter para voltar..."
@@ -294,7 +277,6 @@ func_install_bot() {
 
     local real_username=$(echo "$api_response" | jq -r '.result.username')
 
-    # Se a pessoa não tiver username configurado no Telegram
     if [ "$real_username" == "null" ]; then
         echo -e "${TXT_YELLOW}⚠️  ERRO: O ID $admin_id não tem Username (@) definido no Telegram.${RESET}"
         echo "Configure um username no seu perfil e tente novamente."
@@ -302,7 +284,7 @@ func_install_bot() {
         return
     fi
 
-    # --- PASSO 2: O LOOP DE VALIDAÇÃO (INSISTÊNCIA NO USERNAME) ---
+    # --- PASSO 2: LOOP DE VALIDAÇÃO ---
     while true; do
         echo ""
         echo "-------------------------------------------------------"
@@ -312,24 +294,19 @@ func_install_bot() {
         echo "-------------------------------------------------------"
         read -rp "Username: " input_user
 
-        # Opção de saída caso a pessoa tenha errado o ID lá em cima
         if [ "$input_user" == "0" ]; then return; fi
 
-        # Limpeza (remove @ e espaços)
         input_user=$(echo "$input_user" | sed 's/@//g' | sed 's/ //g')
 
-        # COMPARAÇÃO (Ignora maiúsculas/minúsculas)
         if [[ "${real_username,,}" == "${input_user,,}" ]]; then
             echo ""
             echo -e "${TXT_GREEN}✅ IDENTIDADE CONFIRMADA!${RESET}"
             sleep 1
-            break # SAI DO LOOP E VAI INSTALAR
+            break
         else
             echo ""
             echo -e "${TXT_RED}❌ INCORRETO!${RESET}"
             echo "O usuário digitado não corresponde ao dono do ID informado."
-            echo "Tente novamente ou digite 0 para cancelar."
-            # O LOOP CONTINUA AQUI (PEDE O USERNAME DE NOVO)
         fi
     done
 
@@ -338,15 +315,15 @@ func_install_bot() {
     echo "Baixando e configurando bot..."
     rm -f /opt/XrayTools/botxray.py
     
-    # SEU LINK GITHUB AQUI
-    curl -s -L -o /opt/XrayTools/botxray.py "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/botxray.py"
+    curl -s -L -o /opt/XrayTools/botxray.py "$REPO_BASE/botxray.py"
     
     if [ ! -f "/opt/XrayTools/botxray.py" ]; then
         echo -e "${TXT_RED}Erro no download!${RESET}"; sleep 3; return
     fi
 
-    sed -i "s/SEU_TOKEN_AQUI/$bot_token/g" /opt/XrayTools/botxray.py
-    sed -i "s/123456789/$admin_id/g" /opt/XrayTools/botxray.py
+    # CORREÇÃO CRÍTICA: Usando pipe | como delimitador para não quebrar com token
+    sed -i "s|SEU_TOKEN_AQUI|$bot_token|g" /opt/XrayTools/botxray.py
+    sed -i "s|123456789|$admin_id|g" /opt/XrayTools/botxray.py
 
     cat <<EOF > /etc/systemd/system/botxray.service
 [Unit]
@@ -382,17 +359,14 @@ func_generate_config() {
     local stream_settings=""
     local policy='{"levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}}, "system": {"statsInboundUplink": true, "statsInboundDownlink": true}}'
 
-    # Regras de Roteamento (Bloqueio Torrent e LAN)
     local routing_rules='[
         {"type": "field", "inboundTag": ["api"], "outboundTag": "api"},
         {"type": "field", "protocol": ["bittorrent"], "outboundTag": "blocked"},
         {"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"}
     ]'
 
-    # --- AQUI ESTÁ O PADDING DO XHTTP (CONFIRMADO) ---
     if [ "$network" == "xhttp" ]; then
         if [ "$use_tls" = "true" ]; then
-            # Configuração com TLS + Padding + StreamUp (Anti-Bloqueio)
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
             '{
                 network: "xhttp", 
@@ -411,7 +385,6 @@ func_generate_config() {
                 }
             }')
         else
-            # Configuração sem TLS (Apenas Padding)
             stream_settings=$(jq -n \
             '{
                 network: "xhttp", 
@@ -454,7 +427,6 @@ func_generate_config() {
         jq '(.inbounds[] | select(.tag == "inbound-dragoncore").settings) += {"flow": "xtls-rprx-vision"}' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
     fi
 
-    # --- CRIA O ARQUIVO PRESET.JSON (NOVO) ---
     local preset_file="/usr/local/etc/xray/preset.json"
     cat > "$preset_file" <<EOF
 {
@@ -464,7 +436,6 @@ func_generate_config() {
   "tls": "$use_tls"
 }
 EOF
-    # -----------------------------------------
 
     systemctl restart xray > /dev/null 2>&1
     sleep 2
@@ -485,11 +456,11 @@ EOF
 
     echo ""
     echo "========================================="
-    echo -e " ${TXT_YELLOW}PROTOCOLO:${RESET}       ${TXT_CYAN}${network^^}${RESET}"
-    echo -e " ${TXT_YELLOW}DOMINIO (SNI):${RESET}   ${TXT_CYAN}${domain}${RESET}"
-    echo -e " ${TXT_YELLOW}PORTA:${RESET}           ${TXT_CYAN}${port}${RESET}"
-    echo -e " ${TXT_YELLOW}CRIPTOGRAFIA:${RESET}    ${tls_msg}"
-    echo -e " ${TXT_YELLOW}PROTEÇÃO:${RESET}        ${TXT_GREEN}TORRENT & LAN BLOQUEADOS${RESET}"
+    echo -e " ${TXT_YELLOW}PROTOCOLO:${RESET}        ${TXT_CYAN}${network^^}${RESET}"
+    echo -e " ${TXT_YELLOW}DOMINIO (SNI):${RESET}    ${TXT_CYAN}${domain}${RESET}"
+    echo -e " ${TXT_YELLOW}PORTA:${RESET}            ${TXT_CYAN}${port}${RESET}"
+    echo -e " ${TXT_YELLOW}CRIPTOGRAFIA:${RESET}     ${tls_msg}"
+    echo -e " ${TXT_YELLOW}PROTEÇÃO:${RESET}         ${TXT_GREEN}TORRENT & LAN BLOQUEADOS${RESET}"
     echo "========================================="
     echo ""
 
@@ -593,7 +564,6 @@ func_wizard_install() {
     read -rp "Porta Publica: " pub_port
     if [ -z "$pub_port" ]; then pub_port="80"; fi
 
-    # --- VERIFICAÇÃO DE PORTA EM USO (NOVO) ---
     echo "Verificando disponibilidade da porta $pub_port..."
     if lsof -Pi :$pub_port -sTCP:LISTEN -t >/dev/null ; then
         echo ""
@@ -605,10 +575,9 @@ func_wizard_install() {
         read -rp "Pressione ENTER para voltar..."
         return
     fi
-    # -------------------------------------------
 
     clear
-   header_blue "PASSO 4: DOMINIO E SNI"
+    header_blue "PASSO 4: DOMINIO E SNI"
     local domain_val=""
     
     if [ "$use_tls" == "true" ]; then
@@ -619,14 +588,11 @@ func_wizard_install() {
         echo ""
         read -rp "Dominio: " domain_val
         
-        # --- AQUI É A CHAMADA DO CERTXRAY ---
-        # Verifica se o usuário não deixou em branco antes de chamar
         if [ -n "$domain_val" ]; then
             func_xray_cert "$domain_val"
         else
             echo "Dominio vazio, pulando etapa do certxray..."
         fi
-        # ------------------------------------
 
     else
         echo "Modo sem TLS selecionado."
@@ -738,7 +704,6 @@ func_page_purge_expired() {
     local count=0
     local found_expired=false
 
-    # --- 1. LISTAGEM (APENAS MOSTRA) ---
     echo -e "${TXT_YELLOW}Verificando banco de dados...${RESET}"
     echo ""
     
@@ -748,7 +713,6 @@ func_page_purge_expired() {
         return
     fi
 
-    # Cabeçalho da Lista
     printf "%-20s | %s\n" "USUÁRIO" "VENCIMENTO"
     echo "-----------------------------------"
 
@@ -763,7 +727,6 @@ func_page_purge_expired() {
     echo "-----------------------------------"
     echo ""
 
-    # --- 2. TRAVA DE SEGURANÇA ---
     if [ "$found_expired" = false ]; then
         echo -e "${TXT_GREEN}✅ Nenhum usuário vencido encontrado!${RESET}"
         echo "Todos os clientes estão com dias ativos."
@@ -784,28 +747,21 @@ func_page_purge_expired() {
         return
     fi
 
-    # --- 3. EXECUÇÃO (REMOÇÃO REAL) ---
     echo ""
     echo "Limpando sistema..."
     
-    # Cria arquivo temporário para salvar apenas os ATIVOS
     > "${USER_DB}.tmp"
 
     while IFS='|' read -r nick uuid expiry; do
         if [[ "$expiry" < "$today" ]]; then
-            # Remove do JSON do Xray (Config)
             echo -e "Removendo: ${TXT_RED}$nick${RESET}..."
             jq --arg id "$uuid" '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id))' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
         else
-            # Mantém no Banco de Dados (Salva no Temp)
             echo "$nick|$uuid|$expiry" >> "${USER_DB}.tmp"
         fi
     done < "$USER_DB"
 
-    # Substitui o banco antigo pelo novo (limpo)
     mv "${USER_DB}.tmp" "$USER_DB"
-
-    # Reinicia o Xray para aplicar
     systemctl restart xray > /dev/null 2>&1
 
     echo ""
@@ -822,19 +778,17 @@ func_page_uninstall() {
     echo "Isso irá remover:"
     echo " • O Xray Core, Configs, Usuários e Logs"
     echo " • O Bot Telegram e Backups"
-    echo " • Certificados SSL e configurações do Certbot"  # <--- ADICIONADO
+    echo " • Certificados SSL e configurações do Certbot"
     echo " • FAXINA PROFUNDA (Snaps antigos, Cache APT, Logs)"
     echo ""
     read -rp "Tem certeza que deseja continuar? [s/n]: " confirm
     
     if [[ "$confirm" != "s" ]]; then return; fi
 
-    # --- NOVO: Tenta descobrir o domínio antes de apagar tudo (para limpar o Certbot) ---
     local domain_rem=""
     if [ -f "/usr/local/etc/xray/preset.json" ]; then
         domain_rem=$(grep -oP '"domain": "\K[^"]+' /usr/local/etc/xray/preset.json)
     fi
-    # -----------------------------------------------------------------------------------
 
     echo ""
     echo "1. Parando serviços..."
@@ -854,47 +808,41 @@ func_page_uninstall() {
     rm -rf /var/log/xray
     rm -rf /opt/XrayTools
     rm -rf /root/backups 
-    rm -rf /opt/DragonCoreSSL   # <--- NOVO: Remove a pasta de certificados locais
+    rm -rf /opt/DragonCoreSSL
 
-    # --- NOVO: Limpeza no Certbot (Evita o erro "not yet due" na reinstalação) ---
+    # Remove os scripts em cache
+    rm -f "$LIMITER_LOCAL" "$MONITOR_LOCAL" "$BLOCK_LOCAL" "$UNBLOCK_LOCAL" "$CERT_LOCAL"
+
     if [ ! -z "$domain_rem" ] && command -v certbot &> /dev/null; then
         echo "   - Removendo registro do Certbot para: $domain_rem..."
         certbot delete --cert-name "$domain_rem" --non-interactive > /dev/null 2>&1
     fi
-    # -----------------------------------------------------------------------------
 
     echo "3. Limpando agendamentos (Cron)..."
-    # Adicionado grep -v "renew_cert.sh" para remover a renovação automática
     crontab -l 2>/dev/null | grep -v "menuxray" | grep -v "limiter" | grep -v "renew_cert.sh" | crontab -
     
     echo "4. Removendo atalhos..."
     rm -f /usr/bin/xray-menu
     rm -f /usr/local/bin/uuidgen
 
-    # --- FAXINA PESADA (SEUS COMANDOS) ---
     echo "5. Executando limpeza profunda de disco..."
     
-    # Limpeza do APT e Listas Corrompidas
     echo "   - Limpando cache e listas do APT..."
     apt-get clean > /dev/null 2>&1
     apt-get autoremove -y > /dev/null 2>&1
     rm -rf /var/lib/apt/lists/*
 
-    # Limpeza de Temporários e Logs (Vacuum 1s)
     echo "   - Zerando logs do sistema e temporários..."
     rm -rf /tmp/*
     journalctl --vacuum-time=1s > /dev/null 2>&1
 
-    # Limpeza de Snaps Antigos
     if command -v snap > /dev/null 2>&1; then
         echo "   - Removendo revisões antigas do Snap (Isso libera muito espaço)..."
-        # Loop seguro para remover versões 'disabled'
         snap list --all 2>/dev/null | awk '/disabled/{print $1, $3}' | \
         while read snapname revision; do
             snap remove "$snapname" --revision="$revision" > /dev/null 2>&1
         done
     fi
-    # ------------------------------------------------
 
     echo ""
     echo "========================================="
@@ -915,17 +863,13 @@ func_call_limiter() {
             systemctl restart xray
         fi
     fi
-    echo "Baixando do Gitea..."
-    curl -s -L -o "$LIMITER_LOCAL" "$LIMITER_URL"
-    if [ $? -ne 0 ]; then echo -e "${TXT_RED}Erro download!${RESET}"; sleep 2; return; fi
-    chmod +x "$LIMITER_LOCAL"
-    bash "$LIMITER_LOCAL"
+    func_download_exec "$LIMITER_LOCAL" "$REPO_BASE/limiterxray.sh" "Limitador"
 }
 
-# --- MENU PRINCIPAL (LAYOUT ATUALIZADO) ---
+# --- MENU PRINCIPAL ---
 menu_display() {
     clear
-    echo -e "${TITLE_BAR}       DRAGONCORE XRAY MANAGER       ${RESET}"
+    echo -e "${TITLE_BAR}        DRAGONCORE XRAY MANAGER        ${RESET}"
     echo ""
     
     local status_txt="${TXT_RED}DESATIVADO${RESET}"
@@ -959,22 +903,19 @@ menu_display() {
         bot_status="${TXT_GREEN}ATIVADO${RESET}"
     fi
 
-    # --- CONTADOR DE ONLINE (Lógica de IPs Únicos) ---
     local online_count="00"
     local clean_port=$(echo "$port" | tr -dc '0-9')
     if [ -n "$clean_port" ] && [ "$clean_port" != "?" ]; then
-         online_count=$(ss -tn state established "sport = :$clean_port" | awk '{print $5}' | sed 's/:[^:]*$//' | sort | uniq | wc -l)
-         online_count=$(printf "%02d" $online_count)
+          online_count=$(ss -tn state established "sport = :$clean_port" | awk '{print $5}' | sed 's/:[^:]*$//' | sort | uniq | wc -l)
+          online_count=$(printf "%02d" $online_count)
     fi
-    # -------------------------------------------------
 
-    # --- EXIBIÇÃO DO CABEÇALHO (NOVO LAYOUT) ---
     echo "-----------------------------------------"
-    echo -e "${TXT_CYAN}XRAY:${RESET}       $status_txt"
-    echo -e "${TXT_CYAN}USUÁRIOS:${RESET}   $users_count"
-    echo -e "${TXT_CYAN}ONLINES:${RESET}    $online_count"
-    echo -e "${TXT_CYAN}INFO:${RESET}       $proto_info"
-    echo -e "${TXT_CYAN}BOT XRAY:${RESET}   $bot_status"
+    echo -e "${TXT_CYAN}XRAY:${RESET}        $status_txt"
+    echo -e "${TXT_CYAN}USUÁRIOS:${RESET}    $users_count"
+    echo -e "${TXT_CYAN}IPs ATIVOS:${RESET}  $online_count"
+    echo -e "${TXT_CYAN}INFO:${RESET}        $proto_info"
+    echo -e "${TXT_CYAN}BOT XRAY:${RESET}    $bot_status"
     echo "-----------------------------------------"
     echo ""
     echo -e "${TXT_CYAN}[01] CRIAR USUÁRIO${RESET}"
@@ -985,7 +926,7 @@ menu_display() {
     echo -e "${TXT_CYAN}[06] DESINSTALAR XRAY${RESET}"
     echo -e "${TXT_CYAN}[07] LIMITADOR CONSUMO (GB)${RESET}"
     echo -e "${TXT_CYAN}[08] BOT TELEGRAM${RESET}"
-    echo -e "${TXT_CYAN}[09] CRIAR BACKUP${RESET}"     
+    echo -e "${TXT_CYAN}[09] CRIAR BACKUP${RESET}"      
     echo -e "${TXT_CYAN}[10] RESTAURAR BACKUP${RESET}" 
     echo -e "${TXT_CYAN}[11] BLOQUEAR USUÁRIOS${RESET}"
     echo -e "${TXT_CYAN}[12] DESBLOQUEAR USUÁRIOS${RESET}"
