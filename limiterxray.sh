@@ -1,12 +1,12 @@
 #!/bin/bash
 # limiterxray.sh - Módulo de Controle de Consumo (DragonCore V7.3)
-# Versão: GitHub Edition + UUID Scramble (Bloqueio Real)
+# CORREÇÕES: Alinhamento Visual (printf) e Bloqueio Seguro (Scramble)
 
 # CONFIGURAÇÃO
 XRAY_BIN="/usr/local/bin/xray"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
 LIMITS_DB="/opt/XrayTools/limits.db"
-USER_DB="/opt/XrayTools/users.db" # IMPORTANTE: Para recuperar o UUID original
+USER_DB="/opt/XrayTools/users.db" 
 XRAY_API_PORT="1080" 
 
 # CORES
@@ -90,8 +90,8 @@ func_set_limit() {
     # 2. Se estiver bloqueado, desbloqueia agora (Restaurando UUID Original)
     if [ "$is_locked" = true ]; then
         echo "Recuperando UUID original..."
-        # Pega o UUID original do arquivo users.db
-        local real_uuid=$(grep "^$nick|" "$USER_DB" | cut -d'|' -f2)
+        # Pega o UUID original do arquivo users.db (Correção: head -n 1 para segurança)
+        local real_uuid=$(grep "^$nick|" "$USER_DB" | cut -d'|' -f2 | head -n 1)
         
         if [ -z "$real_uuid" ]; then
             echo -e "${TXT_RED}ERRO: UUID original não encontrado no backup!${RESET}"
@@ -116,7 +116,8 @@ func_set_limit() {
 func_view_usage() {
     func_get_api_port
     header_limit
-    printf "%-15s | %-15s | %-10s | %s\n" "USUÁRIO" "CONSUMO" "LIMITE" "STATUS"
+    # Formatação corrigida para alinhar colunas mesmo com nomes maiores
+    printf "%-18s | %-12s | %-12s | %s\n" "USUÁRIO" "CONSUMO" "LIMITE" "STATUS"
     echo "------------------------------------------------------------"
 
     jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients[].email' "$CONFIG_PATH" | while read -r email_raw; do
@@ -130,7 +131,6 @@ func_view_usage() {
             nick="${email_raw#LOCKED_}"
         fi
 
-        # Se estiver bloqueado, não adianta pedir stats do nome original, pois mudou no config
         local query_name="$email_raw"
         
         local down=$($XRAY_BIN api stats -server="127.0.0.1:$XRAY_API_PORT" -name "user>>>${query_name}>>>traffic>>>downlink" 2>/dev/null | grep "value" | awk '{print $2}')
@@ -145,13 +145,15 @@ func_view_usage() {
 
         if [ "$is_locked" = true ]; then
             status="${TXT_RED}BLOQUEADO${RESET}"
-            total_h="---" # Não mostra consumo enquanto bloqueado
+            total_h="---"
         elif [ -n "$limit_bytes" ]; then
             limit_h=$(func_bytes_to_human "$limit_bytes")
             if [ "$total" -ge "$limit_bytes" ]; then status="${TXT_RED}EXCEDIDO${RESET}"; else
                 local pct=$(echo "scale=0; ($total * 100) / $limit_bytes" | bc); status="${TXT_CYAN}${pct}%${RESET}"; fi
         fi
-        printf "%-15s | %-15s | %-10s | %b\n" "$nick" "$total_h" "$limit_h" "$status"
+        
+        # Print formatado
+        printf "%-18s | %-12s | %-12s | %b\n" "$nick" "$total_h" "$limit_h" "$status"
     done
     echo "------------------------------------------------------------"
     echo ""; read -rp "Pressione ENTER para voltar..."
@@ -167,8 +169,8 @@ func_remove_limit() {
     
     local reboot_needed=false
     if grep -q "\"email\": \"LOCKED_$nick\"" "$CONFIG_PATH"; then
-        # Recupera UUID Original
-        local real_uuid=$(grep "^$nick|" "$USER_DB" | cut -d'|' -f2)
+        # Recupera UUID Original (com head -n 1)
+        local real_uuid=$(grep "^$nick|" "$USER_DB" | cut -d'|' -f2 | head -n 1)
         if [ -z "$real_uuid" ]; then echo "Erro fatal: UUID original sumiu."; sleep 2; return; fi
 
         jq --arg nick "$nick" --arg locked "LOCKED_$nick" --arg uuid "$real_uuid" \
@@ -204,8 +206,7 @@ func_check_and_block() {
         if [ "$total" -ge "$limit_bytes" ]; then
             if [ "$SILENT" != "--cron" ]; then echo -e "${TXT_RED}❌ $nick excedeu! Bloqueando...${RESET}"; fi
             
-            # --- BLOQUEIO REAL (Muda Email + Muda UUID) ---
-            # Gera um UUID falso para quebrar a conexão
+            # --- BLOQUEIO REAL (Scramble UUID + Rename Email) ---
             local fake_uuid=$(uuidgen)
             
             jq --arg nick "$nick" --arg locked "LOCKED_$nick" --arg fake "$fake_uuid" \
