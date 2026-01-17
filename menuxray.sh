@@ -683,17 +683,13 @@ func_page_uninstall() {
     
     if [[ "$confirm" != "s" ]]; then return; fi
 
-    # --- MELHORIA: Tenta descobrir o domínio de várias fontes ---
     local domain_rem=""
-    # Tentativa 1: Preset JSON
     if [ -f "/usr/local/etc/xray/preset.json" ]; then
         domain_rem=$(grep -oP '"domain": "\K[^"]+' /usr/local/etc/xray/preset.json)
     fi
-    # Tentativa 2: Arquivo Active Domain (Caso o preset tenha sumido)
     if [ -z "$domain_rem" ] && [ -f "$ACTIVE_DOMAIN_FILE" ]; then
         domain_rem=$(cat "$ACTIVE_DOMAIN_FILE")
     fi
-    # -----------------------------------------------------------
 
     echo ""
     echo "1. Parando serviços..."
@@ -715,10 +711,9 @@ func_page_uninstall() {
     rm -rf /root/backups 
     rm -rf /opt/DragonCoreSSL
 
-    # Remove os scripts em cache
-    rm -f "$LIMITER_LOCAL" "$MONITOR_LOCAL" "$BLOCK_LOCAL" "$UNBLOCK_LOCAL" "$CERT_LOCAL"
+    # Remove os scripts em cache (ADICIONE AQUI NO FINAL)
+    rm -f "$LIMITER_LOCAL" "$MONITOR_LOCAL" "$BLOCK_LOCAL" "$UNBLOCK_LOCAL" "$CERT_LOCAL" "$BOT_SHELL_LOCAL"
 
-    # --- LIMPEZA CERTBOT ---
     if command -v certbot &> /dev/null; then
         if [ ! -z "$domain_rem" ]; then
             echo "   - Removendo certificado do domínio: $domain_rem..."
