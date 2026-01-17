@@ -1,5 +1,6 @@
 #!/bin/bash
 # onlinexray.sh - Monitor Otimizado com AWK (Anti-Spam)
+# CORREÇÃO: Restart Inteligente (Não derruba conexões se o log já estiver ativo)
 
 # Cores
 GREEN='\033[1;32m'
@@ -13,8 +14,11 @@ CONF="/usr/local/etc/xray/config.json"
 restaurar_log() {
     echo ""
     echo -e "${YELLOW}>>> Restaurando configurações...${RESET}"
-    sed -i 's/"loglevel": "info"/"loglevel": "warning"/' "$CONF"
-    systemctl restart xray
+    # Só restaura se realmente precisar (evita restart desnecessário na saída também)
+    if grep -q '"loglevel": "info"' "$CONF"; then
+        sed -i 's/"loglevel": "info"/"loglevel": "warning"/' "$CONF"
+        systemctl restart xray
+    fi
     echo -e "${GREEN}>>> Encerrado.${RESET}"
     exit 0
 }
@@ -25,11 +29,20 @@ clear
 echo -e "${CYAN}================================================${RESET}"
 echo -e "${CYAN}         MONITOR DE USUÁRIOS ONLINE (XRAY)      ${RESET}"
 echo -e "${CYAN}================================================${RESET}"
-echo -e "${YELLOW}Ativando modo espião (Filtro Anti-Spam: 15s)...${RESET}"
 
-# Ativa log INFO temporariamente
-sed -i 's/"loglevel": "warning"/"loglevel": "info"/' "$CONF"
-systemctl restart xray
+# --- CORREÇÃO: VERIFICAÇÃO INTELIGENTE DE LOG ---
+echo -e "${YELLOW}Verificando configurações de log...${RESET}"
+
+if grep -q '"loglevel": "info"' "$CONF"; then
+    echo -e "${GREEN}>>> Log detalhado já estava ativo. Iniciando sem reiniciar!${RESET}"
+    # Pula o restart, mantendo as conexões vivas
+else
+    echo -e "${YELLOW}>>> Ativando modo espião (Filtro Anti-Spam: 15s)...${RESET}"
+    sed -i 's/"loglevel": "warning"/"loglevel": "info"/' "$CONF"
+    systemctl restart xray
+    echo -e "${GREEN}>>> Xray reiniciado para aplicar logs.${RESET}"
+fi
+# -----------------------------------------------
 
 echo -e "${GREEN}>>> AGUARDANDO CONEXÕES... (CTRL+C para Sair)${RESET}"
 echo ""
