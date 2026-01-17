@@ -18,6 +18,7 @@ MONITOR_LOCAL="/usr/local/bin/onlinexray.sh"
 BLOCK_LOCAL="/usr/local/bin/block_user.sh"
 UNBLOCK_LOCAL="/usr/local/bin/unblock_user.sh"
 CERT_LOCAL="/usr/local/bin/certxray.sh"
+BOT_SHELL_LOCAL="/usr/local/bin/botxray.sh"
 
 # URLS GITHUB
 REPO_BASE="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main"
@@ -137,6 +138,10 @@ func_module_block() {
 
 func_module_unblock() {
     func_download_exec "$UNBLOCK_LOCAL" "$REPO_BASE/unblock_user.sh" "Desbloqueador"
+}
+
+func_install_bot() {
+    func_download_exec "$BOT_SHELL_LOCAL" "$REPO_BASE/botxray.sh" "Instalador do Bot"
 }
 
 # --- BACKUP ---
