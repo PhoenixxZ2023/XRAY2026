@@ -1,6 +1,6 @@
 #!/bin/bash
 # unblock_user.sh - Módulo de Desbloqueio Seguro V7.3
-# Método: Restore (Recupera UUID original do DB e remove prefixo LOCKED_)
+# CORREÇÃO: head -n 1 na recuperação de UUID (Proteção contra DB sujo)
 
 # CONFIGURAÇÃO
 USER_DB="/opt/XrayTools/users.db"
@@ -21,7 +21,6 @@ if ! command -v jq &> /dev/null; then echo "Erro: jq não instalado."; exit 1; f
 
 # --- LISTAR APENAS USUÁRIOS BLOQUEADOS ---
 echo "--- Usuários Suspensos ---"
-# Lógica: Lê o config.json e mostra APENAS quem começa com LOCKED_
 FOUND_LOCKED=0
 if [ -f "$CONFIG_PATH" ]; then
     # Filtra emails que começam com LOCKED_ e remove o prefixo para exibir
@@ -63,8 +62,8 @@ fi
 echo "Recuperando dados originais..."
 
 # 1. Recupera o UUID Original do Banco de Dados (users.db)
-# O banco deve estar intacto: user|uuid-real|validade
-REAL_UUID=$(grep "^$user_input|" "$USER_DB" | cut -d'|' -f2)
+# CORREÇÃO: head -n 1 garante que pegamos apenas o primeiro resultado válido
+REAL_UUID=$(grep "^$user_input|" "$USER_DB" | cut -d'|' -f2 | head -n 1)
 
 if [ -z "$REAL_UUID" ]; then
     echo -e "${TXT_RED}ERRO CRÍTICO:${RESET} O UUID original não foi encontrado em $USER_DB."
