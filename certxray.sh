@@ -1,134 +1,86 @@
 #!/bin/bash
-# certxray.sh - VERSÃO FINAL SEGURA V7.3
-# CORREÇÕES: Permissões 600/644 (Fim do chmod 777) e Correção de Duplicidade no Cron
+# onlinexray.sh - Monitor Otimizado com AWK (Anti-Spam)
+# CORREÇÃO: Restart Inteligente (Não derruba conexões se o log já estiver ativo)
 
-DOMAIN="$1"
-SSL_DIR="/opt/DragonCoreSSL"
-LE_DIR="/etc/letsencrypt/live/$DOMAIN"
-RENEW_SCRIPT="$SSL_DIR/renew_cert.sh"
-
-# --- CORES ---
-YB='\033[1;33m'   # Amarelo Negrito
-RB='\033[1;31m'   # Vermelho Negrito
-BG_RED='\033[41;1;37m' # Fundo Vermelho
+# Cores
+GREEN='\033[1;32m'
+CYAN='\033[1;36m'
+YELLOW='\033[1;33m'
+RED='\033[1;31m'
 RESET='\033[0m'
+CONF="/usr/local/etc/xray/config.json"
 
-if [ -z "$DOMAIN" ]; then
-    echo -e "${RB}Erro: Nenhum domínio recebido.${RESET}"
-    read -rp "Digite o domínio manualmente: " DOMAIN
-fi
+# Função para restaurar o log ao sair
+restaurar_log() {
+    echo ""
+    echo -e "${YELLOW}>>> Restaurando configurações...${RESET}"
+    # Só restaura se realmente precisar (evita restart desnecessário na saída também)
+    if grep -q '"loglevel": "info"' "$CONF"; then
+        sed -i 's/"loglevel": "info"/"loglevel": "warning"/' "$CONF"
+        systemctl restart xray
+    fi
+    echo -e "${GREEN}>>> Encerrado.${RESET}"
+    exit 0
+}
 
-# Prepara a pasta com permissões corretas (755 = Apenas dono escreve, resto lê/executa)
-mkdir -p "$SSL_DIR"
-chmod 755 "$SSL_DIR"
+trap restaurar_log SIGINT
 
 clear
-echo -e "${YB}====================================================${RESET}"
-echo -e "${YB}            GERENCIADOR DE CERTIFICADOS SSL          ${RESET}"
-echo -e "${YB}====================================================${RESET}"
-echo ""
-echo -e "${YB}DOMÍNIO: $DOMAIN${RESET}"
-echo ""
-echo -e "${YB}ESCOLHA O TIPO DE CERTIFICADO:${RESET}"
-echo ""
-echo -e "${YB} [1] CERTIFICADO OFICIAL LET'S ENCRYPT${RESET}"
-echo -e "${RB}     ⚠️  REQ 1: PORTA 80 DEVE ESTAR LIVRE NA VPS${RESET}"
-echo -e "${RB}     ⚠️  REQ 2: PORTA 80 DEVE ESTAR ABERTA NO FIREWALL${RESET}"
-echo ""
-echo -e "${YB} [2] CERTIFICADO AUTO-ASSINADO (LOCAL)${RESET}"
-echo -e "${YB}     ✅  Não precisa de porta 80 / Instalação Rápida${RESET}"
-echo ""
-echo -e "${YB}====================================================${RESET}"
-echo ""
-read -rp "OPÇÃO: " cert_opt
+echo -e "${CYAN}================================================${RESET}"
+echo -e "${CYAN}         MONITOR DE USUÁRIOS ONLINE (XRAY)      ${RESET}"
+echo -e "${CYAN}================================================${RESET}"
 
-rm -f "$SSL_DIR/fullchain.pem"
-rm -f "$SSL_DIR/privkey.pem"
+# --- CORREÇÃO: VERIFICAÇÃO INTELIGENTE DE LOG ---
+echo -e "${YELLOW}Verificando configurações de log...${RESET}"
 
-case $cert_opt in
-    1)
-        # Tela de Confirmação Crítica
-        clear
-        echo -e "${BG_RED}                ⚠️  LEIA COM ATENÇÃO  ⚠️                ${RESET}"
-        echo ""
-        echo -e "${YB}Você escolheu LET'S ENCRYPT. Para funcionar:${RESET}"
-        echo ""
-        echo -e "1. ${RB}PORTA 80 LIVRE:${RESET} Nenhum outro site ou script pode estar usando a porta 80."
-        echo -e "   (O script tentará parar o Nginx/Apache automaticamente)."
-        echo ""
-        echo -e "2. ${RB}PORTA 80 ABERTA:${RESET} Se usa Oracle/AWS/Google, abra a porta 80 no site deles."
-        echo ""
-        read -rp "Pressione [ENTER] se você confirma os requisitos..." confirm_80
+if grep -q '"loglevel": "info"' "$CONF"; then
+    echo -e "${GREEN}>>> Log detalhado já estava ativo. Iniciando sem reiniciar!${RESET}"
+    # Pula o restart, mantendo as conexões vivas
+else
+    echo -e "${YELLOW}>>> Ativando modo espião (Filtro Anti-Spam: 15s)...${RESET}"
+    sed -i 's/"loglevel": "warning"/"loglevel": "info"/' "$CONF"
+    systemctl restart xray
+    echo -e "${GREEN}>>> Xray reiniciado para aplicar logs.${RESET}"
+fi
+# -----------------------------------------------
 
-        echo -e "${YB}>>> PREPARANDO AMBIENTE...${RESET}"
-        
-        export DEBIAN_FRONTEND=noninteractive
-        if ! command -v snap &> /dev/null; then apt-get update -y >/dev/null 2>&1 && apt-get install snapd -y >/dev/null 2>&1; fi
-        if ! snap list | grep -q "certbot"; then
-            snap install core >/dev/null 2>&1
-            snap install --classic certbot >/dev/null 2>&1
-            ln -sf /snap/bin/certbot /usr/bin/certbot
-        fi
+echo -e "${GREEN}>>> AGUARDANDO CONEXÕES... (CTRL+C para Sair)${RESET}"
+echo ""
 
-        # Tenta liberar a porta 80 na marra
-        systemctl stop xray >/dev/null 2>&1
-        systemctl stop nginx >/dev/null 2>&1
-        if command -v fuser >/dev/null; then fuser -k 80/tcp >/dev/null 2>&1; fi
-        sleep 2
-        
-        echo -e "${YB}>>> GERANDO CERTIFICADO...${RESET}"
-        certbot certonly --standalone -d "$DOMAIN" --register-unsafely-without-email --agree-tos --non-interactive
-
-        if [ -f "$LE_DIR/fullchain.pem" ]; then
-            cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
-            cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
-            
-            # --- CORREÇÃO DE SEGURANÇA ---
-            # Fullchain é público (644), Privkey é secreta (600)
-            chmod 644 "$SSL_DIR/fullchain.pem"
-            chmod 600 "$SSL_DIR/privkey.pem"
-            
-            cat > "$RENEW_SCRIPT" <<EOF
-#!/bin/bash
-systemctl stop xray
-if command -v fuser >/dev/null; then fuser -k 80/tcp; fi
-certbot renew --quiet
-cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
-cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
-chmod 644 "$SSL_DIR/fullchain.pem"
-chmod 600 "$SSL_DIR/privkey.pem"
-systemctl restart xray
-EOF
-            chmod +x "$RENEW_SCRIPT"
-            
-            # --- CORREÇÃO DO CRON: Remove duplicatas antes de adicionar ---
-            (crontab -l 2>/dev/null | grep -v "$RENEW_SCRIPT"; echo "0 3 * * * $RENEW_SCRIPT >/dev/null 2>&1") | crontab -
-            
-            echo -e "${YB}✅ SUCESSO! Certificado Instalado.${RESET}"
-        else
-            echo ""
-            echo -e "${BG_RED}  FALHA NA VALIDAÇÃO  ${RESET}"
-            echo -e "${RB}Não foi possível gerar o certificado oficial.${RESET}"
-            echo "Verifique: Porta 80 bloqueada ou Domínio incorreto."
-            echo ""
-            echo -e "${YB}>>> Instalando Auto-assinado de emergência...${RESET}"
-            openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-            -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
-            -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" >/dev/null 2>&1
-            
-            chmod 644 "$SSL_DIR/fullchain.pem"
-            chmod 600 "$SSL_DIR/privkey.pem"
-        fi
-        ;;
+# Monitora usando AWK (Muito mais rápido e estável)
+journalctl -u xray -f --no-pager | grep --line-buffered "accepted" | \
+awk '
+BEGIN { 
+    # Define o tempo de espera (Cooldown) em segundos
+    cooldown = 15;
+}
+{
+    # Tenta encontrar o padrão "email: usuario" na linha
+    match($0, /email: [^ ]+/);
     
-    *)
-        echo "Gerando Auto-assinado..."
-        openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-        -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
-        -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" >/dev/null 2>&1
+    if (RSTART > 0) {
+        # Extrai o nome do usuário da linha
+        user_str = substr($0, RSTART, RLENGTH);
+        split(user_str, a, ": ");
+        user = a[2];
         
-        # Correção de permissões aqui também
-        chmod 644 "$SSL_DIR/fullchain.pem"
-        chmod 600 "$SSL_DIR/privkey.pem"
-        ;;
-esac
+        # Pega o tempo atual do sistema
+        now = systime();
+        
+        # Se for a primeira vez que vemos o usuário OU se já passou o tempo de cooldown
+        if ((user in last_seen) == 0 || (now - last_seen[user] >= cooldown)) {
+            
+            # Formata a hora (Campo 3 do log geralmente é a hora HH:MM:SS)
+            hora = $3;
+            
+            # Imprime Colorido
+            print "\033[1;36m[" hora "]\033[0m Usuário: \033[1;32m" user "\033[0m \033[1;33m(Online)\033[0m";
+            
+            # Atualiza a última vez que ele foi visto
+            last_seen[user] = now;
+            
+            # Força o Linux a mostrar na tela agora (sem esperar encher buffer)
+            fflush();
+        }
+    }
+}'
