@@ -1,5 +1,6 @@
 #!/bin/bash
-# certxray.sh - VERSÃO FINAL COM TODOS OS AVISOS E CORREÇÕES
+# certxray.sh - VERSÃO FINAL SEGURA V7.3
+# CORREÇÕES: Permissões 600/644 (Fim do chmod 777) e Correção de Duplicidade no Cron
 
 DOMAIN="$1"
 SSL_DIR="/opt/DragonCoreSSL"
@@ -17,20 +18,19 @@ if [ -z "$DOMAIN" ]; then
     read -rp "Digite o domínio manualmente: " DOMAIN
 fi
 
-# Prepara a pasta com permissões corretas
+# Prepara a pasta com permissões corretas (755 = Apenas dono escreve, resto lê/executa)
 mkdir -p "$SSL_DIR"
-chmod 777 "$SSL_DIR"
+chmod 755 "$SSL_DIR"
 
 clear
 echo -e "${YB}====================================================${RESET}"
-echo -e "${YB}           GERENCIADOR DE CERTIFICADOS SSL          ${RESET}"
+echo -e "${YB}            GERENCIADOR DE CERTIFICADOS SSL          ${RESET}"
 echo -e "${YB}====================================================${RESET}"
 echo ""
 echo -e "${YB}DOMÍNIO: $DOMAIN${RESET}"
 echo ""
 echo -e "${YB}ESCOLHA O TIPO DE CERTIFICADO:${RESET}"
 echo ""
-# --- AQUI ESTÁ O AVISO QUE VOCÊ PEDIU ---
 echo -e "${YB} [1] CERTIFICADO OFICIAL LET'S ENCRYPT${RESET}"
 echo -e "${RB}     ⚠️  REQ 1: PORTA 80 DEVE ESTAR LIVRE NA VPS${RESET}"
 echo -e "${RB}     ⚠️  REQ 2: PORTA 80 DEVE ESTAR ABERTA NO FIREWALL${RESET}"
@@ -49,7 +49,7 @@ case $cert_opt in
     1)
         # Tela de Confirmação Crítica
         clear
-        echo -e "${BG_RED}               ⚠️  LEIA COM ATENÇÃO  ⚠️               ${RESET}"
+        echo -e "${BG_RED}                ⚠️  LEIA COM ATENÇÃO  ⚠️                ${RESET}"
         echo ""
         echo -e "${YB}Você escolheu LET'S ENCRYPT. Para funcionar:${RESET}"
         echo ""
@@ -73,7 +73,7 @@ case $cert_opt in
         # Tenta liberar a porta 80 na marra
         systemctl stop xray >/dev/null 2>&1
         systemctl stop nginx >/dev/null 2>&1
-        fuser -k 80/tcp >/dev/null 2>&1
+        if command -v fuser >/dev/null; then fuser -k 80/tcp >/dev/null 2>&1; fi
         sleep 2
         
         echo -e "${YB}>>> GERANDO CERTIFICADO...${RESET}"
@@ -83,24 +83,26 @@ case $cert_opt in
             cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
             cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
             
-            # Ajusta permissões para o Xray ler
-            chmod 755 "$SSL_DIR"
+            # --- CORREÇÃO DE SEGURANÇA ---
+            # Fullchain é público (644), Privkey é secreta (600)
             chmod 644 "$SSL_DIR/fullchain.pem"
-            chmod 644 "$SSL_DIR/privkey.pem"
+            chmod 600 "$SSL_DIR/privkey.pem"
             
             cat > "$RENEW_SCRIPT" <<EOF
 #!/bin/bash
 systemctl stop xray
-fuser -k 80/tcp
+if command -v fuser >/dev/null; then fuser -k 80/tcp; fi
 certbot renew --quiet
 cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
 cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
-chmod 777 "$SSL_DIR/fullchain.pem"
-chmod 777 "$SSL_DIR/privkey.pem"
+chmod 644 "$SSL_DIR/fullchain.pem"
+chmod 600 "$SSL_DIR/privkey.pem"
 systemctl restart xray
 EOF
             chmod +x "$RENEW_SCRIPT"
-            (crontab -l 2>/dev/null; echo "0 3 1 * * $RENEW_SCRIPT >/dev/null 2>&1") | crontab -
+            
+            # --- CORREÇÃO DO CRON: Remove duplicatas antes de adicionar ---
+            (crontab -l 2>/dev/null | grep -v "$RENEW_SCRIPT"; echo "0 3 * * * $RENEW_SCRIPT >/dev/null 2>&1") | crontab -
             
             echo -e "${YB}✅ SUCESSO! Certificado Instalado.${RESET}"
         else
@@ -114,8 +116,8 @@ EOF
             -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
             -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" >/dev/null 2>&1
             
-            chmod 777 "$SSL_DIR/fullchain.pem"
-            chmod 777 "$SSL_DIR/privkey.pem"
+            chmod 644 "$SSL_DIR/fullchain.pem"
+            chmod 600 "$SSL_DIR/privkey.pem"
         fi
         ;;
     
@@ -125,7 +127,8 @@ EOF
         -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
         -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" >/dev/null 2>&1
         
-        chmod 777 "$SSL_DIR/fullchain.pem"
-        chmod 777 "$SSL_DIR/privkey.pem"
+        # Correção de permissões aqui também
+        chmod 644 "$SSL_DIR/fullchain.pem"
+        chmod 600 "$SSL_DIR/privkey.pem"
         ;;
 esac
