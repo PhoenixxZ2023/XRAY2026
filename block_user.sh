@@ -23,7 +23,6 @@ if ! command -v uuidgen &> /dev/null; then apt-get install uuid-runtime -y > /de
 
 # --- LISTAR APENAS USUÁRIOS ATIVOS (NÃO BLOQUEADOS) ---
 echo "--- Usuários Ativos ---"
-# Lógica: Lê o config.json e mostra quem NÃO começa com LOCKED_
 if [ -f "$CONFIG_PATH" ]; then
     jq -r '.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients[].email' "$CONFIG_PATH" | grep -v "LOCKED_" | while read -r line; do
         echo " • $line"
@@ -39,7 +38,7 @@ read -rp "Digite o usuário para suspender: " user_block
 
 if [ -z "$user_block" ]; then exit; fi
 
-# Verifica se existe no Banco de Dados
+# Verifica se existe no Banco de Dados (Grep com ^ para inicio de linha)
 if ! grep -q "^$user_block|" "$USER_DB"; then
     echo -e "${TXT_RED}❌ Usuário não encontrado no banco de dados!${RESET}"
     sleep 2
