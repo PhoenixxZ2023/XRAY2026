@@ -1,6 +1,6 @@
 #!/bin/bash
-# limiterxray.sh - Controle de Consumo V7.3 (COM PERSISTÊNCIA)
-# CORREÇÃO: Menu Limpo (Sem separadores visuais)
+# limiterxray.sh - Controle de Consumo V7.3 (COM RELOAD SUAVE)
+# CORREÇÃO: Usa 'systemctl reload' para não derrubar clientes online ao bloquear alguém.
 
 # CONFIGURAÇÃO
 XRAY_BIN="/usr/local/bin/xray"
@@ -92,7 +92,9 @@ func_set_limit() {
             jq --arg nick "$nick" --arg locked "LOCKED_$nick" --arg uuid "$real_uuid" \
                '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(if .email == $locked then .email = $nick | .id = $uuid else . end)' \
                "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
-            systemctl restart xray > /dev/null 2>&1
+            
+            # Ao desbloquear, também usamos reload para não derrubar os outros
+            systemctl reload xray > /dev/null 2>&1 || systemctl restart xray > /dev/null 2>&1
             echo -e "${TXT_GREEN}Usuário desbloqueado!${RESET}"
         fi
     fi
@@ -154,7 +156,8 @@ func_remove_limit() {
             jq --arg nick "$nick" --arg locked "LOCKED_$nick" --arg uuid "$real_uuid" \
                '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(if .email == $locked then .email = $nick | .id = $uuid else . end)' \
                "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
-            systemctl restart xray > /dev/null 2>&1
+            # Reload suave
+            systemctl reload xray > /dev/null 2>&1 || systemctl restart xray > /dev/null 2>&1
         fi
     fi
     echo -e "${TXT_GREEN}Limite removido e histórico limpo!${RESET}"
@@ -224,7 +227,7 @@ func_check_and_block() {
         sed -i "/^$nick|/d" "${SESSION_DB}.tmp"
         echo "$nick|$current_session" >> "${SESSION_DB}.tmp"
 
-        # --- AQUI ESTÁ A LÓGICA SEPARADA ---
+        # --- LÓGICA DE BLOQUEIO ---
         if [ "$new_historical" -ge "$limit_bytes" ]; then
             # Se for apenas SYNC, apenas avisa na tela
             if [ "$MODE" == "--sync-only" ]; then
@@ -248,9 +251,15 @@ func_check_and_block() {
     mv "${USAGE_DB}.tmp" "$USAGE_DB"
     mv "${SESSION_DB}.tmp" "$SESSION_DB"
     
+    # --- CORREÇÃO PRINCIPAL: RELOAD vs RESTART ---
     if [ $blocked_count -gt 0 ]; then
-        systemctl restart xray > /dev/null 2>&1
-        if [ "$MODE" != "--cron" ]; then echo -e "${TXT_RED}🚫 $blocked_count bloqueados.${RESET}"; fi
+        # Tenta RELOAD primeiro (Não derruba conexões ativas dos outros clientes)
+        # Se falhar, faz RESTART (Fallback de segurança)
+        if ! systemctl reload xray > /dev/null 2>&1; then
+            systemctl restart xray > /dev/null 2>&1
+        fi
+        
+        if [ "$MODE" != "--cron" ]; then echo -e "${TXT_RED}🚫 $blocked_count bloqueados (Reload aplicado).${RESET}"; fi
     elif [ "$MODE" != "--cron" ]; then
         echo -e "${TXT_GREEN}Dados atualizados com sucesso.${RESET}"
     fi
