@@ -246,6 +246,7 @@ func_restore_system() {
 }
 
 # --- GERACAO DE CONFIG ---
+# --- GERACAO DE CONFIG (CORRIGIDA PARA HTTP INJECTOR) ---
 func_generate_config() {
     local port="$1"
     local network="$2"
@@ -265,6 +266,7 @@ func_generate_config() {
 
     if [ "$network" == "xhttp" ]; then
         if [ "$use_tls" = "true" ]; then
+            # ADICIONADO: minVersion: "1.0" para aceitar HTTP Injector antigo
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
             '{
                 network: "xhttp", 
@@ -272,7 +274,9 @@ func_generate_config() {
                 tlsSettings: {
                     serverName: $dom, 
                     certificates: [{certificateFile: $crt, keyFile: $key}], 
-                    alpn: ["h2", "http/1.1"]
+                    alpn: ["h2", "http/1.1"],
+                    allowInsecure: true,
+                    minVersion: "1.0"
                 }, 
                 xhttpSettings: {
                     path: "/", 
@@ -298,21 +302,23 @@ func_generate_config() {
         fi
     elif [ "$network" == "ws" ]; then
         if [ "$use_tls" = "true" ]; then
-            stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "ws", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}]}, wsSettings: {acceptProxyProtocol: false, path: "/"}}')
+            # ADICIONADO: minVersion: "1.0" aqui também
+            stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "ws", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], allowInsecure: true, minVersion: "1.0"}, wsSettings: {acceptProxyProtocol: false, path: "/"}}')
         else
             stream_settings=$(jq -n '{network: "ws", security: "none", wsSettings: {acceptProxyProtocol: false, path: "/"}}')
         fi
     elif [ "$network" == "grpc" ]; then
         if [ "$use_tls" = "true" ]; then
-            stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "grpc", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}]}, grpcSettings: {serviceName: "gRPC"}}')
+            stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "grpc", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], allowInsecure: true, minVersion: "1.0"}, grpcSettings: {serviceName: "gRPC"}}')
         else
             stream_settings=$(jq -n '{network: "grpc", security: "none", grpcSettings: {serviceName: "gRPC"}}')
         fi
     elif [ "$network" == "vision" ]; then
+        # Vision exige 1.2 ou 1.3, não recomendo baixar para 1.0 pois quebra o propósito do Vision
         stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "tcp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], minVersion: "1.2", allowInsecure: true}, tcpSettings: {header: {type: "none"}}}')
     else 
         if [ "$use_tls" = "true" ]; then
-             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "tcp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}]}}')
+             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" '{network: "tcp", security: "tls", tlsSettings: {serverName: $dom, certificates: [{certificateFile: $crt, keyFile: $key}], allowInsecure: true, minVersion: "1.0"}}')
         else
              stream_settings=$(jq -n '{network: "tcp", security: "none"}')
         fi
