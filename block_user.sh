@@ -1,6 +1,6 @@
 #!/bin/bash
-# block_user.sh - Módulo de Bloqueio Seguro V7.3
-# Método: Scramble (Troca UUID por falso e renomeia para LOCKED_)
+# block_user.sh - Módulo de Bloqueio Seguro V7.4 (Otimizado)
+# Método: Scramble (Troca UUID por falso) + Reload Suave
 
 # CONFIGURAÇÃO
 USER_DB="/opt/XrayTools/users.db"
@@ -38,7 +38,7 @@ read -rp "Digite o usuário para suspender: " user_block
 
 if [ -z "$user_block" ]; then exit; fi
 
-# Verifica se existe no Banco de Dados (Grep com ^ para inicio de linha)
+# Verifica se existe no Banco de Dados
 if ! grep -q "^$user_block|" "$USER_DB"; then
     echo -e "${TXT_RED}❌ Usuário não encontrado no banco de dados!${RESET}"
     sleep 2
@@ -55,18 +55,21 @@ fi
 echo "Suspendendo acesso..."
 
 # --- LÓGICA DE BLOQUEIO (SCRAMBLE) ---
-# 1. Gera UUID falso
 FAKE_UUID=$(uuidgen)
 
-# 2. Edita o Config: 
-#    - Muda o email para LOCKED_nome
-#    - Muda o ID para o UUID Falso
+# Edita o Config (Muda email para LOCKED_ e ID para Falso)
 jq --arg nick "$user_block" --arg locked "LOCKED_$user_block" --arg fake "$FAKE_UUID" \
    '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(if .email == $nick then .email = $locked | .id = $fake else . end)' \
    "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
-# 3. Reinicia Xray para derrubar conexão
-systemctl restart xray
+# --- MELHORIA AQUI: RELOAD SUAVE ---
+# Tenta recarregar sem derrubar conexões. Se falhar, força o restart.
+if systemctl reload xray > /dev/null 2>&1; then
+    echo -e "${TXT_GREEN}✅ Configuração recarregada (Reload Suave).${RESET}"
+else
+    systemctl restart xray > /dev/null 2>&1
+    echo -e "${TXT_YELLOW}⚠️  Reload falhou, restart aplicado.${RESET}"
+fi
 
 echo -e "${TXT_GREEN}✅ Usuário $user_block suspenso com sucesso!${RESET}"
 echo "UUID alterado para falso e prefixo LOCKED_ adicionado."
