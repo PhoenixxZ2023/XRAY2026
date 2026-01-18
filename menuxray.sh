@@ -395,16 +395,69 @@ EOF
     read -rp "Enter para finalizar..."
 }
 
+func_page_create_user() {
+    header_blue "CRIAR NOVO USUÁRIO"
+    echo "⚠️  Regras para o nome:"
+    echo " • Mínimo 5 e Máximo 9 caracteres"
+    echo " • Apenas letras e números (sem símbolos)"
+    echo ""
+    
+    echo -e "${TXT_YELLOW}DIGITE O NOME DO USUÁRIO (0 p/ voltar):${RESET}"
+    read -rp "Nome: " raw_nick
+    
+    if [ "$raw_nick" == "0" ] || [ -z "$raw_nick" ]; then return; fi
+
+    # Validação Rigorosa
+    if ! [[ "$raw_nick" =~ ^[a-zA-Z0-9]{5,9}$ ]]; then
+        echo ""
+        echo -e "${TXT_RED}❌ ERRO: Formato inválido!${RESET}"
+        echo "O usuário deve ter entre 5 e 9 caracteres."
+        echo "Use apenas letras e números."
+        echo ""
+        read -rp "Pressione ENTER para tentar novamente..."
+        return
+    fi
+
+    # --- CORREÇÃO AQUI (Adicionado ^ e |) ---
+    # O ^ significa "começo da linha" e o | é o separador.
+    # Assim 'joaop' não confunde com 'joaopaulo'
+    if grep -q "^$raw_nick|" "$USER_DB"; then 
+        echo -e "${TXT_RED}❌ Usuário já existe!${RESET}"
+        sleep 2
+        return
+    fi
+    
+    echo ""
+    echo -e "${TXT_YELLOW}DIGITE OS DIAS DE VALIDADE (Padrão 30):${RESET}"
+    read -rp "Dias: " days
+    [ -z "$days" ] && days=30
+    
+    if ! [[ "$days" =~ ^[0-9]+$ ]]; then days=30; fi
+
+    func_add_user_logic "$raw_nick" "$days"
+    read -rp "Pressione ENTER para voltar ao menu..."
+}
+
 func_add_user_logic() {
     local nick="$1"
     local expiry_days="$2"
     if [ -z "$nick" ]; then return 1; fi
     if [ ! -f "$CONFIG_PATH" ]; then echo "Erro config."; return 1; fi
+    
+    # --- CORREÇÃO DE SEGURANÇA EXTRA ---
+    # Garante que não duplique mesmo se passar pela validação visual
+    if grep -q "^$nick|" "$USER_DB"; then
+        echo "Erro: Usuario duplicado no DB."
+        return 1
+    fi
+
     local uuid=$(uuidgen)
     local expiry=$(date -d "+$expiry_days days" +%F)
+    
     jq --arg uuid "$uuid" --arg nick_arg "$nick" \
         '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) += [{"id": $uuid, "email": $nick_arg, "level": 0}]' \
         "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
+        
     echo "$nick|$uuid|$expiry" >> "$USER_DB"
     systemctl restart xray > /dev/null 2>&1
     clear
@@ -419,10 +472,20 @@ func_add_user_logic() {
 func_remove_user_logic() {
     local identifier="$1"
     if [ ! -f "$CONFIG_PATH" ]; then echo "Erro config."; return; fi
+    
+    # Remove do JSON (Aqui o jq já é seguro pois busca match exato do campo email)
     jq --arg id "$identifier" \
         '(.inbounds[] | select(.tag == "inbound-dragoncore").settings.clients) |= map(select(.id != $id and .email != $id))' \
         "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
-    if [ -f "$USER_DB" ]; then sed -i "/$identifier/d" "$USER_DB"; fi
+    
+    # --- CORREÇÃO NO BANCO DE DADOS (SED) ---
+    # Adicionado ^ e | para garantir que apague apenas o usuário exato
+    if [ -f "$USER_DB" ]; then 
+        sed -i "/^$identifier|/d" "$USER_DB"
+        # Backup: tenta apagar também pelo UUID (caso o input seja UUID)
+        sed -i "/|$identifier|/d" "$USER_DB"
+    fi
+    
     systemctl restart xray > /dev/null 2>&1
     echo -e "${TXT_GREEN}Removido.${RESET}"; sleep 1
 }
@@ -533,47 +596,6 @@ func_wizard_install() {
     esac
 
     func_generate_config "$pub_port" "$selected_net" "$domain_val" "$api_port" "$use_tls"
-}
-
-# --- MENU ---
-func_page_create_user() {
-    header_blue "CRIAR NOVO USUÁRIO"
-    echo "⚠️  Regras para o nome:"
-    echo " • Mínimo 5 e Máximo 9 caracteres"
-    echo " • Apenas letras e números (sem símbolos)"
-    echo ""
-    
-    echo -e "${TXT_YELLOW}DIGITE O NOME DO USUÁRIO (0 p/ voltar):${RESET}"
-    read -rp "Nome: " raw_nick
-    
-    if [ "$raw_nick" == "0" ] || [ -z "$raw_nick" ]; then return; fi
-
-    # Validação Rigorosa
-    if ! [[ "$raw_nick" =~ ^[a-zA-Z0-9]{5,9}$ ]]; then
-        echo ""
-        echo -e "${TXT_RED}❌ ERRO: Formato inválido!${RESET}"
-        echo "O usuário deve ter entre 5 e 9 caracteres."
-        echo "Use apenas letras e números."
-        echo ""
-        read -rp "Pressione ENTER para tentar novamente..."
-        return
-    fi
-
-    if grep -q "$raw_nick" "$USER_DB"; then 
-        echo -e "${TXT_RED}❌ Usuário já existe!${RESET}"
-        sleep 2
-        return
-    fi
-    
-    echo ""
-    echo -e "${TXT_YELLOW}DIGITE OS DIAS DE VALIDADE (Padrão 30):${RESET}"
-    read -rp "Dias: " days
-    [ -z "$days" ] && days=30
-    
-    if ! [[ "$days" =~ ^[0-9]+$ ]]; then days=30; fi
-
-    func_add_user_logic "$raw_nick" "$days"
-    read -rp "Pressione ENTER para voltar ao menu..."
 }
 
 func_page_remove_user() {
