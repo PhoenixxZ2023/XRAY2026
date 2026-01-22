@@ -758,25 +758,6 @@ func_page_uninstall() {
     rm -f /usr/bin/xray-menu
     rm -f /usr/local/bin/uuidgen
 
-    echo "5. Executando limpeza profunda de disco..."
-    
-    echo "   - Limpando cache e listas do APT..."
-    apt-get clean > /dev/null 2>&1
-    apt-get autoremove -y > /dev/null 2>&1
-    rm -rf /var/lib/apt/lists/*
-
-    echo "   - Zerando logs do sistema e temporários..."
-    rm -rf /tmp/*
-    journalctl --vacuum-time=1s > /dev/null 2>&1
-
-    if command -v snap > /dev/null 2>&1; then
-        echo "   - Removendo revisões antigas do Snap (Isso libera muito espaço)..."
-        snap list --all 2>/dev/null | awk '/disabled/{print $1, $3}' | \
-        while read snapname revision; do
-            snap remove "$snapname" --revision="$revision" > /dev/null 2>&1
-        done
-    fi
-
     echo ""
     echo "========================================="
     echo -e "${TXT_GREEN}✅ DESINSTALAÇÃO E LIMPEZA CONCLUÍDAS!${RESET}"
