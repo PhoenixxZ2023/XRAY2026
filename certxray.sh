@@ -4,8 +4,8 @@
 
 DOMAIN="$1"
 SSL_DIR="/opt/DragonCoreSSL"
-LE_DIR="/etc/letsencrypt/live/$DOMAIN"
 RENEW_SCRIPT="$SSL_DIR/renew_cert.sh"
+LE_DIR=""
 
 # --- CORES ---
 YB='\033[1;33m'   # Amarelo Negrito
@@ -13,14 +13,48 @@ RB='\033[1;31m'   # Vermelho Negrito
 BG_RED='\033[41;1;37m' # Fundo Vermelho
 RESET='\033[0m'
 
+get_xray_user() {
+    local svc_user="root"
+    if command -v systemctl >/dev/null 2>&1; then
+        svc_user=$(systemctl show -p User --value xray 2>/dev/null)
+        if [ -z "$svc_user" ] || [ "$svc_user" = "root" ]; then
+            svc_user="root"
+        fi
+    fi
+    echo "$svc_user"
+}
+
+XRAY_USER="$(get_xray_user)"
+
+apply_cert_permissions() {
+    local target_user="$XRAY_USER"
+    if ! id -u "$target_user" >/dev/null 2>&1; then
+        target_user="root"
+    fi
+    chown root:"$target_user" "$SSL_DIR" 2>/dev/null || true
+    chmod 750 "$SSL_DIR"
+
+    if [ -f "$SSL_DIR/fullchain.pem" ]; then
+        chown "$target_user":"$target_user" "$SSL_DIR/fullchain.pem" 2>/dev/null || chown "$target_user":root "$SSL_DIR/fullchain.pem"
+        chmod 644 "$SSL_DIR/fullchain.pem"
+    fi
+
+    if [ -f "$SSL_DIR/privkey.pem" ]; then
+        chown "$target_user":"$target_user" "$SSL_DIR/privkey.pem" 2>/dev/null || chown "$target_user":root "$SSL_DIR/privkey.pem"
+        chmod 600 "$SSL_DIR/privkey.pem"
+    fi
+}
+
 if [ -z "$DOMAIN" ]; then
     echo -e "${RB}Erro: Nenhum domínio recebido.${RESET}"
     read -rp "Digite o domínio manualmente: " DOMAIN
 fi
 
-# Prepara a pasta com permissões corretas (755 = Apenas dono escreve, resto lê/executa)
+LE_DIR="/etc/letsencrypt/live/$DOMAIN"
+
+# Prepara a pasta com permissões corretas e compatíveis com o usuário do serviço
 mkdir -p "$SSL_DIR"
-chmod 777 "$SSL_DIR"
+apply_cert_permissions
 
 clear
 echo -e "${YB}====================================================${RESET}"
@@ -84,18 +118,40 @@ case $cert_opt in
             cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
             
             # --- CORREÇÃO DE SEGURANÇA ---
-            # Fullchain é público (644), Privkey é secreta (600)
-            chmod 777 "$SSL_DIR/fullchain.pem"
-            chmod 777 "$SSL_DIR/privkey.pem"
+            # Ajusta permissões e ownership para o usuário real do serviço
+            apply_cert_permissions
             
             cat > "$RENEW_SCRIPT" <<EOF
 #!/bin/bash
+SSL_DIR="/opt/DragonCoreSSL"
+LE_DIR="/etc/letsencrypt/live/$DOMAIN"
+
+get_xray_user() {
+    local svc_user="root"
+    if command -v systemctl >/dev/null 2>&1; then
+        svc_user=\$(systemctl show -p User --value xray 2>/dev/null)
+        if [ -z "\$svc_user" ] || [ "\$svc_user" = "root" ]; then
+            svc_user="root"
+        fi
+    fi
+    echo "\$svc_user"
+}
+
+XRAY_USER="\$(get_xray_user)"
+if ! id -u "\$XRAY_USER" >/dev/null 2>&1; then
+    XRAY_USER="root"
+fi
+
 systemctl stop xray
 if command -v fuser >/dev/null; then fuser -k 80/tcp; fi
 certbot renew --quiet
 cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
 cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
+chown root:"\$XRAY_USER" "\$SSL_DIR" 2>/dev/null || true
+chmod 750 "\$SSL_DIR"
+chown "\$XRAY_USER":"\$XRAY_USER" "\$SSL_DIR/fullchain.pem" 2>/dev/null || chown "\$XRAY_USER":root "\$SSL_DIR/fullchain.pem"
 chmod 644 "$SSL_DIR/fullchain.pem"
+chown "\$XRAY_USER":"\$XRAY_USER" "\$SSL_DIR/privkey.pem" 2>/dev/null || chown "\$XRAY_USER":root "\$SSL_DIR/privkey.pem"
 chmod 600 "$SSL_DIR/privkey.pem"
 systemctl restart xray
 EOF
@@ -116,8 +172,7 @@ EOF
             -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
             -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" >/dev/null 2>&1
             
-            chmod 777 "$SSL_DIR/fullchain.pem"
-            chmod 777 "$SSL_DIR/privkey.pem"
+            apply_cert_permissions
         fi
         ;;
     
@@ -128,7 +183,6 @@ EOF
         -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" >/dev/null 2>&1
         
         # Correção de permissões aqui também
-        chmod 777 "$SSL_DIR/fullchain.pem"
-        chmod 777 "$SSL_DIR/privkey.pem"
+        apply_cert_permissions
         ;;
 esac
