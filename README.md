@@ -15,7 +15,7 @@
 O **DragonCore Xray Manager** foi reescrito para eliminar dependências externas críticas. Diferente de scripts comuns, ele possui um ecossistema integrado:
 
 ### 🛡️ Segurança e Estabilidade
-* **Offline-Ready:** As funções de bloquear/desbloquear agora vivem dentro do script. O painel não quebra se o GitHub/Gitea cair.
+* **Offline-Ready (com cache):** Os módulos de bloqueio/desbloqueio são baixados e armazenados localmente; após o primeiro download, o painel segue funcionando mesmo se o GitHub/Gitea cair.
 * **Bloqueio "Scramble":** O sistema **não deleta** o usuário ao bloquear. Ele altera o UUID para um falso e renomeia para `LOCKED_`, mantendo o histórico e backup seguros.
 * **Validação Rigorosa:** Impede criação de usuários com nomes quebrados (Regra: 5-9 caracteres, apenas letras/números).
 

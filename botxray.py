@@ -86,8 +86,14 @@ def core_delete_user(nick):
         with open(USER_DB, 'r') as f: lines = f.readlines()
         with open(USER_DB, 'w') as f:
             for line in lines:
-                if not line.startswith(f"{nick}|"): f.write(line)
-    
+                if not line.startswith(f"{nick}|"):
+                    f.write(line)
+                else:
+                    found = True
+
+    if not found:
+        return "❌ Usuário não encontrado no sistema."
+
     restart_xray()
     return "✅ Usuário removido do sistema."
 
@@ -160,7 +166,7 @@ def core_list_users_text():
                 if email.startswith("LOCKED_"):
                     locked_users.append(email.replace("LOCKED_", ""))
 
-    msg = "LISTA DE USUARIOS - DRAGONCORE\n"
+    msg = "LISTA DE USUÁRIOS - DRAGONCORE\n"
     msg += "=================================================================================\n"
     msg += "NOME            | VENCIMENTO  | UUID                                     | STATUS\n"
     msg += "=================================================================================\n"
