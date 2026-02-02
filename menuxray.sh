@@ -1,7 +1,6 @@
 #!/bin/bash
-# xraymenu.sh - DragonCore V7.4
-# Maestro: Gerencia download e execução dos módulos.
-# NOMES PERSONALIZADOS: remover_user, lista_users, remover_expirados.
+# xraymenu.sh - DragonCore V7.4 (Arquitetura Modular)
+# Visual: Painel Vertical (Status, Usuários, Protocolo, Porta, Bot)
 
 set -euo pipefail
 
@@ -17,6 +16,7 @@ LOCAL_BIN="/usr/local/bin"
 # DIRETÓRIOS LOCAIS
 XRAY_DIR="/opt/XrayTools"
 USER_DB="${XRAY_DIR}/users.db"
+CONFIG_PATH="/usr/local/etc/xray/config.json" # Necessário para leitura de fallback
 
 # CORES
 TITLE_BAR='\033[1;47;34m'
@@ -26,7 +26,7 @@ TXT_CYAN='\033[1;36m'
 TXT_YELLOW='\033[1;33m'
 RESET='\033[0m'
 
-# --- FUNÇÃO DE AUTO-CORREÇÃO (CRIA DB SE FALTAR) ---
+# --- FUNÇÃO DE AUTO-CORREÇÃO ---
 init_system() {
     if [ ! -d "$XRAY_DIR" ]; then mkdir -p "$XRAY_DIR"; fi
     if [ ! -f "$USER_DB" ]; then touch "$USER_DB"; fi
@@ -38,33 +38,73 @@ run_module() {
     local local_path="$LOCAL_BIN/$script_name"
     local description="$2"
     
-    # Se não existe ou está vazio, baixa
     if [ ! -s "$local_path" ]; then
         echo -e "${TXT_YELLOW}Baixando módulo: $description...${RESET}"
         if ! curl -fsSL -o "$local_path" "$MODULES_URL/$script_name"; then
-             echo -e "${TXT_RED}Erro ao baixar $script_name! Verifique GitHub.${RESET}"
+             echo -e "${TXT_RED}Erro ao baixar $script_name!${RESET}"
              sleep 2
              return
         fi
         chmod +x "$local_path"
     fi
-    
     bash "$local_path"
 }
 
 # --- MENU ---
 menu_display() {
     clear
-    echo -e "${TITLE_BAR}        DRAGONCORE XRAY MANAGER        ${RESET}"
+    echo -e "${TITLE_BAR}        DRAGONCORE XRAY MANAGER (V7.4)        ${RESET}"
     echo ""
-    
-    local status="${TXT_RED}OFF${RESET}"
-    if systemctl is-active --quiet xray; then status="${TXT_GREEN}ON${RESET}"; fi
-    
-    local users=$(wc -l < "$USER_DB" 2>/dev/null || echo 0)
-    
-    echo -e " STATUS: $status  |  USUÁRIOS: ${TXT_CYAN}$users${RESET}"
+
+    # --- LÓGICA DE COLETA DE DADOS (Baseada no seu código) ---
+    local status_txt="${TXT_RED}DESATIVADO${RESET}"
+    local users_count="0"
+    local preset_file="/usr/local/etc/xray/preset.json"
+    local port="?"
+    local net="?"
+
+    # Contagem de Usuários
+    if [ -f "$USER_DB" ]; then
+        users_count=$(grep -c '|' "$USER_DB" 2>/dev/null || echo 0)
+    fi
+
+    # Dados do Xray
+    if systemctl is-active --quiet xray; then
+        status_txt="${TXT_GREEN}ATIVADO${RESET}"
+
+        # Tenta ler do Preset (Mais rápido)
+        if [ -f "$preset_file" ]; then
+            net=$(jq -r '.network // empty' "$preset_file" 2>/dev/null || echo "")
+            port=$(jq -r '.port // empty' "$preset_file" 2>/dev/null || echo "")
+        fi
+
+        # Fallback para Config.json se falhar
+        if [ -z "${net:-}" ] || [ "$net" == "null" ]; then
+            net=$(jq -r '.inbounds[] | select(.tag=="inbound-dragoncore").streamSettings.network // empty' "$CONFIG_PATH" 2>/dev/null || echo "")
+        fi
+        if [ -z "${port:-}" ] || [ "$port" == "null" ]; then
+            port=$(jq -r '.inbounds[] | select(.tag=="inbound-dragoncore").port // empty' "$CONFIG_PATH" 2>/dev/null || echo "")
+        fi
+
+        [ -n "${net:-}" ] || net="?"
+        [ -n "${port:-}" ] || port="?"
+    fi
+
+    # Status do Bot
+    local bot_status="${TXT_RED}DESATIVADO${RESET}"
+    if systemctl is-active --quiet botxray 2>/dev/null; then
+        bot_status="${TXT_GREEN}ONLINE${RESET}"
+    fi
+
+    # --- PAINEL VISUAL (VERTICAL - COMO SOLICITADO) ---
     echo "-----------------------------------------"
+    echo -e " ${TXT_CYAN}STATUS XRAY:${RESET}    $status_txt"
+    echo -e " ${TXT_CYAN}USUÁRIOS:${RESET}       $users_count"
+    echo -e " ${TXT_CYAN}PROTOCOLO:${RESET}      ${net^^}"
+    echo -e " ${TXT_CYAN}PORTA:${RESET}          $port"
+    echo -e " ${TXT_CYAN}BOT TELEGRAM:${RESET}   $bot_status"
+    echo "-----------------------------------------"
+    echo ""
     
     echo -e "${TXT_CYAN}[01] CRIAR USUÁRIO${RESET}"
     echo -e "${TXT_CYAN}[02] REMOVER USUÁRIO${RESET}"
@@ -84,10 +124,10 @@ menu_display() {
     
     case "$choice" in
         1|01) run_module "add_user.sh" "Criar Usuário" ;;
-        2|02) run_module "remover_user.sh" "Remover Usuário" ;;    # SEU NOME PERSONALIZADO
-        3|03) run_module "lista_users.sh" "Listar Usuários" ;;     # SEU NOME PERSONALIZADO
+        2|02) run_module "remover_user.sh" "Remover Usuário" ;;
+        3|03) run_module "lista_users.sh" "Listar Usuários" ;;
         4|04) run_module "core_manager.sh" "Gerenciador Xray" ;;
-        5|05) run_module "remover_expirados.sh" "Limpeza" ;;       # SEU NOME PERSONALIZADO
+        5|05) run_module "remover_expirados.sh" "Limpeza" ;;
         6|06) run_module "uninstall.sh" "Desinstalador" ;;
         7|07) run_module "limiterxray.sh" "Limitador" ;;
         8|08) run_module "botxray.sh" "Instalador Bot" ;;
@@ -102,5 +142,7 @@ menu_display() {
 
 # --- ENTRY POINT ---
 if ! command -v curl >/dev/null; then apt-get update && apt-get install -y curl; fi
+if ! command -v jq >/dev/null; then apt-get install -y jq; fi # JQ necessário para leitura do protocolo
+
 init_system
 while true; do menu_display; done
