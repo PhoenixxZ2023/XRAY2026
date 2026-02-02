@@ -1,5 +1,7 @@
 #!/bin/bash
-# rem_user.sh - Remoção de Usuário (Modular)
+# remover_user.sh - Remoção de Usuário
+# CORREÇÃO: Usa AWK para comparação exata de colunas.
+
 set -euo pipefail
 
 CONFIG_PATH="/usr/local/etc/xray/config.json"
@@ -15,15 +17,17 @@ read -rp "Nome ou UUID: " identifier
 if [ -z "$identifier" ]; then exit 0; fi
 if [ ! -f "$CONFIG_PATH" ]; then echo "Erro config."; exit 1; fi
 
-# Remove do JSON
+# Remove do JSON (JQ já é seguro)
 jq --arg id "$identifier" \
     '(.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |= map(select(.id != $id and .email != $id))' \
     "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
-# Remove do DB (Sem usar regex inseguro no sed, usando awk para filtrar)
+# --- AQUI ESTÁ A LÓGICA QUE VOCÊ PEDIU ---
+# Remove do DB usando AWK (Comparação exata da Coluna 1 ou Coluna 2)
 if [ -f "$USER_DB" ]; then
     awk -F'|' -v id="$identifier" '($1!=id && $2!=id){print $0}' "$USER_DB" > "${USER_DB}.tmp" && mv "${USER_DB}.tmp" "$USER_DB"
 fi
+# -----------------------------------------
 
 systemctl reload xray >/dev/null 2>&1 || systemctl restart xray >/dev/null 2>&1
 echo -e "${TXT_GREEN}Removido com sucesso.${RESET}"
