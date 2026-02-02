@@ -1,6 +1,6 @@
 #!/bin/bash
 # remover_user.sh - Remoção de Usuário
-# CORREÇÃO: Usa AWK para comparação exata de colunas.
+# CORREÇÃO: Usa AWK para garantir que não apague usuários com nomes parecidos.
 
 set -euo pipefail
 
@@ -17,18 +17,17 @@ read -rp "Nome ou UUID: " identifier
 if [ -z "$identifier" ]; then exit 0; fi
 if [ ! -f "$CONFIG_PATH" ]; then echo "Erro config."; exit 1; fi
 
-# Remove do JSON (JQ já é seguro)
+# 1. Remove do JSON (Xray Config)
 jq --arg id "$identifier" \
     '(.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |= map(select(.id != $id and .email != $id))' \
     "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
-# --- AQUI ESTÁ A LÓGICA QUE VOCÊ PEDIU ---
-# Remove do DB usando AWK (Comparação exata da Coluna 1 ou Coluna 2)
+# 2. Remove do Banco de Dados (SUA LÓGICA COM AWK AQUI)
 if [ -f "$USER_DB" ]; then
+    # O awk verifica a coluna exata ($1 é nome, $2 é uuid)
     awk -F'|' -v id="$identifier" '($1!=id && $2!=id){print $0}' "$USER_DB" > "${USER_DB}.tmp" && mv "${USER_DB}.tmp" "$USER_DB"
 fi
-# -----------------------------------------
 
-systemctl reload xray >/dev/null 2>&1 || systemctl restart xray >/dev/null 2>&1
+systemctl restart xray >/dev/null 2>&1 || true
 echo -e "${TXT_GREEN}Removido com sucesso.${RESET}"
 sleep 1
