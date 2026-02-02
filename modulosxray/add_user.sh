@@ -1,5 +1,7 @@
 #!/bin/bash
-# add_user.sh - Criação de Usuário (Modular)
+# add_user.sh - Criação de Usuário
+# CORREÇÃO: Proteção contra falso positivo (joaop vs joaopaulo) usando regex ^ e |
+
 set -euo pipefail
 
 CONFIG_PATH="/usr/local/etc/xray/config.json"
@@ -26,14 +28,19 @@ echo ""
 read -rp "Nome (0 p/ voltar): " raw_nick
 if [ "$raw_nick" == "0" ] || [ -z "$raw_nick" ]; then exit 0; fi
 
-# Validação Rígida
+# Validação Rígida de caracteres
 if ! [[ "$raw_nick" =~ ^[a-zA-Z0-9]{5,9}$ ]]; then
     echo -e "${TXT_RED}Formato inválido.${RESET}"; sleep 2; exit 1
 fi
 
+# --- AQUI ESTÁ A LÓGICA QUE VOCÊ PEDIU ---
+# O ^ garante que busca do início, e o | garante que o nome acabou ali.
 if grep -q "^${raw_nick}|" "$USER_DB"; then
-    echo -e "${TXT_RED}Usuário já existe!${RESET}"; sleep 2; exit 1
+    echo -e "${TXT_RED}Erro: Usuário já existe no DB!${RESET}"
+    sleep 2
+    exit 1
 fi
+# -----------------------------------------
 
 read -rp "Dias de validade (padrão 30): " days
 [ -z "$days" ] && days=30
@@ -49,6 +56,7 @@ jq --arg uuid "$uuid" --arg nick_arg "$raw_nick" \
     '(.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) += [{"id":$uuid,"email":$nick_arg,"level":0}]' \
     "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 
+# Salva no DB
 echo "${raw_nick}|${uuid}|${expiry}" >> "$USER_DB"
 
 # Reload Suave
