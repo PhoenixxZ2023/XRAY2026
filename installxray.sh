@@ -1,7 +1,7 @@
 #!/bin/bash
-# installxray.sh - Instalador Premium V7.3 (Visual + Automação)
+# installxray.sh - Instalador Premium V7.4 (Modular Launcher)
 # Repositório: https://github.com/PhoenixxZ2023/XrayX-TLS
-# CORREÇÕES APLICADAS: Segurança Python (PEP 668) e Trava apt-get
+# FUNÇÃO: Prepara o sistema e baixa o Menu Maestro. Os módulos fazem o resto.
 
 # --- CORES ---
 VERMELHO='\033[1;31m'
@@ -9,6 +9,11 @@ VERDE='\033[1;32m'
 AMARELO='\033[1;33m'
 AZUL='\033[1;34m'
 RESET='\033[0m'
+
+# --- CONFIGURAÇÃO ---
+REPO_BASE="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main"
+MENU_PATH="/usr/local/bin/menuxray.sh"
+SHORTCUT="/usr/bin/xray-menu"
 
 # --- FUNÇÃO DE BARRA DE PROGRESSO ---
 fun_bar() {
@@ -40,7 +45,7 @@ fun_bar() {
 # --- INÍCIO ---
 clear
 echo -e "${AZUL}==================================================${RESET}"
-echo -e "${AMARELO}🚀 DRAGONCORE XRAY MANAGER - INSTALADOR V7.3${RESET}"
+echo -e "${AMARELO}🚀 DRAGONCORE MODULAR - LAUNCHER V7.4${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
 
 if [ "$EUID" -ne 0 ]; then 
@@ -48,66 +53,70 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# 1. Atualizando repositórios (Com trava noninteractive)
+# 1. Atualizando repositórios
 (export DEBIAN_FRONTEND=noninteractive; apt-get update -y) > /dev/null 2>&1 &
 fun_bar $! "Atualizando Sistema"
 
-# 2. Instalando Dependências do Sistema + Python
-PACKAGES="curl jq bc cron git uuid-runtime python3 python3-pip"
+# 2. Instalando Dependências Básicas (Apenas o essencial para o Menu rodar)
+# Curl: Baixar módulos / JQ: Ler configs JSON / Cron: Agendamentos futuros
+PACKAGES="curl jq cron tar"
 (export DEBIAN_FRONTEND=noninteractive; apt-get install -y $PACKAGES) > /dev/null 2>&1 &
-fun_bar $! "Instalando Dependências e Python"
+fun_bar $! "Instalando Base (Curl/JQ)"
 
-# 3. Instalando Bibliotecas do Bot (Pip Seguro)
+# 3. Limpeza de Versões Antigas (Para evitar conflito com sistema modular)
 (
-    # CORREÇÃO: Usa flag --break-system-packages em vez de deletar arquivos do sistema
-    pip3 install python-telegram-bot --break-system-packages
-) > /dev/null 2>&1 &
-fun_bar $! "Configurando Bibliotecas do Bot"
-
-# 4. Baixando e Instalando Scripts
-(
-    # Remove versões antigas em pastas variadas para evitar conflito
     rm -f /bin/menuxray.sh /usr/local/bin/menuxray.sh
     rm -f /bin/limiterxray.sh /usr/local/bin/limiterxray.sh
+    rm -f /bin/botxray.sh /usr/local/bin/botxray.sh
     rm -f /bin/xray-menu /usr/bin/xray-menu
-
-    # Menu Principal (Instala em /usr/local/bin)
-    curl -s -L -o /usr/local/bin/menuxray.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/menuxray.sh"
     
-    # Verificação de segurança: Só torna executável se baixou corretamente
-    if [ -s "/usr/local/bin/menuxray.sh" ]; then
-        chmod +x /usr/local/bin/menuxray.sh
+    # Remove scripts antigos que agora são módulos (limpa a raiz do bin)
+    rm -f /usr/local/bin/add_user.sh
+    rm -f /usr/local/bin/rem_user.sh
+) > /dev/null 2>&1 &
+fun_bar $! "Limpando Instalações Antigas"
+
+# 4. Baixando o Menu Maestro (O Cérebro)
+(
+    # Baixa o Menu Principal
+    curl -s -L -o "$MENU_PATH" "$REPO_BASE/menuxray.sh"
+    
+    # Verificação de integridade básica
+    if [ ! -s "$MENU_PATH" ]; then
+        exit 1 # Falha silenciosa capturada pelo fun_bar? Não, vamos tratar abaixo.
     fi
 
-    # Limitador (Módulo)
-    curl -s -L -o /usr/local/bin/limiterxray.sh "https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/limiterxray.sh"
-    
-    if [ -s "/usr/local/bin/limiterxray.sh" ]; then
-        chmod +x /usr/local/bin/limiterxray.sh
-    fi
+    chmod +x "$MENU_PATH"
 
     # Atalho Global 'xray-menu'
-    ln -s /usr/local/bin/menuxray.sh /usr/bin/xray-menu
-    chmod +x /usr/bin/xray-menu
+    ln -s "$MENU_PATH" "$SHORTCUT"
+    chmod +x "$SHORTCUT"
 ) > /dev/null 2>&1 &
-fun_bar $! "Baixando Scripts (V7.3)"
 
-# 5. Configurando Automação (Robô Cron - 2 MINUTOS)
-(
-    # Remove cron antigo (inclusive se estiver apontando para /bin)
-    crontab -l 2>/dev/null | grep -v "limiterxray.sh" | crontab -
-    
-    # Adiciona novo cron apontando para o caminho correto
-    (crontab -l 2>/dev/null; echo "*/2 * * * * bash /usr/local/bin/limiterxray.sh --cron") | crontab -
-) > /dev/null 2>&1 &
-fun_bar $! "Ativando Robô (2 min)"
+PID_DOWNLOAD=$!
+wait $PID_DOWNLOAD
+STATUS_DOWNLOAD=$?
+
+if [ $STATUS_DOWNLOAD -ne 0 ] || [ ! -s "$MENU_PATH" ]; then
+    echo -e "\n${VERMELHO}❌ Erro Crítico: Não foi possível baixar o menuxray.sh${RESET}"
+    echo "Verifique sua conexão ou se o arquivo está na raiz do GitHub."
+    exit 1
+fi
+
+fun_bar $PID_DOWNLOAD "Instalando Menu Maestro"
+
+# Nota: A instalação do Python, Bot e Configuração do Xray/Cron
+# foram removidas daqui propositalmente. Elas agora são gerenciadas
+# dinamicamente pelo menu e pelos módulos na pasta 'modulosxray'.
 
 echo -e "${AZUL}==================================================${RESET}"
-echo -e "${VERDE}🎉 INSTALAÇÃO CONCLUÍDA COM SUCESSO!${RESET}"
+echo -e "${VERDE}🎉 SISTEMA MODULAR PRONTO!${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
-echo -e "O Robô de bloqueio já está ativo em segundo plano."
-echo -e "As dependências do Bot Telegram já foram instaladas."
-echo -e "Para acessar o sistema, digite: ${VERDE}xray-menu${RESET}"
+echo -e "O 'Launcher' preparou o ambiente com sucesso."
+echo -e "Os módulos (Install Core, Bot, Limiter) serão baixados"
+echo -e "automaticamente quando você usar o menu."
+echo -e ""
+echo -e "Para acessar, digite: ${VERDE}xray-menu${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
 echo ""
 sleep 2
