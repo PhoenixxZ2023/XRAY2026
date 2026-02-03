@@ -1,6 +1,6 @@
 #!/bin/bash
-# xraymenu.sh - DragonCore V7.4 (Arquitetura Modular)
-# Visual: Painel Vertical | Correção: Bug do Zero Duplo
+# xraymenu.sh - DragonCore V7.4
+# Visual: Limpo e Dinâmico (Esconde Protocolo se Desativado)
 
 set -euo pipefail
 
@@ -17,6 +17,7 @@ LOCAL_BIN="/usr/local/bin"
 XRAY_DIR="/opt/XrayTools"
 USER_DB="${XRAY_DIR}/users.db"
 CONFIG_PATH="/usr/local/etc/xray/config.json" 
+PRESET_FILE="/usr/local/etc/xray/preset.json"
 
 # CORES
 TITLE_BAR='\033[1;47;34m'
@@ -56,50 +57,61 @@ menu_display() {
     echo -e "${TITLE_BAR}        DRAGONCORE XRAY MANAGER (V7.4)        ${RESET}"
     echo ""
 
+    # Variáveis Iniciais
     local status_txt="${TXT_RED}DESATIVADO${RESET}"
     local users_count="0"
-    local preset_file="/usr/local/etc/xray/preset.json"
-    local port="?"
-    local net="?"
+    local protocol_line="" # Começa vazio para não mostrar nada
 
-    # CORREÇÃO DO BUG DO ZERO DUPLO AQUI:
-    # Usamos '|| true' para ignorar o erro do grep quando count é 0
+    # 1. Contagem de Usuários (Corrigido bug do zero duplo)
     if [ -f "$USER_DB" ]; then
-        users_count=$(grep -c '|' "$USER_DB" 2>/dev/null || true)
+        # Usa wc -l que é mais limpo que grep -c para evitar output extra
+        users_count=$(wc -l < "$USER_DB" 2>/dev/null || echo 0)
     fi
 
-    # Dados do Xray
+    # 2. Verifica Status do Xray e Dados
     if systemctl is-active --quiet xray; then
         status_txt="${TXT_GREEN}ATIVADO${RESET}"
+        
+        local net=""
+        local port=""
 
-        if [ -f "$preset_file" ]; then
-            net=$(jq -r '.network // empty' "$preset_file" 2>/dev/null || echo "")
-            port=$(jq -r '.port // empty' "$preset_file" 2>/dev/null || echo "")
+        # Tenta ler do Preset
+        if [ -f "$PRESET_FILE" ]; then
+            net=$(jq -r '.network // empty' "$PRESET_FILE" 2>/dev/null || echo "")
+            port=$(jq -r '.port // empty' "$PRESET_FILE" 2>/dev/null || echo "")
         fi
 
-        if [ -z "${net:-}" ] || [ "$net" == "null" ]; then
+        # Fallback para Config.json
+        if [ -z "$net" ]; then
             net=$(jq -r '.inbounds[] | select(.tag=="inbound-dragoncore").streamSettings.network // empty' "$CONFIG_PATH" 2>/dev/null || echo "")
         fi
-        if [ -z "${port:-}" ] || [ "$port" == "null" ]; then
+        if [ -z "$port" ]; then
             port=$(jq -r '.inbounds[] | select(.tag=="inbound-dragoncore").port // empty' "$CONFIG_PATH" 2>/dev/null || echo "")
         fi
 
-        [ -n "${net:-}" ] || net="?"
-        [ -n "${port:-}" ] || port="?"
+        # Se encontrou rede e porta, monta a linha de exibição
+        if [ -n "$net" ] && [ -n "$port" ]; then
+            protocol_line=" ${TXT_CYAN}PROTOCOLO/PORTA:${RESET}  ${net^^} (${port})"
+        fi
     fi
 
+    # 3. Status do Bot
     local bot_status="${TXT_RED}DESATIVADO${RESET}"
     if systemctl is-active --quiet botxray 2>/dev/null; then
         bot_status="${TXT_GREEN}ONLINE${RESET}"
     fi
 
-    # --- PAINEL VISUAL (VERTICAL) ---
+    # --- PAINEL VISUAL ---
     echo "-----------------------------------------"
-    echo -e " ${TXT_CYAN}STATUS XRAY:${RESET}    $status_txt"
-    echo -e " ${TXT_CYAN}USUÁRIOS:${RESET}       $users_count"
-    echo -e " ${TXT_CYAN}PROTOCOLO:${RESET}      ${net^^}"
-    echo -e " ${TXT_CYAN}PORTA:${RESET}          $port"
-    echo -e " ${TXT_CYAN}BOT TELEGRAM:${RESET}   $bot_status"
+    echo -e " ${TXT_CYAN}STATUS XRAY:${RESET}      $status_txt"
+    echo -e " ${TXT_CYAN}USUÁRIOS:${RESET}         $users_count"
+    
+    # Só exibe esta linha se a variável protocol_line foi preenchida (Xray Ativo)
+    if [ -n "$protocol_line" ]; then
+        echo -e "$protocol_line"
+    fi
+    
+    echo -e " ${TXT_CYAN}BOT TELEGRAM:${RESET}     $bot_status"
     echo "-----------------------------------------"
     echo ""
     
