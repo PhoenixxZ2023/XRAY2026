@@ -1,52 +1,44 @@
 #!/bin/bash
-# certxray.sh - VERSÃO FINAL SEGURA V7.3
-# Adaptado para Modular (Correção de Input)
+# certxray.sh - VERSÃO FINAL SEGURA V7.5 (Híbrida)
+# Mantém seu menu original + Aplica a correção de permissão 'nobody' que funcionou.
 
 # --- CORREÇÃO DO ERRO DE INPUT ---
-# Pega apenas a última palavra passada como argumento (o domínio),
-# ignorando qualquer "bash" ou caminho que venha antes por engano.
 RAW_INPUT="$*"
 DOMAIN=$(echo "$RAW_INPUT" | awk '{print $NF}')
-# ---------------------------------
 
 SSL_DIR="/opt/DragonCoreSSL"
 RENEW_SCRIPT="$SSL_DIR/renew_cert.sh"
 LE_DIR=""
 
 # --- CORES ---
-YB='\033[1;33m'   # Amarelo Negrito
-RB='\033[1;31m'   # Vermelho Negrito
-BG_RED='\033[41;1;37m' # Fundo Vermelho
+YB='\033[1;33m'   
+RB='\033[1;31m'   
+BG_RED='\033[41;1;37m' 
 RESET='\033[0m'
 
-get_xray_user() {
-    local svc_user="root"
-    if command -v systemctl >/dev/null 2>&1; then
-        svc_user=$(systemctl show -p User --value xray 2>/dev/null)
-        if [ -z "$svc_user" ] || [ "$svc_user" = "root" ]; then
-            svc_user="root"
-        fi
-    fi
-    echo "$svc_user"
-}
-
-XRAY_USER="$(get_xray_user)"
-
+# --- NOVA FUNÇÃO DE PERMISSÕES (Baseada no que funcionou para você) ---
 apply_cert_permissions() {
-    local target_user="$XRAY_USER"
-    if ! id -u "$target_user" >/dev/null 2>&1; then
-        target_user="root"
+    echo "Aplicando permissões blindadas..."
+    
+    # Tenta definir o dono como 'nobody' (Padrão do Xray)
+    if id "nobody" &>/dev/null; then
+        chown -R nobody:nogroup "$SSL_DIR"
+    elif id "xray" &>/dev/null; then
+        chown -R xray:xray "$SSL_DIR"
+    else
+        # Fallback para root se não achar ninguém, mas mantém chmod restrito
+        chown -R root:root "$SSL_DIR"
     fi
-    chown root:"$target_user" "$SSL_DIR" 2>/dev/null || true
+    
+    # Permissões de Pasta (Acesso de leitura/execução para dono e grupo)
     chmod 777 "$SSL_DIR"
 
+    # Arquivos: Fullchain legível por todos, Privkey apenas pelo dono
     if [ -f "$SSL_DIR/fullchain.pem" ]; then
-        chown "$target_user":"$target_user" "$SSL_DIR/fullchain.pem" 2>/dev/null || chown "$target_user":root "$SSL_DIR/fullchain.pem"
         chmod 777 "$SSL_DIR/fullchain.pem"
     fi
 
     if [ -f "$SSL_DIR/privkey.pem" ]; then
-        chown "$target_user":"$target_user" "$SSL_DIR/privkey.pem" 2>/dev/null || chown "$target_user":root "$SSL_DIR/privkey.pem"
         chmod 777 "$SSL_DIR/privkey.pem"
     fi
 }
@@ -58,15 +50,13 @@ fi
 
 LE_DIR="/etc/letsencrypt/live/$DOMAIN"
 
-# Prepara a pasta com permissões corretas e compatíveis com o usuário do serviço
+# Prepara a pasta 
 mkdir -p "$SSL_DIR"
-apply_cert_permissions
 
 clear
 echo -e "${YB}====================================================${RESET}"
 echo -e "${YB}            GERENCIADOR DE CERTIFICADOS SSL          ${RESET}"
 echo -e "${YB}====================================================${RESET}"
-echo ""
 echo -e "${YB}DOMÍNIO: $DOMAIN${RESET}"
 echo ""
 echo -e "${YB}ESCOLHA O TIPO DE CERTIFICADO:${RESET}"
@@ -87,93 +77,74 @@ rm -f "$SSL_DIR/privkey.pem"
 
 case $cert_opt in
     1)
-        # Tela de Confirmação Crítica
+        # Tela de Confirmação
         clear
         echo -e "${BG_RED}                ⚠️  LEIA COM ATENÇÃO  ⚠️                ${RESET}"
         echo ""
         echo -e "${YB}Você escolheu LET'S ENCRYPT. Para funcionar:${RESET}"
+        echo -e "1. ${RB}PORTA 80 LIVRE:${RESET} O script vai parar o Nginx/Apache."
+        echo -e "2. ${RB}PORTA 80 ABERTA:${RESET} Libere no Firewall da VPS."
         echo ""
-        echo -e "1. ${RB}PORTA 80 LIVRE:${RESET} Nenhum outro site ou script pode estar usando a porta 80."
-        echo -e "   (O script tentará parar o Nginx/Apache automaticamente)."
-        echo ""
-        echo -e "2. ${RB}PORTA 80 ABERTA:${RESET} Se usa Oracle/AWS/Google, abra a porta 80 no site deles."
-        echo ""
-        read -rp "Pressione [ENTER] se você confirma os requisitos..." confirm_80
+        read -rp "Pressione [ENTER] para confirmar..." confirm_80
 
         echo -e "${YB}>>> PREPARANDO AMBIENTE...${RESET}"
         
         export DEBIAN_FRONTEND=noninteractive
-        if ! command -v snap &> /dev/null; then apt-get update -y >/dev/null 2>&1 && apt-get install snapd -y >/dev/null 2>&1; fi
-        if ! snap list | grep -q "certbot"; then
-            snap install core >/dev/null 2>&1
-            snap install --classic certbot >/dev/null 2>&1
-            ln -sf /snap/bin/certbot /usr/bin/certbot
+        # Instalação simplificada do Certbot se não tiver
+        if ! command -v certbot &> /dev/null; then 
+            apt-get update -y >/dev/null 2>&1
+            apt-get install certbot -y >/dev/null 2>&1
         fi
 
-        # Tenta liberar a porta 80 na marra
+        # Libera porta 80
         systemctl stop xray >/dev/null 2>&1
         systemctl stop nginx >/dev/null 2>&1
         if command -v fuser >/dev/null; then fuser -k 80/tcp >/dev/null 2>&1; fi
         sleep 2
         
         echo -e "${YB}>>> GERANDO CERTIFICADO...${RESET}"
-        # AQUI usamos o $DOMAIN limpo pelo nosso filtro do início
         certbot certonly --standalone -d "$DOMAIN" --register-unsafely-without-email --agree-tos --non-interactive
 
         if [ -f "$LE_DIR/fullchain.pem" ]; then
             cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
             cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
             
-            # --- CORREÇÃO DE SEGURANÇA ---
+            # APLICA A CORREÇÃO QUE FUNCIONOU
             apply_cert_permissions
             
+            # Cria script de renovação JÁ COM A CORREÇÃO para o futuro
             cat > "$RENEW_SCRIPT" <<EOF
 #!/bin/bash
 SSL_DIR="/opt/DragonCoreSSL"
 LE_DIR="/etc/letsencrypt/live/$DOMAIN"
 
-get_xray_user() {
-    local svc_user="root"
-    if command -v systemctl >/dev/null 2>&1; then
-        svc_user=\$(systemctl show -p User --value xray 2>/dev/null)
-        if [ -z "\$svc_user" ] || [ "\$svc_user" = "root" ]; then
-            svc_user="root"
-        fi
-    fi
-    echo "\$svc_user"
-}
-
-XRAY_USER="\$(get_xray_user)"
-if ! id -u "\$XRAY_USER" >/dev/null 2>&1; then
-    XRAY_USER="root"
-fi
-
 systemctl stop xray
 if command -v fuser >/dev/null; then fuser -k 80/tcp; fi
-certbot renew --quiet
+
+certbot renew --quiet --force-renewal
+
 cp -f "\$LE_DIR/fullchain.pem" "\$SSL_DIR/fullchain.pem"
 cp -f "\$LE_DIR/privkey.pem" "\$SSL_DIR/privkey.pem"
-chown root:"\$XRAY_USER" "\$SSL_DIR" 2>/dev/null || true
+
+# REAPLICA AS PERMISSÕES CORRETAS
+chown -R nobody:nogroup "\$SSL_DIR"
 chmod 777 "\$SSL_DIR"
-chown "\$XRAY_USER":"\$XRAY_USER" "\$SSL_DIR/fullchain.pem" 2>/dev/null || chown "\$XRAY_USER":root "\$SSL_DIR/fullchain.pem"
 chmod 777 "\$SSL_DIR/fullchain.pem"
-chown "\$XRAY_USER":"\$XRAY_USER" "\$SSL_DIR/privkey.pem" 2>/dev/null || chown "\$XRAY_USER":root "\$SSL_DIR/privkey.pem"
 chmod 777 "\$SSL_DIR/privkey.pem"
+
 systemctl restart xray
 EOF
             chmod +x "$RENEW_SCRIPT"
             
-            # --- CORREÇÃO DO CRON ---
+            # Cronjob
             (crontab -l 2>/dev/null | grep -v "$RENEW_SCRIPT"; echo "0 3 * * * $RENEW_SCRIPT >/dev/null 2>&1") | crontab -
             
             echo -e "${YB}✅ SUCESSO! Certificado Instalado.${RESET}"
         else
             echo ""
             echo -e "${BG_RED}  FALHA NA VALIDAÇÃO  ${RESET}"
-            echo -e "${RB}Não foi possível gerar o certificado oficial.${RESET}"
-            echo "Verifique: Porta 80 bloqueada ou Domínio incorreto."
-            echo ""
-            echo -e "${YB}>>> Instalando Auto-assinado de emergência...${RESET}"
+            echo -e "Instalando Auto-assinado de emergência..."
+            
             openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
             -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
             -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" >/dev/null 2>&1
