@@ -1,7 +1,14 @@
 #!/bin/bash
 # certxray.sh - VERSÃO FINAL SEGURA V7.3
+# Adaptado para Modular (Correção de Input)
 
-DOMAIN="$1"
+# --- CORREÇÃO DO ERRO DE INPUT ---
+# Pega apenas a última palavra passada como argumento (o domínio),
+# ignorando qualquer "bash" ou caminho que venha antes por engano.
+RAW_INPUT="$*"
+DOMAIN=$(echo "$RAW_INPUT" | awk '{print $NF}')
+# ---------------------------------
+
 SSL_DIR="/opt/DragonCoreSSL"
 RENEW_SCRIPT="$SSL_DIR/renew_cert.sh"
 LE_DIR=""
@@ -110,6 +117,7 @@ case $cert_opt in
         sleep 2
         
         echo -e "${YB}>>> GERANDO CERTIFICADO...${RESET}"
+        # AQUI usamos o $DOMAIN limpo pelo nosso filtro do início
         certbot certonly --standalone -d "$DOMAIN" --register-unsafely-without-email --agree-tos --non-interactive
 
         if [ -f "$LE_DIR/fullchain.pem" ]; then
@@ -117,7 +125,6 @@ case $cert_opt in
             cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
             
             # --- CORREÇÃO DE SEGURANÇA ---
-            # Ajusta permissões e ownership para o usuário real do serviço
             apply_cert_permissions
             
             cat > "$RENEW_SCRIPT" <<EOF
@@ -144,19 +151,19 @@ fi
 systemctl stop xray
 if command -v fuser >/dev/null; then fuser -k 80/tcp; fi
 certbot renew --quiet
-cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
-cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
+cp -f "\$LE_DIR/fullchain.pem" "\$SSL_DIR/fullchain.pem"
+cp -f "\$LE_DIR/privkey.pem" "\$SSL_DIR/privkey.pem"
 chown root:"\$XRAY_USER" "\$SSL_DIR" 2>/dev/null || true
 chmod 777 "\$SSL_DIR"
 chown "\$XRAY_USER":"\$XRAY_USER" "\$SSL_DIR/fullchain.pem" 2>/dev/null || chown "\$XRAY_USER":root "\$SSL_DIR/fullchain.pem"
-chmod 777 "$SSL_DIR/fullchain.pem"
+chmod 777 "\$SSL_DIR/fullchain.pem"
 chown "\$XRAY_USER":"\$XRAY_USER" "\$SSL_DIR/privkey.pem" 2>/dev/null || chown "\$XRAY_USER":root "\$SSL_DIR/privkey.pem"
-chmod 777 "$SSL_DIR/privkey.pem"
+chmod 777 "\$SSL_DIR/privkey.pem"
 systemctl restart xray
 EOF
             chmod +x "$RENEW_SCRIPT"
             
-            # --- CORREÇÃO DO CRON: Remove duplicatas antes de adicionar ---
+            # --- CORREÇÃO DO CRON ---
             (crontab -l 2>/dev/null | grep -v "$RENEW_SCRIPT"; echo "0 3 * * * $RENEW_SCRIPT >/dev/null 2>&1") | crontab -
             
             echo -e "${YB}✅ SUCESSO! Certificado Instalado.${RESET}"
@@ -181,7 +188,6 @@ EOF
         -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
         -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" >/dev/null 2>&1
         
-        # Correção de permissões aqui também
         apply_cert_permissions
         ;;
 esac
