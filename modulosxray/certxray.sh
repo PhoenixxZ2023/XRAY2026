@@ -1,6 +1,5 @@
 #!/bin/bash
 # certxray.sh - VERSÃO FINAL SEGURA V7.3
-# CORREÇÕES: Permissões 600/644 (Fim do chmod 777) e Correção de Duplicidade no Cron
 
 DOMAIN="$1"
 SSL_DIR="/opt/DragonCoreSSL"
@@ -32,16 +31,16 @@ apply_cert_permissions() {
         target_user="root"
     fi
     chown root:"$target_user" "$SSL_DIR" 2>/dev/null || true
-    chmod 750 "$SSL_DIR"
+    chmod 777 "$SSL_DIR"
 
     if [ -f "$SSL_DIR/fullchain.pem" ]; then
         chown "$target_user":"$target_user" "$SSL_DIR/fullchain.pem" 2>/dev/null || chown "$target_user":root "$SSL_DIR/fullchain.pem"
-        chmod 644 "$SSL_DIR/fullchain.pem"
+        chmod 777 "$SSL_DIR/fullchain.pem"
     fi
 
     if [ -f "$SSL_DIR/privkey.pem" ]; then
         chown "$target_user":"$target_user" "$SSL_DIR/privkey.pem" 2>/dev/null || chown "$target_user":root "$SSL_DIR/privkey.pem"
-        chmod 600 "$SSL_DIR/privkey.pem"
+        chmod 777 "$SSL_DIR/privkey.pem"
     fi
 }
 
@@ -148,11 +147,11 @@ certbot renew --quiet
 cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
 cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
 chown root:"\$XRAY_USER" "\$SSL_DIR" 2>/dev/null || true
-chmod 750 "\$SSL_DIR"
+chmod 777 "\$SSL_DIR"
 chown "\$XRAY_USER":"\$XRAY_USER" "\$SSL_DIR/fullchain.pem" 2>/dev/null || chown "\$XRAY_USER":root "\$SSL_DIR/fullchain.pem"
-chmod 644 "$SSL_DIR/fullchain.pem"
+chmod 777 "$SSL_DIR/fullchain.pem"
 chown "\$XRAY_USER":"\$XRAY_USER" "\$SSL_DIR/privkey.pem" 2>/dev/null || chown "\$XRAY_USER":root "\$SSL_DIR/privkey.pem"
-chmod 600 "$SSL_DIR/privkey.pem"
+chmod 777 "$SSL_DIR/privkey.pem"
 systemctl restart xray
 EOF
             chmod +x "$RENEW_SCRIPT"
