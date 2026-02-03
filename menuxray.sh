@@ -120,7 +120,7 @@ menu_display() {
     echo -e "${TXT_CYAN}[03] LISTAR USUÁRIOS${RESET}"
     echo -e "${TXT_CYAN}[04] INSTALAR/CONFIGURAR XRAY${RESET}"
     echo -e "${TXT_CYAN}[05] LIMPAR EXPIRADOS${RESET}"
-    echo -e "${TXT_CYAN}[06] DESINSTALAR TUDO${RESET}"
+    echo -e "${TXT_CYAN}[06] DESINSTALAR XRAY${RESET}"
     echo -e "${TXT_CYAN}[07] LIMITADOR CONSUMO (GB)${RESET}"
     echo -e "${TXT_CYAN}[08] BOT TELEGRAM${RESET}"
     echo -e "${TXT_CYAN}[09] BACKUP / RESTORE${RESET}"      
