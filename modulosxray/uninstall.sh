@@ -87,4 +87,4 @@ echo "5. Limpando tarefas agendadas..."
 
 echo ""
 echo -e "${TXT_GREEN}VPS LIMPA! Todos os arquivos do script foram removidos.${RESET}"
-exit 0
+exit 1
