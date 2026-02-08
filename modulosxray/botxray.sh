@@ -17,7 +17,7 @@ echo -e "${AMARELO}      🤖 CONFIGURAÇÃO DO BOT TELEGRAM 🤖       ${RESET}
 echo -e "${AZUL}==================================================${RESET}"
 echo ""
 
-# 1. Instala Dependências
+# 1. Instala Dependências (Versão Async Correta)
 echo "Preparando ambiente..."
 if ! command -v python3 &> /dev/null; then
     export DEBIAN_FRONTEND=noninteractive
@@ -43,7 +43,7 @@ if [ -z "$bot_token" ] || [ -z "$admin_id" ]; then
     echo -e "${VERMELHO}❌ Dados incompletos!${RESET}"; sleep 2; exit 1
 fi
 
-# 3. Instalação e Configuração
+# 3. Baixa e Configura
 echo ""
 echo "Baixando bot..."
 mkdir -p /opt/XrayTools
@@ -58,7 +58,7 @@ if [ ! -s "/opt/XrayTools/botxray.py" ]; then
     exit 1
 fi
 
-# A MÁGICA: Substitui os placeholders pelos dados reais
+# Substituição Automática dos Dados
 sed -i "s|SEU_TOKEN_AQUI|$bot_token|g" /opt/XrayTools/botxray.py
 sed -i "s|123456789|$admin_id|g" /opt/XrayTools/botxray.py
 
