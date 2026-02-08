@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 import io
 
-# --- CONFIGURAÇÃO ---
+# --- CONFIGURAÇÃO (SERÁ SUBSTITUÍDA PELO INSTALADOR) ---
 BOT_TOKEN = "SEU_TOKEN_AQUI"
 ADMIN_ID = 123456789 
 
@@ -24,7 +24,6 @@ XRAY_SERVICE = "xray"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Estados da Conversa
 (SELECTING_ACTION, GET_USERNAME_CREATE, GET_EXPIRY_DAYS_CREATE, GET_USER_TO_DELETE, GET_USER_TO_BLOCK, GET_USER_TO_UNBLOCK) = range(6)
 
 # --- FUNÇÕES DE SISTEMA ---
@@ -47,13 +46,12 @@ def get_ip():
     except:
         return "127.0.0.1"
 
-# --- MELHORIA: GERADOR DE LINKS ---
+# --- GERADOR DE LINKS ---
 def generate_link(client_uuid, client_email):
     try:
         data = load_config()
         if not data: return "Erro ao ler config."
         
-        # Busca o inbound correto
         inbound = next((i for i in data['inbounds'] if i.get('tag') == 'inbound-dragoncore'), data['inbounds'][0])
         
         port = inbound['port']
@@ -61,7 +59,6 @@ def generate_link(client_uuid, client_email):
         network = stream['network']
         security = stream['security']
         
-        # Detecta Domínio (SNI)
         host = ""
         sni = ""
         
@@ -132,7 +129,6 @@ def core_create_user(nick, days):
         
         restart_xray()
         
-        # MELHORIA: Gera e retorna o link
         link = generate_link(user_uuid, nick)
         
         return True, f"✅ *Usuário Criado!*\n\n👤 `{nick}`\n📅 `{expiry_date}`\n\n🔗 *Link VLESS:*\n`{link}`"
@@ -275,7 +271,7 @@ def build_menu():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
     context.user_data.clear()
-    await update.message.reply_text("🐉 *PAINEL DRAGONCORE V7.5*", reply_markup=build_menu(), parse_mode='Markdown')
+    await update.message.reply_text("🐉 *PAINEL DRAGONCORE V7.7*", reply_markup=build_menu(), parse_mode='Markdown')
     return SELECTING_ACTION
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -371,7 +367,6 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode
 
     elif mode == 'create_days':
         if not text.isdigit(): await update.message.reply_text("Só números."); return GET_EXPIRY_DAYS_CREATE
-        # AQUI CHAMAMOS A FUNÇÃO CORE QUE AGORA RETORNA O LINK
         res, msg = core_create_user(context.user_data['nick'], text)
         await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=build_menu()); return SELECTING_ACTION
     elif mode == 'delete':
