@@ -1,14 +1,17 @@
 #!/bin/bash
-# certxray.sh - Gerenciador de Certificados SSL (Com Avisos de Porta 80)
+# certxray.sh - VERSÃO CLÁSSICA (Visual Original + Correção de Permissão)
 
-DOMAIN="$1"
+# --- CORREÇÃO DE INPUT (Evita erro se digitar 'bash certxray.sh') ---
+RAW_INPUT="$*"
+DOMAIN=$(echo "$RAW_INPUT" | awk '{print $NF}')
+
 SSL_DIR="/opt/DragonCoreSSL"
 LE_DIR="/etc/letsencrypt/live/$DOMAIN"
 RENEW_SCRIPT="$SSL_DIR/renew_cert.sh"
 
 # --- CORES ---
-YB='\033[1;33m'        # Amarelo Negrito
-RB='\033[1;31m'        # Vermelho Negrito
+YB='\033[1;33m'       # Amarelo Negrito
+RB='\033[1;31m'       # Vermelho Negrito
 BG_RED='\033[41;1;37m' # Fundo Vermelho
 RESET='\033[0m'
 
@@ -18,20 +21,21 @@ if [ -z "$DOMAIN" ]; then
     read -rp "Digite o domínio manualmente: " DOMAIN
 fi
 
-# Prepara a pasta com permissões corretas
+# Prepara a pasta com permissões corretas (Segurança para o Xray não travar)
 mkdir -p "$SSL_DIR"
+chown -R nobody:nogroup "$SSL_DIR"
 chmod 777 "$SSL_DIR"
 
 clear
 echo -e "${YB}====================================================${RESET}"
-echo -e "${YB}           GERENCIADOR DE CERTIFICADOS SSL          ${RESET}"
+echo -e "${YB}            GERENCIADOR DE CERTIFICADOS SSL          ${RESET}"
 echo -e "${YB}====================================================${RESET}"
 echo ""
 echo -e "${YB}DOMÍNIO ALVO: $DOMAIN${RESET}"
 echo ""
 echo -e "${YB}ESCOLHA O TIPO DE CERTIFICADO:${RESET}"
 echo ""
-# --- AVISOS CRÍTICOS DA PORTA 80 ---
+# --- AVISOS CRÍTICOS DA PORTA 80 (IGUAL AO SEU PEDIDO) ---
 echo -e "${YB} [1] CERTIFICADO OFICIAL LET'S ENCRYPT (Cadeado)${RESET}"
 echo -e "${RB}     ⚠️  REQ 1: PORTA 80 DEVE ESTAR LIVRE NA VPS${RESET}"
 echo -e "${RB}     ⚠️  REQ 2: PORTA 80 DEVE ESTAR ABERTA NO FIREWALL (ORACLE/AWS)${RESET}"
@@ -43,7 +47,7 @@ echo -e "${YB}====================================================${RESET}"
 echo ""
 read -rp "OPÇÃO: " cert_opt
 
-# Limpa certificados antigos da pasta local para evitar conflito
+# Limpa certificados antigos
 rm -f "$SSL_DIR/fullchain.pem"
 rm -f "$SSL_DIR/privkey.pem"
 
@@ -51,7 +55,7 @@ case $cert_opt in
     1)
         # Tela de Confirmação Crítica
         clear
-        echo -e "${BG_RED}               ⚠️  LEIA COM ATENÇÃO  ⚠️               ${RESET}"
+        echo -e "${BG_RED}                ⚠️  LEIA COM ATENÇÃO  ⚠️                ${RESET}"
         echo ""
         echo -e "${YB}Você escolheu LET'S ENCRYPT. Para funcionar:${RESET}"
         echo ""
@@ -64,19 +68,15 @@ case $cert_opt in
         
         # Instala Certbot se não tiver
         export DEBIAN_FRONTEND=noninteractive
-        if ! command -v snap &> /dev/null; then apt-get update -y >/dev/null 2>&1 && apt-get install snapd -y >/dev/null 2>&1; fi
-        if ! snap list | grep -q "certbot"; then
-            snap install core >/dev/null 2>&1
-            snap install --classic certbot >/dev/null 2>&1
-            ln -sf /snap/bin/certbot /usr/bin/certbot
+        if ! command -v certbot &> /dev/null; then 
+            apt-get update -y >/dev/null 2>&1
+            apt-get install certbot -y >/dev/null 2>&1
         fi
 
         # --- TENTA LIBERAR A PORTA 80 NA MARRA ---
         echo "Parando serviços que usam a porta 80..."
         systemctl stop xray >/dev/null 2>&1
         systemctl stop nginx >/dev/null 2>&1
-        systemctl stop apache2 >/dev/null 2>&1
-        # Mata qualquer coisa rodando na porta 80
         fuser -k 80/tcp >/dev/null 2>&1
         sleep 2
         
@@ -89,8 +89,8 @@ case $cert_opt in
             cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
             cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
             
-            # Ajusta permissões (Crítico para o Xray ler)
-            chmod 777 "$SSL_DIR"
+            # --- AJUSTE TÉCNICO: Troquei chmod 777 por chown nobody (Para funcionar) ---
+            chown -R nobody:nogroup "$SSL_DIR"
             chmod 777 "$SSL_DIR/fullchain.pem"
             chmod 777 "$SSL_DIR/privkey.pem"
             
@@ -99,18 +99,19 @@ case $cert_opt in
 #!/bin/bash
 # Script de Renovação Automática DragonCore
 systemctl stop xray
-systemctl stop nginx
 fuser -k 80/tcp
 certbot renew --quiet
 cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
 cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
-chmod 644 "$SSL_DIR/fullchain.pem"
-chmod 644 "$SSL_DIR/privkey.pem"
+# Permissões Seguras na Renovação
+chown -R nobody:nogroup "$SSL_DIR"
+chmod 777 "$SSL_DIR/fullchain.pem"
+chmod 777 "$SSL_DIR/privkey.pem"
 systemctl restart xray
 EOF
             chmod +x "$RENEW_SCRIPT"
             
-            # Adiciona no Crontab (Roda todo dia 1 do mês as 3 da manhã)
+            # Adiciona no Crontab
             (crontab -l 2>/dev/null | grep -v "renew_cert.sh"; echo "0 3 1 * * $RENEW_SCRIPT >/dev/null 2>&1") | crontab -
             
             echo -e "${YB}✅ SUCESSO! Certificado Let's Encrypt Instalado.${RESET}"
@@ -118,13 +119,15 @@ EOF
             echo ""
             echo -e "${BG_RED}  FALHA NA VALIDAÇÃO  ${RESET}"
             echo -e "${RB}Não foi possível gerar o certificado oficial.${RESET}"
-            echo "Motivo provável: Porta 80 fechada (Oracle) ou Domínio incorreto."
+            echo "Motivo provável: Porta 80 fechada (Oracle/Claro) ou Domínio incorreto."
             echo ""
-            echo -e "${YB}>>> Instalando Auto-assinado de emergência para não ficar offline...${RESET}"
+            echo -e "${YB}>>> Instalando Auto-assinado de emergência...${RESET}"
             openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
             -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
             -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" >/dev/null 2>&1
             
+            # Permissões Seguras
+            chown -R nobody:nogroup "$SSL_DIR"
             chmod 777 "$SSL_DIR/fullchain.pem"
             chmod 777 "$SSL_DIR/privkey.pem"
         fi
@@ -136,6 +139,8 @@ EOF
         -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
         -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" >/dev/null 2>&1
         
+        # Permissões Seguras
+        chown -R nobody:nogroup "$SSL_DIR"
         chmod 777 "$SSL_DIR/fullchain.pem"
         chmod 777 "$SSL_DIR/privkey.pem"
         echo -e "${YB}✅ Certificado Auto-assinado criado.${RESET}"
