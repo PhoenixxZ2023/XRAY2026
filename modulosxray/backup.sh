@@ -1,5 +1,5 @@
 #!/bin/bash
-# backup.sh (FIX) - Backup & Restore seguro (inclui SSL)
+# backup.sh - Backup & Restore seguro (inclui SSL) - DragonCore FIX
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO"; read -rp "Enter...";' ERR
@@ -30,18 +30,26 @@ read -rp "Opção: " opt
 
 is_safe_tar() {
   local tarfile="$1"
-  tar -tzf "$tarfile" | while IFS= read -r entry; do
+
+  # lê lista do tar SEM pipe (evita subshell)
+  local entry
+  while IFS= read -r entry; do
     entry="${entry#./}"
     [ -n "$entry" ] || continue
+
+    # bloqueia paths absolutos e traversal
     [[ "$entry" != /* ]] || return 1
     [[ "$entry" != *".."* ]] || return 1
+
+    # permite SOMENTE estes prefixos
     case "$entry" in
-      opt/XrayTools/*) ;;
-      usr/local/etc/xray/*) ;;
-      opt/DragonCoreSSL/*) ;;
+      opt/XrayTools|opt/XrayTools/*) ;;
+      usr/local/etc/xray|usr/local/etc/xray/*) ;;
+      opt/DragonCoreSSL|opt/DragonCoreSSL/*) ;;
       *) return 1 ;;
     esac
-  done
+  done < <(tar -tzf "$tarfile")
+  return 0
 }
 
 case "${opt:-}" in
@@ -59,17 +67,24 @@ case "${opt:-}" in
       exit 1
     fi
 
-    # inclui SSL (cert + key)
-    tar -czf "$FILE" -C / opt/XrayTools usr/local/etc/xray opt/DragonCoreSSL >/dev/null 2>&1
+    # monta lista de paths existentes
+    paths=( "opt/XrayTools" "usr/local/etc/xray" )
+    [ -d "/opt/DragonCoreSSL" ] && paths+=( "opt/DragonCoreSSL" )
+
+    tar -czf "$FILE" -C / "${paths[@]}" >/dev/null 2>&1
 
     if [ -s "$FILE" ]; then
       chmod 600 "$FILE" || true
       echo -e "${TXT_GREEN}Backup criado: $(basename "$FILE")${RESET}"
+      if [ ! -d "/opt/DragonCoreSSL" ]; then
+        echo -e "${TXT_CYAN}Nota:${RESET} /opt/DragonCoreSSL não existia e não foi incluída."
+      fi
     else
       echo -e "${TXT_RED}Erro ao criar backup.${RESET}"
       rm -f "$FILE"
     fi
     ;;
+
   2)
     echo "Restaurando..."
     shopt -s nullglob
@@ -101,26 +116,33 @@ case "${opt:-}" in
       exit 1
     fi
 
+    read -rp "Confirmar RESTORE deste backup? [s/n]: " ok
+    [[ "${ok:-n}" =~ ^[sS]$ ]] || exit 0
+
     systemctl stop xray >/dev/null 2>&1 || true
     systemctl stop botxray >/dev/null 2>&1 || true
 
-    tar -xzf "$FILE" -C / opt/XrayTools usr/local/etc/xray opt/DragonCoreSSL
+    # extrai tudo (já validado que só tem os 3 paths permitidos)
+    tar -xzf "$FILE" -C /
 
     # permissões mínimas
     chmod 700 /opt/XrayTools 2>/dev/null || true
     chmod 600 /opt/XrayTools/users.db 2>/dev/null || true
 
-    # SSL seguro (como xray roda em root, ok)
-    chown -R root:root /opt/DragonCoreSSL 2>/dev/null || true
-    chmod 750 /opt/DragonCoreSSL 2>/dev/null || true
-    chmod 644 /opt/DragonCoreSSL/fullchain.pem 2>/dev/null || true
-    chmod 600 /opt/DragonCoreSSL/privkey.pem 2>/dev/null || true
+    # SSL: xray roda como nobody -> precisa ler os .pem
+    if [ -d /opt/DragonCoreSSL ]; then
+      chown -R nobody:nogroup /opt/DragonCoreSSL 2>/dev/null || true
+      chmod 750 /opt/DragonCoreSSL 2>/dev/null || true
+      chmod 644 /opt/DragonCoreSSL/fullchain.pem 2>/dev/null || true
+      chmod 640 /opt/DragonCoreSSL/privkey.pem 2>/dev/null || true
+    fi
 
     systemctl restart xray >/dev/null 2>&1 || true
     systemctl restart botxray >/dev/null 2>&1 || true
 
     echo -e "${TXT_GREEN}Sistema restaurado!${RESET}"
     ;;
+
   0) exit 0 ;;
   *) echo -e "${TXT_RED}Opção inválida.${RESET}" ;;
 esac
