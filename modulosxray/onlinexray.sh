@@ -13,7 +13,7 @@ RESET='\033[0m'
 
 CONF="/usr/local/etc/xray/config.json"
 XRAY_BIN="/usr/local/bin/xray"
-WINDOW=15   # segundos
+WINDOW=15   # segundos (considera online se teve tráfego nesse período)
 SLEEP=3     # intervalo de polling
 
 export DEBIAN_FRONTEND=noninteractive
@@ -37,7 +37,7 @@ if [ ! -x "$XRAY_BIN" ]; then
   exit 1
 fi
 
-# Pega porta da API
+# Pega porta da API (fallback 1080)
 API_PORT="$(jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONF" 2>/dev/null || true)"
 [ -n "${API_PORT:-}" ] || API_PORT="1080"
 
@@ -54,7 +54,7 @@ echo -e "${CYAN}================================================${RESET}"
 echo -e "${YELLOW}Janela: ${WINDOW}s | Poll: ${SLEEP}s | CTRL+C para sair${RESET}"
 echo ""
 
-# Carrega lista de usuários (não LOCKED_)
+# Lista de usuários (não LOCKED_)
 mapfile -t USERS < <(jq -r '
   .inbounds[]? | select(.tag=="inbound-dragoncore") | .settings.clients[]? |
   select(.email? and (.email | startswith("LOCKED_") | not)) |
@@ -66,13 +66,11 @@ if [ ${#USERS[@]} -eq 0 ]; then
   exit 0
 fi
 
-# Dicionários simples em bash: última leitura e último "visto"
 declare -A last_bytes
 declare -A last_seen
 
 get_total_bytes() {
   local nick="$1"
-  # lê down e up; se falhar, retorna 0
   local down up
   down="$($XRAY_BIN api stats -server="127.0.0.1:${API_PORT}" -name "user>>>${nick}>>>traffic>>>downlink" 2>/dev/null | awk '/value/ {print $2; exit}')"
   up="$($XRAY_BIN api stats -server="127.0.0.1:${API_PORT}" -name "user>>>${nick}>>>traffic>>>uplink" 2>/dev/null | awk '/value/ {print $2; exit}')"
@@ -91,11 +89,11 @@ done
 
 while true; do
   now="$(date +%s)"
-  # checa deltas
+
+  # Atualiza deltas
   for u in "${USERS[@]}"; do
     b="$(get_total_bytes "$u")"
     prev="${last_bytes["$u"]:-0}"
-
     if [ "$b" -gt "$prev" ]; then
       last_seen["$u"]="$now"
     fi
