@@ -1,5 +1,5 @@
 #!/bin/bash
-# botxray.sh - Instalador Completo (SAFE) com venv + sudoers + backup
+# botxray.sh - Instalador Completo (SAFE) com venv + sudoers + backup + restore
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO"; read -rp "Enter...";' ERR
@@ -40,6 +40,7 @@ ensure_pkg curl curl
 ensure_pkg python3-venv python3-venv
 ensure_pkg jq jq
 ensure_pkg sudo sudo
+ensure_pkg tar tar
 
 mkdir -p /opt/XrayTools
 
@@ -70,13 +71,20 @@ if [ ! -s /opt/XrayTools/botxray.py ]; then
   exit 1
 fi
 
-# substitui token/admin com segurança
-python3 - <<PY
+# substitui token/admin (seguro com caracteres especiais)
+BOT_TOKEN_ENV="$bot_token" ADMIN_ID_ENV="$admin_id" python3 - <<'PY'
+import os
 from pathlib import Path
+
+token = os.environ.get("BOT_TOKEN_ENV","")
+admin = os.environ.get("ADMIN_ID_ENV","")
+
 p = Path("/opt/XrayTools/botxray.py")
 s = p.read_text(encoding="utf-8", errors="ignore")
-s = s.replace("SEU_TOKEN_AQUI", ${bot_token!r})
-s = s.replace("123456789", str(${admin_id}))
+
+s = s.replace('BOT_TOKEN = "SEU_TOKEN_AQUI"', f'BOT_TOKEN = "{token}"')
+s = s.replace("ADMIN_ID = 123456789", f"ADMIN_ID = {admin}")
+
 p.write_text(s, encoding="utf-8")
 PY
 
@@ -87,31 +95,103 @@ fi
 /opt/XrayTools/venv/bin/pip install -U pip >/dev/null 2>&1
 /opt/XrayTools/venv/bin/pip install -U python-telegram-bot requests >/dev/null 2>&1
 
-# script de backup do bot (se não existir, cria)
-if [ ! -f /usr/local/bin/backup_bot.sh ]; then
+# scripts headless do bot
+# backup: gera .tar.gz e imprime o path
 cat > /usr/local/bin/backup_bot.sh <<'EOF'
 #!/bin/bash
 set -Eeuo pipefail
+umask 077
+
 OUT_DIR="/opt/XrayTools/backups"
 mkdir -p "$OUT_DIR"
+
 ts="$(date +%Y%m%d_%H%M%S)"
 OUT_FILE="${OUT_DIR}/backup_dragoncore_${ts}.tar.gz"
-tar -czf "$OUT_FILE" /opt/XrayTools /usr/local/etc/xray /opt/DragonCoreSSL >/dev/null 2>&1 || { echo "ERROR"; exit 1; }
-chown botxray:botxray "$OUT_FILE" 2>/dev/null || true
-chmod 640 "$OUT_FILE" 2>/dev/null || true
+
+# paths essenciais
+[ -d /opt/XrayTools ] || { echo "ERR: /opt/XrayTools ausente"; exit 2; }
+[ -d /usr/local/etc/xray ] || { echo "ERR: /usr/local/etc/xray ausente"; exit 2; }
+mkdir -p /opt/DragonCoreSSL 2>/dev/null || true
+
+# evita “backup dentro de backup”: inclui só DBs + config + SSL
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+# copia somente o necessário de /opt/XrayTools
+mkdir -p "$tmpdir/opt/XrayTools"
+for f in users.db limits.db usage.db session.db active_domain; do
+  [ -f "/opt/XrayTools/$f" ] && cp -f "/opt/XrayTools/$f" "$tmpdir/opt/XrayTools/$f"
+done
+
+# garante estrutura
+mkdir -p "$tmpdir/usr/local/etc"
+cp -a /usr/local/etc/xray "$tmpdir/usr/local/etc/" 2>/dev/null || true
+
+mkdir -p "$tmpdir/opt"
+cp -a /opt/DragonCoreSSL "$tmpdir/opt/" 2>/dev/null || true
+
+tar -czf "$OUT_FILE" -C "$tmpdir" opt usr >/dev/null 2>&1 || { echo "ERR: falha tar"; exit 3; }
+
+chmod 600 "$OUT_FILE" 2>/dev/null || true
 echo "$OUT_FILE"
 EOF
 chmod +x /usr/local/bin/backup_bot.sh
-fi
 
-# sudoers restrito: permite somente os scripts do painel + backup do bot
+# restore: recebe caminho do tar e restaura somente paths permitidos
+cat > /usr/local/bin/restore_bot.sh <<'EOF'
+#!/bin/bash
+set -Eeuo pipefail
+
+FILE="${1:-}"
+[ -n "$FILE" ] || { echo "ERR: informe o caminho do .tar.gz"; exit 2; }
+[ -f "$FILE" ] || { echo "ERR: arquivo não existe"; exit 2; }
+
+# valida conteúdo
+tar -tzf "$FILE" | while IFS= read -r entry; do
+  entry="${entry#./}"
+  [ -n "$entry" ] || continue
+  [[ "$entry" != /* ]] || { echo "ERR: path absoluto"; exit 9; }
+  [[ "$entry" != *".."* ]] || { echo "ERR: contém .."; exit 9; }
+  case "$entry" in
+    opt/XrayTools/*) ;;
+    usr/local/etc/xray/*) ;;
+    opt/DragonCoreSSL/*) ;;
+    *) echo "ERR: path não permitido: $entry"; exit 9 ;;
+  esac
+done
+
+systemctl stop xray >/dev/null 2>&1 || true
+systemctl stop botxray >/dev/null 2>&1 || true
+
+tar -xzf "$FILE" -C / opt/XrayTools usr/local/etc/xray opt/DragonCoreSSL >/dev/null 2>&1
+
+chmod 700 /opt/XrayTools 2>/dev/null || true
+chmod 600 /opt/XrayTools/users.db 2>/dev/null || true
+
+# xray roda como nobody => precisa ler pem
+chown -R nobody:nogroup /opt/DragonCoreSSL 2>/dev/null || true
+chmod 750 /opt/DragonCoreSSL 2>/dev/null || true
+chmod 644 /opt/DragonCoreSSL/fullchain.pem 2>/dev/null || true
+chmod 640 /opt/DragonCoreSSL/privkey.pem 2>/dev/null || true
+
+systemctl restart xray >/dev/null 2>&1 || true
+systemctl restart botxray >/dev/null 2>&1 || true
+echo "OK"
+EOF
+chmod +x /usr/local/bin/restore_bot.sh
+
+# sudoers restrito: permite somente scripts necessários
 cat > /etc/sudoers.d/botxray <<'EOF'
 Defaults:botxray !requiretty
+Defaults:botxray !authenticate
+Defaults:botxray secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 botxray ALL=(root) NOPASSWD: /bin/bash /usr/local/bin/add_user.sh
 botxray ALL=(root) NOPASSWD: /bin/bash /usr/local/bin/remover_user.sh
 botxray ALL=(root) NOPASSWD: /bin/bash /usr/local/bin/block_user.sh
 botxray ALL=(root) NOPASSWD: /bin/bash /usr/local/bin/unblock_user.sh
 botxray ALL=(root) NOPASSWD: /bin/bash /usr/local/bin/backup_bot.sh
+botxray ALL=(root) NOPASSWD: /bin/bash /usr/local/bin/restore_bot.sh
 EOF
 chmod 440 /etc/sudoers.d/botxray
 visudo -cf /etc/sudoers.d/botxray >/dev/null
@@ -121,18 +201,9 @@ mkdir -p /opt/XrayTools/backups
 chown -R botxray:botxray /opt/XrayTools
 chmod 750 /opt/XrayTools
 chmod 750 /opt/XrayTools/backups
+chmod 640 /opt/XrayTools/botxray.py 2>/dev/null || true
 
-# bot precisa ler config/users para listar/gerar link:
-# coloca bot no grupo xray (se você já mudou xray.service para User=xray)
-groupadd --system xray 2>/dev/null || true
-usermod -aG xray botxray 2>/dev/null || true
-
-# tenta ajustar grupos/perms de leitura (não quebra se falhar)
-chgrp -R xray /usr/local/etc/xray 2>/dev/null || true
-chmod 750 /usr/local/etc/xray 2>/dev/null || true
-chmod 640 /usr/local/etc/xray/config.json 2>/dev/null || true
-
-# service systemd hardened
+# service systemd hardened (sem quebrar leitura)
 cat > /etc/systemd/system/botxray.service <<'EOF'
 [Unit]
 Description=DragonCore Telegram Bot
@@ -151,8 +222,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/opt/XrayTools
-ReadOnlyPaths=/usr/local/etc/xray /opt/DragonCoreSSL
+ReadWritePaths=/opt/XrayTools /tmp
 
 [Install]
 WantedBy=multi-user.target
