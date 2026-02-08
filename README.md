@@ -12,25 +12,37 @@
 
 ## 🚀 O Que Há de Novo na V7.3?
 
-O **DragonCore Xray Manager** foi reescrito para eliminar dependências externas críticas. Diferente de scripts comuns, ele possui um ecossistema integrado:
+O **DragonCore Xray Manager** foi reescrito para eliminar dependências externas críticas e maximizar a estabilidade.
 
 ### 🛡️ Segurança e Estabilidade
-* **Offline-Ready (com cache):** Os módulos de bloqueio/desbloqueio são baixados e armazenados localmente; após o primeiro download, o painel segue funcionando mesmo se o GitHub/Gitea cair.
-* **Bloqueio "Scramble":** O sistema **não deleta** o usuário ao bloquear. Ele altera o UUID para um falso e renomeia para `LOCKED_`, mantendo o histórico e backup seguros.
-* **Validação Rigorosa:** Impede criação de usuários com nomes quebrados (Regra: 5-9 caracteres, apenas letras/números).
+* **Offline-Ready (Cache Inteligente):** Os módulos essenciais são baixados e armazenados localmente. O painel segue funcionando mesmo se o GitHub cair.
+* **Bloqueio "Scramble":** O sistema **não deleta** o usuário ao bloquear. Ele altera o UUID para um hash inválido e renomeia para `LOCKED_`, preservando o histórico e facilitando o desbloqueio.
+* **Validação Rigorosa:** Impede erros humanos e nomes quebrados (Regra: 5-9 caracteres alfanuméricos).
 
 ### 🤖 Automação e Bot Telegram
-* **Bot Python Nativo:** Painel de controle completo via Telegram.
-* **Relatórios em TXT:** Gera listas de usuários em arquivo `.txt` limpo para evitar poluição visual no chat.
-* **Anti-Freeze:** Sistema de conversação inteligente que não trava se o usuário clicar em botões errados.
+* **Bot Python Nativo (Async):** Painel de controle completo via Telegram, rápido e sem delay.
+* **Gerador de Links Inteligente:** Detecta automaticamente o protocolo (Vision, XHTTP, gRPC, WS) e gera o link VLESS correto.
+* **Relatórios Limpos:** Gera listas de usuários em arquivo `.txt` para evitar poluição visual no chat.
+* **Anti-Freeze:** Sistema de conversação que não trava se o usuário clicar em botões antigos.
 
 ### ⚡ Funcionalidades do Core
-* **Protocolos Modernos:** Suporte nativo a VLESS, XTLS-Vision, gRPC, WebSocket e TCP.
-* **Limitador de Consumo:** Monitoramento em tempo real com bloqueio automático ao exceder a franquia (GB).
-* **Backup Inteligente:** Sistema que verifica a integridade do arquivo antes de substituir o backup anterior.
-* **Auto-Instalação:** Configura tudo (Xray, Certificados, Python, Cron) com um único comando.
+* **Protocolos Modernos:** Suporte total a VLESS + XTLS-Vision, gRPC, WebSocket e o novo XHTTP.
+* **Gerenciador de Certificados:** Suporte a Let's Encrypt (Oficial) e Auto-Assinado com renovação automática.
+* **Backup Inteligente:** Verifica a integridade dos dados antes de substituir o backup anterior.
+* **Auto-Instalação:** Configura Xray, Certificados, Python, Cron e Bot com um único comando.
 
 ---
+
+## 📋 Requisitos do Sistema
+
+* **SO:** Ubuntu 20.04+ (Recomendado) ou Debian 11+
+* **Arquitetura:** x86_64 (amd64) ou ARM64
+* **Portas:**
+    * **Com TLS:** Porta 80 livre (para validação do Certificado)
+    * **Sem TLS:** Qualquer porta livre
+
+---
+
 
 ## 🛠️ Instalação Rápida
 
