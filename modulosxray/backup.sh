@@ -1,10 +1,26 @@
 #!/bin/bash
-# backup.sh
+# backup.sh (FIX) - Backup & Restore seguro (inclui SSL)
+
+set -Eeuo pipefail
+trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO"; read -rp "Enter...";' ERR
+
 TXT_GREEN='\033[1;32m'
 TXT_RED='\033[1;31m'
 TXT_CYAN='\033[1;36m'
 RESET='\033[0m'
 TITLE_BAR='\033[1;47;34m'
+
+require_root() {
+  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo -e "${TXT_RED}❌ Execute como root!${RESET}"
+    exit 1
+  fi
+}
+
+require_root
+
+BACKUP_DIR="/root/backups"
+mkdir -p "$BACKUP_DIR"
 
 clear; echo -e "${TITLE_BAR}   BACKUP & RESTORE   ${RESET}"; echo ""
 echo -e "${TXT_CYAN}[1] CRIAR BACKUP${RESET}"
@@ -12,38 +28,101 @@ echo -e "${TXT_CYAN}[2] RESTAURAR BACKUP${RESET}"
 echo -e "${TXT_CYAN}[0] SAIR${RESET}"
 read -rp "Opção: " opt
 
-BACKUP_DIR="/root/backups"
-mkdir -p "$BACKUP_DIR"
+is_safe_tar() {
+  local tarfile="$1"
+  tar -tzf "$tarfile" | while IFS= read -r entry; do
+    entry="${entry#./}"
+    [ -n "$entry" ] || continue
+    [[ "$entry" != /* ]] || return 1
+    [[ "$entry" != *".."* ]] || return 1
+    case "$entry" in
+      opt/XrayTools/*) ;;
+      usr/local/etc/xray/*) ;;
+      opt/DragonCoreSSL/*) ;;
+      *) return 1 ;;
+    esac
+  done
+}
 
-case "$opt" in
-    1)
-        echo "Criando backup..."
-        FILE="${BACKUP_DIR}/backup_dragoncore_$(date +%Y%m%d_%H%M%S).tar.gz"
-        if [ ! -f "/opt/XrayTools/users.db" ]; then echo "Erro: DB não encontrado."; exit 1; fi
-        tar -czf "$FILE" /opt/XrayTools /usr/local/etc/xray >/dev/null 2>&1
-        if [ -f "$FILE" ]; then
-            echo -e "${TXT_GREEN}Backup criado: $(basename "$FILE")${RESET}"
-        else
-            echo -e "${TXT_RED}Erro ao criar backup.${RESET}"
-        fi
-        ;;
-    2)
-        echo "Restaurando..."
-        shopt -s nullglob
-        FILES=("$BACKUP_DIR"/*.tar.gz)
-        if [ ${#FILES[@]} -eq 0 ]; then echo "Nenhum backup encontrado."; exit 1; fi
-        
-        PS3="Escolha o número: "
-        select FILE in "${FILES[@]}"; do
-            [ -n "$FILE" ] && break
-        done
-        
-        systemctl stop xray >/dev/null 2>&1
-        systemctl stop botxray >/dev/null 2>&1
-        tar -xzf "$FILE" -C /
-        systemctl restart xray >/dev/null 2>&1
-        systemctl restart botxray >/dev/null 2>&1
-        echo -e "${TXT_GREEN}Sistema restaurado!${RESET}"
-        ;;
+case "${opt:-}" in
+  1)
+    echo "Criando backup..."
+    umask 077
+    FILE="${BACKUP_DIR}/backup_dragoncore_$(date +%Y%m%d_%H%M%S).tar.gz"
+
+    if [ ! -f "/opt/XrayTools/users.db" ]; then
+      echo -e "${TXT_RED}Erro: DB não encontrado em /opt/XrayTools/users.db${RESET}"
+      exit 1
+    fi
+    if [ ! -d "/usr/local/etc/xray" ]; then
+      echo -e "${TXT_RED}Erro: pasta /usr/local/etc/xray não encontrada.${RESET}"
+      exit 1
+    fi
+
+    # inclui SSL (cert + key)
+    tar -czf "$FILE" -C / opt/XrayTools usr/local/etc/xray opt/DragonCoreSSL >/dev/null 2>&1
+
+    if [ -s "$FILE" ]; then
+      chmod 600 "$FILE" || true
+      echo -e "${TXT_GREEN}Backup criado: $(basename "$FILE")${RESET}"
+    else
+      echo -e "${TXT_RED}Erro ao criar backup.${RESET}"
+      rm -f "$FILE"
+    fi
+    ;;
+  2)
+    echo "Restaurando..."
+    shopt -s nullglob
+    FILES=("$BACKUP_DIR"/*.tar.gz)
+
+    if [ ${#FILES[@]} -eq 0 ]; then
+      echo -e "${TXT_RED}Nenhum backup encontrado.${RESET}"
+      exit 1
+    fi
+
+    echo ""
+    echo "Selecione um backup (ou 0 para cancelar):"
+    i=1
+    for f in "${FILES[@]}"; do
+      echo " [$i] $(basename "$f")"
+      i=$((i+1))
+    done
+    read -rp "Número: " n
+    if [ "${n:-0}" = "0" ]; then exit 0; fi
+    if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt "${#FILES[@]}" ]; then
+      echo -e "${TXT_RED}Opção inválida.${RESET}"
+      exit 1
+    fi
+
+    FILE="${FILES[$((n-1))]}"
+
+    if ! is_safe_tar "$FILE"; then
+      echo -e "${TXT_RED}Backup recusado: conteúdo fora de paths permitidos (ou possui '..' / paths absolutos).${RESET}"
+      exit 1
+    fi
+
+    systemctl stop xray >/dev/null 2>&1 || true
+    systemctl stop botxray >/dev/null 2>&1 || true
+
+    tar -xzf "$FILE" -C / opt/XrayTools usr/local/etc/xray opt/DragonCoreSSL
+
+    # permissões mínimas
+    chmod 700 /opt/XrayTools 2>/dev/null || true
+    chmod 600 /opt/XrayTools/users.db 2>/dev/null || true
+
+    # SSL seguro (como xray roda em root, ok)
+    chown -R root:root /opt/DragonCoreSSL 2>/dev/null || true
+    chmod 750 /opt/DragonCoreSSL 2>/dev/null || true
+    chmod 644 /opt/DragonCoreSSL/fullchain.pem 2>/dev/null || true
+    chmod 600 /opt/DragonCoreSSL/privkey.pem 2>/dev/null || true
+
+    systemctl restart xray >/dev/null 2>&1 || true
+    systemctl restart botxray >/dev/null 2>&1 || true
+
+    echo -e "${TXT_GREEN}Sistema restaurado!${RESET}"
+    ;;
+  0) exit 0 ;;
+  *) echo -e "${TXT_RED}Opção inválida.${RESET}" ;;
 esac
+
 read -rp "Enter..."
