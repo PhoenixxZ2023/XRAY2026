@@ -41,6 +41,72 @@ def save_config(data):
     with open(CONFIG_PATH, 'w') as f:
         json.dump(data, f, indent=2)
 
+def get_ip():
+    try:
+        return subprocess.check_output("curl -s ifconfig.me", shell=True).decode().strip()
+    except:
+        return "127.0.0.1"
+
+# --- MELHORIA: GERADOR DE LINKS ---
+def generate_link(client_uuid, client_email):
+    try:
+        data = load_config()
+        if not data: return "Erro ao ler config."
+        
+        # Busca o inbound correto
+        inbound = next((i for i in data['inbounds'] if i.get('tag') == 'inbound-dragoncore'), data['inbounds'][0])
+        
+        port = inbound['port']
+        stream = inbound['streamSettings']
+        network = stream['network']
+        security = stream['security']
+        
+        # Detecta Domínio (SNI)
+        host = ""
+        sni = ""
+        
+        if security == 'tls':
+            tls = stream.get('tlsSettings', {})
+            sni = tls.get('serverName', "")
+            host = sni
+        
+        if not host:
+            host = get_ip()
+            sni = "" 
+
+        link = ""
+        
+        if network == "tcp":
+            settings = inbound.get('settings', {})
+            flow = settings.get('flow', "")
+            if flow == "xtls-rprx-vision":
+                link = f"vless://{client_uuid}@{host}:{port}?security=tls&encryption=none&type=tcp&headerType=none&flow={flow}&sni={sni}#{client_email}"
+            else:
+                sec_param = "security=tls" if security == "tls" else "security=none"
+                link = f"vless://{client_uuid}@{host}:{port}?{sec_param}&encryption=none&type=tcp&headerType=none&sni={sni}#{client_email}"
+
+        elif network == "ws":
+            path = stream['wsSettings'].get('path', '/')
+            sec_param = "security=tls" if security == "tls" else "security=none"
+            ws_host = sni if sni else host
+            link = f"vless://{client_uuid}@{host}:{port}?{sec_param}&encryption=none&type=ws&host={ws_host}&path={path}&sni={sni}#{client_email}"
+
+        elif network == "grpc":
+            service = stream['grpcSettings'].get('serviceName', 'gRPC')
+            sec_param = "security=tls" if security == "tls" else "security=none"
+            link = f"vless://{client_uuid}@{host}:{port}?{sec_param}&encryption=none&type=grpc&serviceName={service}&sni={sni}#{client_email}"
+
+        elif network == "xhttp":
+            path = stream['xhttpSettings'].get('path', '/')
+            sec_param = "security=tls" if security == "tls" else "security=none"
+            link = f"vless://{client_uuid}@{host}:{port}?mode=auto&{sec_param}&encryption=none&type=xhttp&host={host}&path={path}&sni={sni}#{client_email}"
+
+        return link
+    except Exception as e:
+        return f"Erro Link: {str(e)}"
+
+# --- FUNÇÕES CORE ---
+
 def core_create_user(nick, days):
     if os.path.exists(USER_DB):
         with open(USER_DB, 'r') as f:
@@ -65,7 +131,11 @@ def core_create_user(nick, days):
             f.write(f"{nick}|{user_uuid}|{expiry_date}\n")
         
         restart_xray()
-        return True, f"✅ *Usuário Criado!*\n\n👤 `{nick}`\n🔑 `{user_uuid}`\n📅 `{expiry_date}`"
+        
+        # MELHORIA: Gera e retorna o link
+        link = generate_link(user_uuid, nick)
+        
+        return True, f"✅ *Usuário Criado!*\n\n👤 `{nick}`\n📅 `{expiry_date}`\n\n🔗 *Link VLESS:*\n`{link}`"
     return False, "❌ Inbound não encontrado."
 
 def core_delete_user(nick):
@@ -205,28 +275,22 @@ def build_menu():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
     context.user_data.clear()
-    await update.message.reply_text("🐉 *PAINEL DRAGONCORE V7.3*", reply_markup=build_menu(), parse_mode='Markdown')
+    await update.message.reply_text("🐉 *PAINEL DRAGONCORE V7.5*", reply_markup=build_menu(), parse_mode='Markdown')
     return SELECTING_ACTION
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # --- CORREÇÃO DE SEGURANÇA: VERIFICA SE É ADMIN ---
-    if not is_admin(update): 
-        return
-    # --------------------------------------------------
+    if not is_admin(update): return
 
     query = update.callback_query
     await query.answer()
     
-    # --- AÇÃO ESPECIAL: FECHAR ARQUIVO ---
     if query.data == 'close_file':
         await query.message.delete()
         return SELECTING_ACTION
 
-    # --- RESET ---
     if query.data == 'cancel':
         await query.edit_message_text("Painel Fechado.", reply_markup=None); return ConversationHandler.END
     
-    # --- AÇÕES DO MENU ---
     if query.data == 'create_start':
         await query.edit_message_text("Nome do usuário (5-9 letras/num):", parse_mode='Markdown'); return GET_USERNAME_CREATE
     elif query.data == 'delete_start':
@@ -290,9 +354,7 @@ async def unexpected_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await button_handler(update, context)
 
 async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode):
-    # Verificação de admin também aqui (boa prática)
     if not is_admin(update): return
-
     if not update.message or not update.message.text: return
     text = update.message.text.strip().split()[0]
 
@@ -309,6 +371,7 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode
 
     elif mode == 'create_days':
         if not text.isdigit(): await update.message.reply_text("Só números."); return GET_EXPIRY_DAYS_CREATE
+        # AQUI CHAMAMOS A FUNÇÃO CORE QUE AGORA RETORNA O LINK
         res, msg = core_create_user(context.user_data['nick'], text)
         await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=build_menu()); return SELECTING_ACTION
     elif mode == 'delete':
