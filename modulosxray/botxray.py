@@ -3,9 +3,9 @@ import json
 import uuid
 import logging
 import subprocess
-import asyncio
 import re
 from datetime import datetime, timedelta
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, ContextTypes, ConversationHandler,
@@ -28,13 +28,25 @@ SCRIPTS = {
     "block":  "/usr/local/bin/block_user.sh",
     "unblock":"/usr/local/bin/unblock_user.sh",
     "backup": "/usr/local/bin/backup_bot.sh",
+    "restore": "/usr/local/bin/restore_bot.sh",
 }
+
+# Limites do RESTORE (segurança)
+MAX_RESTORE_MB = 50  # ajuste se precisar (50MB)
+ALLOWED_EXT = (".tar.gz",)
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-(SELECTING_ACTION, GET_USERNAME_CREATE, GET_EXPIRY_DAYS_CREATE,
- GET_USER_TO_DELETE, GET_USER_TO_BLOCK, GET_USER_TO_UNBLOCK) = range(6)
+(
+    SELECTING_ACTION,
+    GET_USERNAME_CREATE,
+    GET_EXPIRY_DAYS_CREATE,
+    GET_USER_TO_DELETE,
+    GET_USER_TO_BLOCK,
+    GET_USER_TO_UNBLOCK,
+    WAIT_RESTORE_FILE
+) = range(7)
 
 # --- FUNÇÕES DE SISTEMA (leitura apenas) ---
 
@@ -61,6 +73,25 @@ def run_script(path: str, input_text: str = "", timeout: int = 180) -> tuple[int
         p = subprocess.run(
             ["sudo", "-n", "bash", path],
             input=input_text.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=timeout
+        )
+        out = p.stdout.decode("utf-8", errors="ignore")
+        return p.returncode, out
+    except subprocess.TimeoutExpired:
+        return 124, "⏱️ Timeout executando o script."
+    except Exception as e:
+        return 1, f"Erro ao executar script: {e}"
+
+def run_script_args(path: str, args: list[str], timeout: int = 300) -> tuple[int, str]:
+    """
+    Executa script via sudo com args (sem stdin).
+    """
+    try:
+        p = subprocess.run(
+            ["sudo", "-n", "bash", path] + args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
@@ -238,7 +269,8 @@ def build_menu():
          InlineKeyboardButton("✅ REATIVAR", callback_data='unblock_start')],
         [InlineKeyboardButton("📋 LISTAR (TXT)", callback_data='list_users'),
          InlineKeyboardButton("📥 BACKUP", callback_data='backup_start')],
-        [InlineKeyboardButton("❌ SAIR", callback_data='cancel')]
+        [InlineKeyboardButton("♻️ RESTORE", callback_data='restore_start'),
+         InlineKeyboardButton("❌ SAIR", callback_data='cancel')]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -246,7 +278,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
     context.user_data.clear()
-    await update.message.reply_text("🐉 *PAINEL DRAGONCORE V7.7*", reply_markup=build_menu(), parse_mode='Markdown')
+    await update.message.reply_text("🐉 *PAINEL DRAGONCORE V7.8*", reply_markup=build_menu(), parse_mode='Markdown')
     return SELECTING_ACTION
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -337,6 +369,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ *Backup enviado abaixo!*", parse_mode='Markdown', reply_markup=build_menu())
         return SELECTING_ACTION
 
+    elif query.data == 'restore_start':
+        warn = (
+            "♻️ *RESTORE*\n\n"
+            "Envie agora o arquivo `backup_dragoncore_XXXX.tar.gz`.\n"
+            f"• Somente `.tar.gz`\n"
+            f"• Máx: {MAX_RESTORE_MB} MB\n\n"
+            "_Atenção: isso vai restaurar config/usuários/SSL e reiniciar serviços._"
+        )
+        await query.edit_message_text(warn, parse_mode='Markdown')
+        return WAIT_RESTORE_FILE
+
     await query.edit_message_text("OK.", reply_markup=build_menu())
     return SELECTING_ACTION
 
@@ -344,6 +387,61 @@ async def unexpected_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     return await button_handler(update, context)
+
+async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Recebe o arquivo .tar.gz enviado no Telegram e executa restore_bot.sh.
+    """
+    if not is_admin(update):
+        return SELECTING_ACTION
+
+    if not update.message:
+        return WAIT_RESTORE_FILE
+
+    doc = update.message.document
+    if not doc:
+        await update.message.reply_text("Envie um arquivo `.tar.gz` (backup).", reply_markup=build_menu())
+        return SELECTING_ACTION
+
+    filename = (doc.file_name or "").strip()
+    if not filename.endswith(ALLOWED_EXT):
+        await update.message.reply_text("❌ Arquivo inválido. Envie um `.tar.gz`.", reply_markup=build_menu())
+        return SELECTING_ACTION
+
+    if doc.file_size and doc.file_size > (MAX_RESTORE_MB * 1024 * 1024):
+        await update.message.reply_text(f"❌ Arquivo muito grande (máx {MAX_RESTORE_MB}MB).", reply_markup=build_menu())
+        return SELECTING_ACTION
+
+    await update.message.reply_text("⬇️ Baixando backup...")
+
+    tmp_path = f"/tmp/restore_{uuid.uuid4().hex}.tar.gz"
+    try:
+        tg_file = await doc.get_file()
+        await tg_file.download_to_drive(custom_path=tmp_path)
+
+        await update.message.reply_text("⚙️ Restaurando... (pode reiniciar o Xray e o bot)")
+
+        code, out = run_script_args(SCRIPTS["restore"], [tmp_path], timeout=300)
+
+        if code == 0 and "OK" in out:
+            await update.message.reply_text("✅ RESTORE concluído com sucesso.", reply_markup=build_menu())
+        else:
+            await update.message.reply_text(
+                f"❌ Falha no RESTORE.\n\n```\n{out[-1500:]}\n```",
+                parse_mode='Markdown',
+                reply_markup=build_menu()
+            )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro no RESTORE: {e}", reply_markup=build_menu())
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+    return SELECTING_ACTION
 
 async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode):
     if not is_admin(update):
@@ -394,6 +492,7 @@ async def h_create_days(u, c): return await input_handler(u, c, 'create_days')
 async def h_delete(u, c): return await input_handler(u, c, 'delete')
 async def h_block(u, c): return await input_handler(u, c, 'block')
 async def h_unblock(u, c): return await input_handler(u, c, 'unblock')
+
 async def cancel_op(u, c):
     if u.message:
         await u.message.reply_text("Cancelado.", reply_markup=build_menu())
@@ -427,8 +526,16 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, h_unblock),
                 CallbackQueryHandler(unexpected_button)
             ],
+
+            # RESTORE: aguarda documento
+            WAIT_RESTORE_FILE: [
+                MessageHandler(filters.Document.ALL, restore_file_handler),
+                CallbackQueryHandler(unexpected_button),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: u.message.reply_text("Envie um arquivo `.tar.gz`.", reply_markup=build_menu()))
+            ],
         },
-        fallbacks=[CommandHandler('cancel', cancel_op)]
+        fallbacks=[CommandHandler('cancel', cancel_op)],
+        allow_reentry=True
     )
 
     app.add_handler(conv)
