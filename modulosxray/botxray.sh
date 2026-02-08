@@ -1,10 +1,7 @@
 #!/bin/bash
-# botxray.sh - Módulo de Instalação do Bot Telegram (DragonCore V7.3)
-# Este script substitui a antiga função func_install_bot do menu.
-
-# --- CONFIGURAÇÃO ---
-# Base do repositório para baixar o botxray.py
-REPO_BASE="https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main"
+# botxray.sh - Instalação do Bot Telegram (DragonCore V7.5)
+# MANTIDO: Lógica original de verificação e biblioteca Async.
+# MELHORADO: O código Python agora é gerado localmente com suporte a VLESS Vision.
 
 # --- CORES ---
 VERMELHO='\033[1;31m'
@@ -15,11 +12,11 @@ RESET='\033[0m'
 
 clear
 echo -e "${AZUL}==================================================${RESET}"
-echo -e "${AMARELO}      🤖 CONFIGURAÇÃO DO BOT TELEGRAM 🤖      ${RESET}"
+echo -e "${AMARELO}      🤖 CONFIGURAÇÃO DO BOT TELEGRAM 🤖       ${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
 echo ""
 
-# 1. Pré-Verificação de Dependências (Para garantir que rode sozinho)
+# 1. Pré-Verificação de Dependências
 echo "Verificando ambiente..."
 if ! command -v python3 &> /dev/null; then
     echo -e "${AMARELO}Instalando Python3...${RESET}"
@@ -28,8 +25,9 @@ if ! command -v python3 &> /dev/null; then
     apt-get install python3 python3-pip -y > /dev/null 2>&1
 fi
 
-# Garante a biblioteca do Telegram (Break system packages para Debian 12+)
+# Instala a biblioteca ASYNC (python-telegram-bot) que seu código usa
 pip3 install python-telegram-bot --break-system-packages > /dev/null 2>&1
+pip3 install requests --break-system-packages > /dev/null 2>&1
 
 echo -e "${VERDE}Dependências verificadas.${RESET}"
 echo ""
@@ -51,11 +49,10 @@ if [ -z "$bot_token" ] || [ -z "$admin_id" ]; then
     echo -e "${VERMELHO}❌ Dados incompletos!${RESET}"; sleep 2; exit 1
 fi
 
-# --- VALIDAÇÃO API ---
+# --- VALIDAÇÃO API (SEU CÓDIGO ORIGINAL) ---
 echo ""
 echo "Consultando dados..."
 
-# Verifica se jq está instalado (caso rode isolado)
 if ! command -v jq &> /dev/null; then apt-get install jq -y > /dev/null 2>&1; fi
 
 api_response=$(curl -s "https://api.telegram.org/bot$bot_token/getChat?chat_id=$admin_id")
@@ -77,7 +74,7 @@ if [ "$real_username" == "null" ]; then
     exit 1
 fi
 
-# --- PASSO 2: LOOP DE VALIDAÇÃO ---
+# --- LOOP DE VALIDAÇÃO (SEU CÓDIGO ORIGINAL) ---
 while true; do
     echo ""
     echo "-------------------------------------------------------"
@@ -103,22 +100,324 @@ while true; do
     fi
 done
 
-# --- INSTALAÇÃO FINAL ---
+# --- INSTALAÇÃO DO ARQUIVO PYTHON ---
 echo ""
-echo "Baixando e configurando bot..."
+echo "Configurando bot..."
 mkdir -p /opt/XrayTools
 rm -f /opt/XrayTools/botxray.py
 
-curl -s -L -o /opt/XrayTools/botxray.py "$REPO_BASE/botxray.py"
+# AQUI ESTÁ A MUDANÇA: Em vez de baixar o antigo, escrevemos o NOVO código Python
+# com a função generate_link e suporte a Vision.
 
-if [ ! -s "/opt/XrayTools/botxray.py" ]; then
-    echo -e "${VERMELHO}Erro no download!${RESET}"; sleep 3; exit 1
-fi
+cat << 'END_PYTHON' > /opt/XrayTools/botxray.py
+import os
+import json
+import uuid
+import logging
+import subprocess
+import asyncio
+import re
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, ContextTypes, ConversationHandler,
+    MessageHandler, filters, CallbackQueryHandler
+)
+import io
 
-# CORREÇÃO CRÍTICA: Usando pipe | como delimitador para não quebrar com token
+# --- CONFIGURAÇÃO (SERÁ SUBSTITUÍDA PELO SED) ---
+BOT_TOKEN = "SEU_TOKEN_AQUI"
+ADMIN_ID = 123456789 
+
+CONFIG_PATH = "/usr/local/etc/xray/config.json"
+USER_DB = "/opt/XrayTools/users.db"
+XRAY_SERVICE = "xray"
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+(SELECTING_ACTION, GET_USERNAME_CREATE, GET_EXPIRY_DAYS_CREATE, GET_USER_TO_DELETE, GET_USER_TO_BLOCK, GET_USER_TO_UNBLOCK) = range(6)
+
+def restart_xray():
+    subprocess.run(["systemctl", "restart", XRAY_SERVICE], check=False)
+
+def load_config():
+    if not os.path.exists(CONFIG_PATH): return None
+    with open(CONFIG_PATH, 'r') as f:
+        return json.load(f)
+
+def save_config(data):
+    with open(CONFIG_PATH, 'w') as f:
+        json.dump(data, f, indent=2)
+
+def get_ip():
+    try:
+        return subprocess.check_output("curl -s ifconfig.me", shell=True).decode().strip()
+    except:
+        return "127.0.0.1"
+
+# --- GERADOR DE LINK MELHORADO ---
+def generate_link(client_uuid, client_email):
+    try:
+        data = load_config()
+        if not data: return "Erro Config"
+        
+        inbound = next((i for i in data['inbounds'] if i.get('tag') == 'inbound-dragoncore'), data['inbounds'][0])
+        
+        port = inbound['port']
+        stream = inbound['streamSettings']
+        network = stream['network']
+        security = stream['security']
+        
+        host = ""
+        sni = ""
+        if security == 'tls':
+            tls = stream.get('tlsSettings', {})
+            sni = tls.get('serverName', "")
+            host = sni
+        
+        if not host:
+            host = get_ip()
+            sni = "" 
+
+        link = ""
+        if network == "tcp":
+            settings = inbound.get('settings', {})
+            flow = settings.get('flow', "")
+            if flow == "xtls-rprx-vision":
+                link = f"vless://{client_uuid}@{host}:{port}?security=tls&encryption=none&type=tcp&headerType=none&flow={flow}&sni={sni}#{client_email}"
+            else:
+                sec_param = "security=tls" if security == "tls" else "security=none"
+                link = f"vless://{client_uuid}@{host}:{port}?{sec_param}&encryption=none&type=tcp&headerType=none&sni={sni}#{client_email}"
+        elif network == "ws":
+            path = stream['wsSettings'].get('path', '/')
+            sec_param = "security=tls" if security == "tls" else "security=none"
+            ws_host = sni if sni else host
+            link = f"vless://{client_uuid}@{host}:{port}?{sec_param}&encryption=none&type=ws&host={ws_host}&path={path}&sni={sni}#{client_email}"
+        elif network == "grpc":
+            service = stream['grpcSettings'].get('serviceName', 'gRPC')
+            sec_param = "security=tls" if security == "tls" else "security=none"
+            link = f"vless://{client_uuid}@{host}:{port}?{sec_param}&encryption=none&type=grpc&serviceName={service}&sni={sni}#{client_email}"
+        elif network == "xhttp":
+            path = stream['xhttpSettings'].get('path', '/')
+            sec_param = "security=tls" if security == "tls" else "security=none"
+            link = f"vless://{client_uuid}@{host}:{port}?mode=auto&{sec_param}&encryption=none&type=xhttp&host={host}&path={path}&sni={sni}#{client_email}"
+        
+        return link
+    except Exception as e:
+        return f"Erro Link: {str(e)}"
+
+# --- CORE FUNCTIONS ---
+def core_create_user(nick, days):
+    if os.path.exists(USER_DB):
+        with open(USER_DB, 'r') as f:
+            if f"{nick}|" in f.read(): return False, "❌ Usuário já existe!"
+    else:
+        open(USER_DB, 'a').close()
+    
+    user_uuid = str(uuid.uuid4())
+    expiry_date = (datetime.now() + timedelta(days=int(days))).strftime('%Y-%m-%d')
+    data = load_config()
+    
+    if not data: return False, "❌ Erro ao ler config.json"
+
+    inbounds = data.get('inbounds', [])
+    target = next((i for i in inbounds if i.get('tag') == 'inbound-dragoncore'), None)
+    
+    if target:
+        target['settings']['clients'].append({"id": user_uuid, "email": nick, "level": 0})
+        save_config(data)
+        
+        with open(USER_DB, 'a') as f:
+            f.write(f"{nick}|{user_uuid}|{expiry_date}\n")
+        
+        restart_xray()
+        
+        # GERA O LINK
+        link = generate_link(user_uuid, nick)
+        
+        return True, f"✅ *Usuário Criado!*\n\n👤 `{nick}`\n📅 `{expiry_date}`\n\n🔗 *Link VLESS:*\n`{link}`"
+    return False, "❌ Inbound não encontrado."
+
+def core_delete_user(nick):
+    data = load_config()
+    found = False
+    if data:
+        inbounds = data.get('inbounds', [])
+        for inbound in inbounds:
+            if inbound.get('tag') == 'inbound-dragoncore':
+                clients = inbound['settings']['clients']
+                new_clients = [c for c in clients if c.get('email') != nick and c.get('email') != f"LOCKED_{nick}"]
+                if len(clients) != len(new_clients): found = True
+                inbound['settings']['clients'] = new_clients
+        save_config(data)
+    
+    if os.path.exists(USER_DB):
+        with open(USER_DB, 'r') as f: lines = f.readlines()
+        with open(USER_DB, 'w') as f:
+            for line in lines:
+                if not line.startswith(f"{nick}|"): f.write(line)
+                else: found = True
+    if not found: return "❌ Usuário não encontrado."
+    restart_xray()
+    return "✅ Usuário removido."
+
+def core_block_user(nick):
+    data = load_config()
+    if not data: return "❌ Erro config."
+    found = False
+    inbounds = data.get('inbounds', [])
+    for inbound in inbounds:
+        if inbound.get('tag') == 'inbound-dragoncore':
+            for client in inbound['settings']['clients']:
+                if client.get('email') == f"LOCKED_{nick}": return "⚠️ Já bloqueado."
+                if client.get('email') == nick:
+                    client['email'] = f"LOCKED_{nick}"
+                    client['id'] = str(uuid.uuid4())
+                    found = True
+                    break
+    if found:
+        save_config(data)
+        restart_xray()
+        return f"⛔ Usuário `{nick}` SUSPENSO."
+    else: return "❌ Não encontrado."
+
+def core_unblock_user(nick):
+    real_uuid = None
+    if os.path.exists(USER_DB):
+        with open(USER_DB, 'r') as f:
+            for line in f:
+                if line.startswith(f"{nick}|"):
+                    real_uuid = line.strip().split('|')[1]; break
+    if not real_uuid: return "❌ Erro: UUID original não achado."
+    
+    data = load_config()
+    found = False
+    inbounds = data.get('inbounds', [])
+    for inbound in inbounds:
+        if inbound.get('tag') == 'inbound-dragoncore':
+            for client in inbound['settings']['clients']:
+                if client.get('email') == f"LOCKED_{nick}":
+                    client['email'] = nick
+                    client['id'] = real_uuid
+                    found = True
+                    break
+    if found:
+        save_config(data)
+        restart_xray()
+        return f"✅ Usuário `{nick}` REATIVADO."
+    else: return "❌ Não estava bloqueado."
+
+def core_list_users_text():
+    if not os.path.exists(USER_DB): return "Vazio."
+    data = load_config()
+    locked_users = []
+    if data:
+        inbounds = data.get('inbounds', [])
+        target = next((i for i in inbounds if i.get('tag') == 'inbound-dragoncore'), None)
+        if target:
+            for c in target['settings']['clients']:
+                email = c.get('email', '')
+                if email.startswith("LOCKED_"): locked_users.append(email.replace("LOCKED_", ""))
+    msg = "LISTA DE USUÁRIOS\n=========================\n"
+    with open(USER_DB, 'r') as f:
+        for line in f:
+            parts = line.strip().split('|')
+            if len(parts) >= 3:
+                status = "✅"
+                if parts[0] in locked_users: status = "⛔️"
+                msg += f"{parts[0]:<10} | {parts[2]:<10} | {status}\n"
+    return msg
+
+# --- TELEGRAM HANDLERS ---
+def is_admin(update: Update) -> bool:
+    return update.effective_user.id == ADMIN_ID
+
+def build_menu():
+    keyboard = [
+        [InlineKeyboardButton("👤 CRIAR", callback_data='create_start'), InlineKeyboardButton("🗑️ REMOVER", callback_data='delete_start')],
+        [InlineKeyboardButton("⛔ SUSPENDER", callback_data='block_start'), InlineKeyboardButton("✅ REATIVAR", callback_data='unblock_start')],
+        [InlineKeyboardButton("📋 LISTAR (TXT)", callback_data='list_users'), InlineKeyboardButton("❌ SAIR", callback_data='cancel')]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update): return
+    context.user_data.clear()
+    await update.message.reply_text("🐉 *PAINEL V7.6*", reply_markup=build_menu(), parse_mode='Markdown')
+    return SELECTING_ACTION
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update): return
+    query = update.callback_query
+    await query.answer()
+    if query.data == 'close_file': await query.message.delete(); return SELECTING_ACTION
+    if query.data == 'cancel': await query.edit_message_text("Fechado.", reply_markup=None); return ConversationHandler.END
+    
+    if query.data == 'create_start': await query.edit_message_text("Nome:", parse_mode='Markdown'); return GET_USERNAME_CREATE
+    elif query.data == 'delete_start': await query.edit_message_text("Nome para remover:", parse_mode='Markdown'); return GET_USER_TO_DELETE
+    elif query.data == 'block_start': await query.edit_message_text("Nome p/ suspender:", parse_mode='Markdown'); return GET_USER_TO_BLOCK
+    elif query.data == 'unblock_start': await query.edit_message_text("Nome p/ reativar:", parse_mode='Markdown'); return GET_USER_TO_UNBLOCK
+    elif query.data == 'list_users':
+        report = core_list_users_text()
+        f = io.BytesIO(report.encode('utf-8')); f.name = "users.txt"
+        await context.bot.send_document(chat_id=update.effective_chat.id, document=f, caption="📂 Lista", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Fechar", callback_data='close_file')]]))
+        await query.edit_message_text("✅ Enviado.", reply_markup=build_menu()); return SELECTING_ACTION
+    return SELECTING_ACTION
+
+async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode):
+    if not is_admin(update): return
+    if not update.message or not update.message.text: return
+    text = update.message.text.strip().split()[0]
+
+    if mode == 'create_nick':
+        if not re.match(r'^[a-zA-Z0-9]{3,15}$', text):
+            await update.message.reply_text("❌ Inválido (Use letras/números). Tente outro:"); return GET_USERNAME_CREATE
+        context.user_data['nick'] = text
+        await update.message.reply_text(f"Dias para `{text}`:", parse_mode='Markdown'); return GET_EXPIRY_DAYS_CREATE
+    elif mode == 'create_days':
+        if not text.isdigit(): await update.message.reply_text("Só números."); return GET_EXPIRY_DAYS_CREATE
+        res, msg = core_create_user(context.user_data['nick'], text)
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=build_menu()); return SELECTING_ACTION
+    elif mode == 'delete':
+        msg = core_delete_user(text)
+        await update.message.reply_text(msg, reply_markup=build_menu()); return SELECTING_ACTION
+    elif mode == 'block':
+        msg = core_block_user(text)
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=build_menu()); return SELECTING_ACTION
+    elif mode == 'unblock':
+        msg = core_unblock_user(text)
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=build_menu()); return SELECTING_ACTION
+
+async def h_unexpected(u, c): q = u.callback_query; await q.answer(); return await button_handler(u, c)
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    conv = ConversationHandler(
+        entry_points=[CommandHandler('start', start), CommandHandler('menu', start)],
+        states={
+            SELECTING_ACTION: [CallbackQueryHandler(button_handler)],
+            GET_USERNAME_CREATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: input_handler(u,c,'create_nick')), CallbackQueryHandler(h_unexpected)],
+            GET_EXPIRY_DAYS_CREATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: input_handler(u,c,'create_days')), CallbackQueryHandler(h_unexpected)],
+            GET_USER_TO_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: input_handler(u,c,'delete')), CallbackQueryHandler(h_unexpected)],
+            GET_USER_TO_BLOCK: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: input_handler(u,c,'block')), CallbackQueryHandler(h_unexpected)],
+            GET_USER_TO_UNBLOCK: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: input_handler(u,c,'unblock')), CallbackQueryHandler(h_unexpected)],
+        },
+        fallbacks=[CommandHandler('cancel', lambda u,c: input_handler(u,c,'cancel'))] # Simplificado
+    )
+    app.add_handler(conv)
+    print("Bot Iniciado...")
+    app.run_polling()
+
+if __name__ == '__main__':
+    main()
+END_PYTHON
+
+# --- SUBSTITUIÇÃO DE TOKEN (SEU CÓDIGO ORIGINAL) ---
 sed -i "s|SEU_TOKEN_AQUI|$bot_token|g" /opt/XrayTools/botxray.py
 sed -i "s|123456789|$admin_id|g" /opt/XrayTools/botxray.py
 
+# --- CRIAÇÃO DO SERVIÇO ---
 cat <<EOF > /etc/systemd/system/botxray.service
 [Unit]
 Description=DragonCore Telegram Bot
