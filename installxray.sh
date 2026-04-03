@@ -1,6 +1,6 @@
 #!/bin/bash
-# installxray.sh - Instalador Premium V7.5.1 (Modular Launcher)
-# Correções: Parâmetro '--retry-all-errors' (incompatível com Ubuntu 20.04) removido.
+# installxray.sh - Instalador Premium V7.5.2 (Modular Launcher)
+# Correções: Verificação de cabeçalho mais flexível para ignorar o BOM do Windows.
 set -Eeuo pipefail
 
 # --- TRAP DE SAÍDA ---
@@ -195,7 +195,6 @@ fun_bar $! "Limpando Instalações Antigas" || true
 
 # --- 4) DOWNLOAD DO MENU ---
 (
-    # REMOVIDA A FLAG --retry-all-errors AQUI
     curl -fLsS \
         --retry 3 \
         --retry-delay 2 \
@@ -209,8 +208,8 @@ fun_bar $! "Limpando Instalações Antigas" || true
         exit 1
     fi
 
-    check_head=$(head -c 10 "$MENU_PATH")
-    if [[ "$check_head" != "#!/bin/bash"* ]] && [[ "$check_head" != "#!/usr/bin/env"* ]]; then
+    # MUDANÇA AQUI: Busca "bash" ou "env" na primeira linha de forma flexível
+    if ! head -n 1 "$MENU_PATH" | grep -qE "bash|env"; then
         echo "Arquivo baixado não parece um shell script válido" >>"$LOG_FILE"
         exit 1
     fi
