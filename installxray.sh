@@ -1,6 +1,6 @@
 #!/bin/bash
-# installxray.sh - Instalador Premium V7.5 (Modular Launcher)
-# Correções: Sintaxe do 'local_head' resolvida e URLs ajustadas.
+# installxray.sh - Instalador Premium V7.5.1 (Modular Launcher)
+# Correções: Parâmetro '--retry-all-errors' (incompatível com Ubuntu 20.04) removido.
 set -Eeuo pipefail
 
 # --- TRAP DE SAÍDA ---
@@ -37,8 +37,6 @@ _validate_ref "$REPO_REF"
 
 REPO_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_REF}"
 
-# SE O MENU ESTIVER NA RAIZ DO GITHUB, DEIXE ASSIM. 
-# SE ESTIVER DENTRO DA PASTA, MUDE PARA: "${REPO_BASE}/modulosxray/menuxray.sh"
 MENU_URL="${REPO_BASE}/menuxray.sh"
 SHA256_URL="${REPO_BASE}/menuxray.sh.sha256"
 
@@ -197,21 +195,20 @@ fun_bar $! "Limpando Instalações Antigas" || true
 
 # --- 4) DOWNLOAD DO MENU ---
 (
+    # REMOVIDA A FLAG --retry-all-errors AQUI
     curl -fLsS \
         --retry 3 \
         --retry-delay 2 \
-        --retry-all-errors \
         --max-time 60 \
         --connect-timeout 10 \
         -o "$MENU_PATH" \
         "$MENU_URL" >>"$LOG_FILE" 2>&1
 
     if [ ! -s "$MENU_PATH" ]; then
-        echo "Arquivo baixado está vazio ou a URL (404) falhou." >>"$LOG_FILE"
+        echo "Arquivo baixado está vazio ou a URL falhou." >>"$LOG_FILE"
         exit 1
     fi
 
-    # CORREÇÃO AQUI: Syntax error removido.
     check_head=$(head -c 10 "$MENU_PATH")
     if [[ "$check_head" != "#!/bin/bash"* ]] && [[ "$check_head" != "#!/usr/bin/env"* ]]; then
         echo "Arquivo baixado não parece um shell script válido" >>"$LOG_FILE"
