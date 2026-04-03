@@ -1,7 +1,6 @@
 #!/bin/bash
-# installxray.sh - Instalador Premium V7.5 (Modular Launcher)
-# Correções: verificação de integridade, race conditions, log de erros,
-#            validação de REPO_REF, backup antes de limpeza, verificação de SO.
+# installxray.sh - Instalador Premium V7.5.2 (Modular Launcher)
+# Correções: Compatibilidade do curl (Ubuntu 20.04) e verificação flexível de shebang (BOM fix).
 set -Eeuo pipefail
 
 # --- TRAP DE SAÍDA ---
@@ -40,6 +39,9 @@ REPO_REF="${REPO_REF:-main}"
 _validate_ref "$REPO_REF"
 
 REPO_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_REF}"
+MENU_URL="${REPO_BASE}/menuxray.sh"
+SHA256_URL="${REPO_BASE}/menuxray.sh.sha256"
+
 MENU_PATH="/usr/local/bin/menuxray.sh"
 MENU_BACKUP="/usr/local/bin/menuxray.sh.bak"
 SHORTCUT="/usr/bin/xray-menu"
@@ -206,14 +208,10 @@ fun_bar $! "Fazendo Backup da Versão Anterior" || true
 fun_bar $! "Limpando Instalações Antigas" || true
 
 # --- 4) DOWNLOAD DO MENU COM VERIFICAÇÃO DE INTEGRIDADE ---
-MENU_URL="${REPO_BASE}/menuxray.sh"
-SHA256_URL="${REPO_BASE}/menuxray.sh.sha256"
-
 (
     curl -fLsS \
         --retry 3 \
         --retry-delay 2 \
-        --retry-all-errors \
         --max-time 60 \
         --connect-timeout 10 \
         -o "$MENU_PATH" \
@@ -225,10 +223,8 @@ SHA256_URL="${REPO_BASE}/menuxray.sh.sha256"
         exit 1
     fi
 
-    # Garante que começa com shebang de shell (proteção básica)
-    local_head
-    local_head=$(head -c 10 "$MENU_PATH")
-    if [[ "$local_head" != "#!/bin/bash"* ]] && [[ "$local_head" != "#!/usr/bin/env"* ]]; then
+    # Garante que começa com shebang de shell de forma flexível (ignora BOM)
+    if ! head -n 1 "$MENU_PATH" | grep -qE "bash|env"; then
         echo "Arquivo baixado não parece um shell script válido" >>"$LOG_FILE"
         exit 1
     fi
