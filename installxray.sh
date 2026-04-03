@@ -1,11 +1,9 @@
 #!/bin/bash
 # installxray.sh - Instalador Premium V7.5 (Modular Launcher)
-# Correções: verificação de integridade, race conditions, log de erros,
-#            validação de REPO_REF, backup antes de limpeza, verificação de SO.
+# Correções: Sintaxe do 'local_head' resolvida e URLs ajustadas.
 set -Eeuo pipefail
 
 # --- TRAP DE SAÍDA ---
-# Restaura cursor e remove lock file em qualquer saída
 LOCK_FILE="/tmp/xray-install.lock"
 LOG_FILE="/tmp/xray-install.log"
 trap '_cleanup' EXIT
@@ -26,8 +24,6 @@ RESET='\033[0m'
 REPO_OWNER="PhoenixxZ2023"
 REPO_NAME="XrayX-TLS"
 
-# Validação de REPO_REF: aceita apenas caracteres seguros (letras, números, -, _, ., /)
-# Evita injeção de paths ou URLs maliciosas via variável de ambiente
 _validate_ref() {
     local ref="$1"
     if [[ ! "$ref" =~ ^[a-zA-Z0-9._/-]{1,128}$ ]]; then
@@ -40,6 +36,12 @@ REPO_REF="${REPO_REF:-main}"
 _validate_ref "$REPO_REF"
 
 REPO_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_REF}"
+
+# SE O MENU ESTIVER NA RAIZ DO GITHUB, DEIXE ASSIM. 
+# SE ESTIVER DENTRO DA PASTA, MUDE PARA: "${REPO_BASE}/modulosxray/menuxray.sh"
+MENU_URL="${REPO_BASE}/menuxray.sh"
+SHA256_URL="${REPO_BASE}/menuxray.sh.sha256"
+
 MENU_PATH="/usr/local/bin/menuxray.sh"
 MENU_BACKUP="/usr/local/bin/menuxray.sh.bak"
 SHORTCUT="/usr/bin/xray-menu"
@@ -77,7 +79,6 @@ _install_packages() {
     esac
 }
 
-# Mapeia nomes de pacotes por distro
 _get_packages() {
     case "$PKG_MANAGER" in
         apt)    echo "curl jq cron tar" ;;
@@ -87,7 +88,6 @@ _get_packages() {
 }
 
 # --- BARRA DE PROGRESSO ---
-# Corrigida: agora retorna o exit code real do processo monitorado
 fun_bar() {
     local pid="$1"
     local text="$2"
@@ -104,7 +104,6 @@ fun_bar() {
         printf "] ${AMARELO}%d%%${RESET} " "$percent"
         sleep "$delay"
     done
-    # Captura exit code real do processo
     local exit_code=0
     wait "$pid" 2>/dev/null || exit_code=$?
     tput cnorm || true
@@ -122,7 +121,6 @@ fun_bar() {
 }
 
 # --- VERIFICAÇÃO DE INTEGRIDADE ---
-# Baixa o SHA256 do arquivo e valida antes de usar
 _verify_sha256() {
     local file="$1"
     local sha256_url="$2"
@@ -131,7 +129,7 @@ _verify_sha256() {
     expected_sha256=$(curl -fLsS --retry 3 --retry-delay 1 "$sha256_url" 2>>"$LOG_FILE" | awk '{print $1}')
 
     if [ -z "$expected_sha256" ]; then
-        echo -e "${AMARELO}⚠  Arquivo de hash não encontrado em ${sha256_url} — verificação ignorada.${RESET}"
+        echo -e "${AMARELO}⚠  Arquivo de hash não encontrado — verificação ignorada.${RESET}"
         return 0
     fi
 
@@ -140,14 +138,12 @@ _verify_sha256() {
 
     if [ "$expected_sha256" != "$actual_sha256" ]; then
         echo -e "${VERMELHO}❌ Falha na verificação de integridade!${RESET}"
-        echo -e "   Esperado: ${expected_sha256}"
-        echo -e "   Obtido:   ${actual_sha256}"
         rm -f "$file"
         return 1
     fi
 }
 
-# --- LOCK: evita execuções paralelas ---
+# --- LOCK ---
 if [ -e "$LOCK_FILE" ]; then
     echo -e "${VERMELHO}❌ Outra instalação está em andamento (${LOCK_FILE} existe).${RESET}"
     exit 1
@@ -156,7 +152,6 @@ touch "$LOCK_FILE"
 
 # --- INICIALIZAÇÃO ---
 clear
-# Limpa log anterior
 : > "$LOG_FILE"
 
 echo -e "${AZUL}==================================================${RESET}"
@@ -166,26 +161,21 @@ echo -e "  Ref:  ${VERDE}${REPO_REF}${RESET}"
 echo -e "  Log:  ${VERDE}${LOG_FILE}${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
 
-# --- VERIFICAÇÃO DE ROOT ---
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
     echo -e "${VERMELHO}❌ Execute como root!${RESET}"
     exit 1
 fi
 
-# --- DETECÇÃO DE SISTEMA ---
 _detect_pkg_manager
 echo -e "  Sistema: ${VERDE}${PKG_MANAGER}${RESET}"
 echo ""
 
-# --- 1) ATUALIZAÇÃO + DEPENDÊNCIAS (sequencial para evitar race condition) ---
+# --- 1) ATUALIZAÇÃO + DEPENDÊNCIAS ---
 (
     _install_packages $(_get_packages)
 ) >>"$LOG_FILE" 2>&1 &
 PID_PKG=$!
-fun_bar "$PID_PKG" "Atualizando e Instalando Dependências" || {
-    echo -e "${VERMELHO}❌ Falha ao instalar dependências. Veja: ${LOG_FILE}${RESET}"
-    exit 1
-}
+fun_bar "$PID_PKG" "Atualizando e Instalando Dependências" || exit 1
 
 # --- 2) BACKUP DA INSTALAÇÃO ANTERIOR ---
 (
@@ -205,10 +195,7 @@ fun_bar $! "Fazendo Backup da Versão Anterior" || true
 ) >>"$LOG_FILE" 2>&1 &
 fun_bar $! "Limpando Instalações Antigas" || true
 
-# --- 4) DOWNLOAD DO MENU COM VERIFICAÇÃO DE INTEGRIDADE ---
-MENU_URL="${REPO_BASE}/menuxray.sh"
-SHA256_URL="${REPO_BASE}/menuxray.sh.sha256"
-
+# --- 4) DOWNLOAD DO MENU ---
 (
     curl -fLsS \
         --retry 3 \
@@ -219,16 +206,14 @@ SHA256_URL="${REPO_BASE}/menuxray.sh.sha256"
         -o "$MENU_PATH" \
         "$MENU_URL" >>"$LOG_FILE" 2>&1
 
-    # Valida que arquivo não está vazio
     if [ ! -s "$MENU_PATH" ]; then
-        echo "Arquivo baixado está vazio" >>"$LOG_FILE"
+        echo "Arquivo baixado está vazio ou a URL (404) falhou." >>"$LOG_FILE"
         exit 1
     fi
 
-    # Garante que começa com shebang de shell (proteção básica)
-    local_head
-    local_head=$(head -c 10 "$MENU_PATH")
-    if [[ "$local_head" != "#!/bin/bash"* ]] && [[ "$local_head" != "#!/usr/bin/env"* ]]; then
+    # CORREÇÃO AQUI: Syntax error removido.
+    check_head=$(head -c 10 "$MENU_PATH")
+    if [[ "$check_head" != "#!/bin/bash"* ]] && [[ "$check_head" != "#!/usr/bin/env"* ]]; then
         echo "Arquivo baixado não parece um shell script válido" >>"$LOG_FILE"
         exit 1
     fi
@@ -237,9 +222,7 @@ PID_DOWNLOAD=$!
 fun_bar "$PID_DOWNLOAD" "Baixando Menu Maestro" || {
     echo -e "${VERMELHO}❌ Erro Crítico: Não foi possível baixar o menuxray.sh${RESET}"
     echo -e "   URL: ${MENU_URL}"
-    echo -e "   Ref: ${REPO_REF}"
-    echo -e "   Log: ${LOG_FILE}"
-    # Restaura backup se existir
+    echo -e "   DICA: Verifique se o arquivo menuxray.sh realmente está neste link."
     if [ -f "$MENU_BACKUP" ]; then
         cp -f "$MENU_BACKUP" "$MENU_PATH"
         echo -e "${AMARELO}⚠  Versão anterior restaurada.${RESET}"
@@ -251,10 +234,7 @@ fun_bar "$PID_DOWNLOAD" "Baixando Menu Maestro" || {
 echo -ne "${AZUL}[Verificando Integridade]${RESET} ... "
 _verify_sha256 "$MENU_PATH" "$SHA256_URL" || {
     echo -e "${VERMELHO}❌ Arquivo comprometido ou corrompido.${RESET}"
-    if [ -f "$MENU_BACKUP" ]; then
-        cp -f "$MENU_BACKUP" "$MENU_PATH"
-        echo -e "${AMARELO}⚠  Versão anterior restaurada.${RESET}"
-    fi
+    if [ -f "$MENU_BACKUP" ]; then cp -f "$MENU_BACKUP" "$MENU_PATH"; fi
     exit 1
 }
 echo -e "${VERDE}OK${RESET}"
@@ -269,7 +249,6 @@ echo -e "${AZUL}==================================================${RESET}"
 echo -e "${VERDE}🎉 SISTEMA MODULAR PRONTO! (V7.5)${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
 echo -e "  Acesso:  ${VERDE}xray-menu${RESET}"
-echo -e "  Log:     ${VERDE}${LOG_FILE}${RESET}"
 if [ -f "$MENU_BACKUP" ]; then
     echo -e "  Backup:  ${VERDE}${MENU_BACKUP}${RESET}"
 fi
@@ -277,9 +256,8 @@ echo -e "${AZUL}==================================================${RESET}"
 echo ""
 sleep 1
 
-# Verifica que o executável existe e é executável antes de fazer exec
 if [ ! -x "$SHORTCUT" ]; then
-    echo -e "${VERMELHO}❌ Symlink ${SHORTCUT} não encontrado ou não executável.${RESET}"
+    echo -e "${VERMELHO}❌ Symlink ${SHORTCUT} não executável.${RESET}"
     exit 1
 fi
 
