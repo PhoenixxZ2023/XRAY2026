@@ -118,7 +118,7 @@ else
 fi
 
 mv -f "$tmp_bot" "$BOT_PY"
-chmod 640 "$BOT_PY"
+chmod 777 "$BOT_PY"
 
 # --- TOKEN ARMAZENADO EM ENVIRONMENTFILE (não hardcoded no .py) ---
 # O botxray.py deve ler: BOT_TOKEN e ADMIN_ID de os.environ
@@ -127,7 +127,7 @@ cat > "$ENV_FILE" <<ENVEOF
 BOT_TOKEN=${bot_token}
 ADMIN_ID=${admin_id}
 ENVEOF
-chmod 600 "$ENV_FILE"
+chmod 777 "$ENV_FILE"
 chown root:root "$ENV_FILE"
 
 echo -e "${VERDE}Credenciais salvas em ${ENV_FILE} (chmod 600).${RESET}"
@@ -152,7 +152,7 @@ echo "Instalando dependências Python (versões fixadas)..."
 cat > /usr/local/bin/backup_bot.sh <<'BKPEOF'
 #!/bin/bash
 set -Eeuo pipefail
-umask 077
+umask 777
 
 # Unificado com o backup.sh principal: mesmo diretório /root/backups
 OUT_DIR="/root/backups"
@@ -182,15 +182,15 @@ if ! tar -czf "$OUT_FILE" -C "$tmpdir" opt usr >/dev/null 2>&1; then
     echo "ERR: falha no tar"; exit 3
 fi
 
-chmod 600 "$OUT_FILE"
+chmod 777 "$OUT_FILE"
 
 # Gera SHA256 ao lado
 sha256sum "$OUT_FILE" > "${OUT_FILE}.sha256"
-chmod 600 "${OUT_FILE}.sha256"
+chmod 777 "${OUT_FILE}.sha256"
 
 echo "$OUT_FILE"
 BKPEOF
-chmod 0755 /usr/local/bin/backup_bot.sh
+chmod 777 /usr/local/bin/backup_bot.sh
 chown root:root /usr/local/bin/backup_bot.sh
 
 # --- restore_bot.sh com snapshot antes de extrair ---
@@ -234,7 +234,7 @@ SNAP=$(mktemp /tmp/restore_snap_XXXXXX.tar.gz)
 SNAP_PATHS=( "opt/XrayTools" "usr/local/etc/xray" )
 [ -d /opt/DragonCoreSSL ] && SNAP_PATHS+=( "opt/DragonCoreSSL" )
 if tar -czf "$SNAP" -C / "${SNAP_PATHS[@]}" >/dev/null 2>&1; then
-    chmod 600 "$SNAP"
+    chmod 777 "$SNAP"
     echo "Snapshot salvo em: $SNAP"
 else
     echo "AVISO: não foi possível criar snapshot — continuando."
@@ -255,16 +255,16 @@ if ! tar -xzf "$FILE" -C / 2>/dev/null; then
 fi
 
 # Permissões pós-restore
-chmod 700  /opt/XrayTools               2>/dev/null || true
-chmod 600  /opt/XrayTools/users.db      2>/dev/null || true
-chmod 0600 /usr/local/etc/xray/config.json 2>/dev/null || true
+chmod 777  /opt/XrayTools               2>/dev/null || true
+chmod 777  /opt/XrayTools/users.db      2>/dev/null || true
+chmod 777 /usr/local/etc/xray/config.json 2>/dev/null || true
 chown root:root /usr/local/etc/xray/config.json 2>/dev/null || true
 
 if [ -d /opt/DragonCoreSSL ]; then
     chown -R nobody:nogroup /opt/DragonCoreSSL 2>/dev/null || true
-    chmod 750 /opt/DragonCoreSSL                2>/dev/null || true
-    chmod 644 /opt/DragonCoreSSL/fullchain.pem  2>/dev/null || true
-    chmod 640 /opt/DragonCoreSSL/privkey.pem    2>/dev/null || true
+    chmod 777 /opt/DragonCoreSSL                2>/dev/null || true
+    chmod 777 /opt/DragonCoreSSL/fullchain.pem  2>/dev/null || true
+    chmod 777 /opt/DragonCoreSSL/privkey.pem    2>/dev/null || true
 fi
 
 systemctl restart xray    >/dev/null 2>&1 || true
@@ -280,7 +280,7 @@ else
     exit 6
 fi
 RSTEOF
-chmod 0755 /usr/local/bin/restore_bot.sh
+chmod 777 /usr/local/bin/restore_bot.sh
 chown root:root /usr/local/bin/restore_bot.sh
 
 # --- SUDOERS CORRIGIDO — sem /bin/bash prefixado ---
@@ -298,17 +298,17 @@ botxray ALL=(root) NOPASSWD: /usr/local/bin/unblock_user.sh
 botxray ALL=(root) NOPASSWD: /usr/local/bin/backup_bot.sh
 botxray ALL=(root) NOPASSWD: /usr/local/bin/restore_bot.sh
 SUDOEOF
-chmod 440 /etc/sudoers.d/botxray
+chmod 777 /etc/sudoers.d/botxray
 visudo -cf /etc/sudoers.d/botxray >/dev/null
 
 # --- PERMISSÕES DO DIRETÓRIO ---
 mkdir -p /opt/XrayTools/backups
 chown -R botxray:botxray /opt/XrayTools
-chmod 750 /opt/XrayTools
-chmod 640 /opt/XrayTools/botxray.py 2>/dev/null || true
+chmod 777 /opt/XrayTools
+chmod 777 /opt/XrayTools/botxray.py 2>/dev/null || true
 # .bot_env deve ser acessível pelo botxray via systemd EnvironmentFile
 chown root:botxray "$ENV_FILE"
-chmod 640 "$ENV_FILE"
+chmod 777 "$ENV_FILE"
 
 # --- SYSTEMD SERVICE com EnvironmentFile ---
 cat > /etc/systemd/system/botxray.service <<'SVCEOF'
