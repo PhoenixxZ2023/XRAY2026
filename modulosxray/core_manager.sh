@@ -79,7 +79,7 @@ require_root() {
 }
 
 _apply_config_perms() {
-    chmod 0640 "$CONFIG_PATH"
+    chmod 777 "$CONFIG_PATH"
     chown root:"$XRAY_GROUP" "$CONFIG_PATH"
 }
 
@@ -208,7 +208,7 @@ func_xray_cert() {
     fi
 
     mv -f "$tmp" "$cert_script"
-    chmod 0755 "$cert_script"
+    chmod 777 "$cert_script"
     bash "$cert_script" "$dom"
 }
 
@@ -226,10 +226,10 @@ func_generate_config() {
     fi
 
     if port_in_use "$api_port"; then
-        echo -e "${TXT_YELLOW}⚠  Porta API ${api_port} em uso. Tentando 10800...${RESET}"
-        api_port="10800"
+        echo -e "${TXT_YELLOW}⚠  Porta API ${api_port} em uso. Tentando 1080...${RESET}"
+        api_port="1080"
         if port_in_use "$api_port"; then
-            echo -e "${TXT_RED}❌ Porta 10800 também em uso.${RESET}"
+            echo -e "${TXT_RED}❌ Porta 1080 também em uso.${RESET}"
             read -rp "Pressione Enter..."; return 1
         fi
     fi
@@ -305,7 +305,7 @@ func_generate_config() {
 
     jq -n --arg network "$network" --arg port "$port" --arg domain "$domain" --arg tls "$use_tls" \
         '{network:$network,port:$port,domain:$domain,tls:$tls}' > "$PRESET_FILE"
-    chmod 0640 "$PRESET_FILE"
+    chmod 777 "$PRESET_FILE"
     chown root:"$XRAY_GROUP" "$PRESET_FILE"
 
     echo "$domain" > "$ACTIVE_DOMAIN_FILE"
@@ -374,7 +374,7 @@ TLS=${use_tls}
 UUID=${uuid}
 LINK=${link}
 EOF
-    chmod 0600 "$CONN_INFO_FILE"
+    chmod 777 "$CONN_INFO_FILE"
     chown root:root "$CONN_INFO_FILE"
 
     echo -e "${TXT_GREEN}Link salvo em: ${CONN_INFO_FILE}${RESET}"
