@@ -168,4 +168,13 @@ fi
 echo ""
 echo -e "${TXT_GREEN}✅ Desinstalação concluída.${RESET}"
 echo -e "${TXT_YELLOW}   O sistema está limpo. Reinicie a VPS se necessário.${RESET}"
+sleep 2
+
+# Encerra o processo pai (menu) se ainda estiver rodando
+# Evita o loop do menuxray.sh tentar acessar arquivos que não existem mais
+PPID_MENU="${PPID:-0}"
+if [ "$PPID_MENU" -gt 1 ]; then
+    kill "$PPID_MENU" 2>/dev/null || true
+fi
+
 exit 0
