@@ -1,12 +1,9 @@
 #!/bin/bash
-# botxray.sh - Instalador do Bot Telegram V7.5
-# Correções: token via EnvironmentFile (não hardcoded), sudoers sem /bin/bash,
-#            download com verificação de integridade, restore com snapshot,
-#            validação de formato do token, versões pip fixadas,
-#            backup_bot.sh unificado com /root/backups, detecção de distro.
+# botxray.sh - Instalador do Bot Telegram V7.5.2
+# Correções: Retorno do SED para injeção de token direta no botxray.py e proteção do status.
 
 set -Eeuo pipefail
-trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; read -rp "Enter...";' ERR
+trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; read -rp "Enter para continuar...";' ERR
 
 REPO_BASE="${REPO_BASE:-https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main}"
 LOG_FILE="/tmp/botxray_install.log"
@@ -76,7 +73,7 @@ echo ""
 echo -e "${AMARELO}2. Seu ID numérico do Telegram (Admin):${RESET}"
 read -r -p "ID Admin: " admin_id
 
-# Validação de token: formato Telegram (NNN:AAAA... — 35+ chars após :)
+# Validação de token
 if [ -z "${bot_token:-}" ] || ! [[ "$bot_token" =~ ^[0-9]{6,12}:[A-Za-z0-9_-]{35,}$ ]]; then
     echo -e "${VERMELHO}❌ Token inválido. Formato esperado: 123456789:ABCdef... (35+ chars após :)${RESET}"
     exit 1
@@ -118,19 +115,12 @@ else
 fi
 
 mv -f "$tmp_bot" "$BOT_PY"
-chmod 777 "$BOT_PY"
+chmod 0755 "$BOT_PY"
 
-# --- TOKEN ARMAZENADO EM ENVIRONMENTFILE (não hardcoded no .py) ---
-# O botxray.py deve ler: BOT_TOKEN e ADMIN_ID de os.environ
-ENV_FILE="/opt/XrayTools/.bot_env"
-cat > "$ENV_FILE" <<ENVEOF
-BOT_TOKEN=${bot_token}
-ADMIN_ID=${admin_id}
-ENVEOF
-chmod 600 "$ENV_FILE"
-chown root:root "$ENV_FILE"
-
-echo -e "${VERDE}Credenciais salvas em ${ENV_FILE} (chmod 600).${RESET}"
+# --- INJEÇÃO DIRETA DE TOKEN E ID (MÉTODO CLÁSSICO) ---
+# Substitui os placeholders do seu arquivo botxray.py no GitHub
+sed -i "s|SEU_TOKEN_AQUI|$bot_token|g" "$BOT_PY"
+sed -i "s|123456789|$admin_id|g" "$BOT_PY"
 
 # --- USUÁRIO DEDICADO ---
 if ! id -u botxray >/dev/null 2>&1; then
@@ -143,7 +133,6 @@ if [ ! -d /opt/XrayTools/venv ]; then
 fi
 echo "Instalando dependências Python (versões fixadas)..."
 /opt/XrayTools/venv/bin/pip install --quiet --upgrade pip >>"$LOG_FILE" 2>&1
-# Versões fixadas para evitar breaking changes da API do python-telegram-bot
 /opt/XrayTools/venv/bin/pip install --quiet \
     "python-telegram-bot==20.7" \
     "requests==2.31.0" >>"$LOG_FILE" 2>&1
@@ -154,7 +143,6 @@ cat > /usr/local/bin/backup_bot.sh <<'BKPEOF'
 set -Eeuo pipefail
 umask 077
 
-# Unificado com o backup.sh principal: mesmo diretório /root/backups
 OUT_DIR="/root/backups"
 mkdir -p "$OUT_DIR"
 
@@ -182,15 +170,16 @@ if ! tar -czf "$OUT_FILE" -C "$tmpdir" opt usr >/dev/null 2>&1; then
     echo "ERR: falha no tar"; exit 3
 fi
 
-chmod 777 "$OUT_FILE"
+chmod 0644 "$OUT_FILE"
 
 # Gera SHA256 ao lado
 sha256sum "$OUT_FILE" > "${OUT_FILE}.sha256"
-chmod 777 "${OUT_FILE}.sha256"
+chmod 0644 "${OUT_FILE}.sha256"
 
 echo "$OUT_FILE"
 BKPEOF
-chmod 777 /usr/local/bin/backup_bot.sh
+
+chmod 0755 /usr/local/bin/backup_bot.sh
 chown root:root /usr/local/bin/backup_bot.sh
 
 # --- restore_bot.sh com snapshot antes de extrair ---
@@ -202,12 +191,10 @@ FILE="${1:-}"
 [ -n "$FILE" ] || { echo "ERR: informe o caminho do .tar.gz"; exit 2; }
 [ -f "$FILE" ] || { echo "ERR: arquivo não existe: $FILE"; exit 2; }
 
-# Verifica integridade do tar
 if ! tar -tzf "$FILE" >/dev/null 2>&1; then
     echo "ERR: arquivo tar corrompido ou ilegível"; exit 4
 fi
 
-# Verifica SHA256 se disponível
 SHA_FILE="${FILE}.sha256"
 if [ -f "$SHA_FILE" ]; then
     expected=$(awk '{print $1}' "$SHA_FILE")
@@ -217,7 +204,6 @@ if [ -f "$SHA_FILE" ]; then
     fi
 fi
 
-# Valida paths dentro do tar (whitelist)
 while IFS= read -r entry; do
     entry="${entry#./}"
     [ -n "$entry" ] || continue
@@ -229,12 +215,11 @@ while IFS= read -r entry; do
     esac
 done < <(tar -tzf "$FILE" 2>/dev/null)
 
-# Snapshot do estado atual antes de sobrescrever
 SNAP=$(mktemp /tmp/restore_snap_XXXXXX.tar.gz)
 SNAP_PATHS=( "opt/XrayTools" "usr/local/etc/xray" )
 [ -d /opt/DragonCoreSSL ] && SNAP_PATHS+=( "opt/DragonCoreSSL" )
 if tar -czf "$SNAP" -C / "${SNAP_PATHS[@]}" >/dev/null 2>&1; then
-    chmod 777 "$SNAP"
+    chmod 0600 "$SNAP"
     echo "Snapshot salvo em: $SNAP"
 else
     echo "AVISO: não foi possível criar snapshot — continuando."
@@ -254,24 +239,22 @@ if ! tar -xzf "$FILE" -C / 2>/dev/null; then
     exit 3
 fi
 
-# Permissões pós-restore
-chmod 777  /opt/XrayTools               2>/dev/null || true
-chmod 777  /opt/XrayTools/users.db      2>/dev/null || true
-chmod 777 /usr/local/etc/xray/config.json 2>/dev/null || true
-chown root:root /usr/local/etc/xray/config.json 2>/dev/null || true
+chmod 0755 /opt/XrayTools               2>/dev/null || true
+chmod 0666 /opt/XrayTools/users.db      2>/dev/null || true
+chmod 0640 /usr/local/etc/xray/config.json 2>/dev/null || true
+chown root:nogroup /usr/local/etc/xray/config.json 2>/dev/null || true
 
 if [ -d /opt/DragonCoreSSL ]; then
     chown -R nobody:nogroup /opt/DragonCoreSSL 2>/dev/null || true
-    chmod 777 /opt/DragonCoreSSL                2>/dev/null || true
-    chmod 777 /opt/DragonCoreSSL/fullchain.pem  2>/dev/null || true
-    chmod 777 /opt/DragonCoreSSL/privkey.pem    2>/dev/null || true
+    chmod 0755 /opt/DragonCoreSSL               2>/dev/null || true
+    chmod 0644 /opt/DragonCoreSSL/fullchain.pem 2>/dev/null || true
+    chmod 0600 /opt/DragonCoreSSL/privkey.pem   2>/dev/null || true
 fi
 
 systemctl restart xray    >/dev/null 2>&1 || true
 systemctl restart botxray >/dev/null 2>&1 || true
 sleep 2
 
-# Confirma que Xray voltou
 if systemctl is-active --quiet xray 2>/dev/null; then
     [ -n "${SNAP:-}" ] && rm -f "$SNAP"
     echo "OK"
@@ -280,12 +263,11 @@ else
     exit 6
 fi
 RSTEOF
-chmod 777 /usr/local/bin/restore_bot.sh
+
+chmod 0755 /usr/local/bin/restore_bot.sh
 chown root:root /usr/local/bin/restore_bot.sh
 
-# --- SUDOERS CORRIGIDO — sem /bin/bash prefixado ---
-# CRÍTICO: /bin/bash script.sh autoriza "sudo /bin/bash QUALQUER_COISA"
-# Correto: autorizar apenas o script diretamente
+# --- SUDOERS (0440) ---
 cat > /etc/sudoers.d/botxray <<'SUDOEOF'
 Defaults:botxray !requiretty
 Defaults:botxray !authenticate
@@ -298,19 +280,20 @@ botxray ALL=(root) NOPASSWD: /usr/local/bin/unblock_user.sh
 botxray ALL=(root) NOPASSWD: /usr/local/bin/backup_bot.sh
 botxray ALL=(root) NOPASSWD: /usr/local/bin/restore_bot.sh
 SUDOEOF
-chmod 777 /etc/sudoers.d/botxray
+
+chmod 0440 /etc/sudoers.d/botxray
 visudo -cf /etc/sudoers.d/botxray >/dev/null
 
 # --- PERMISSÕES DO DIRETÓRIO ---
 mkdir -p /opt/XrayTools/backups
 chown -R botxray:botxray /opt/XrayTools
-chmod 777 /opt/XrayTools
-chmod 777 /opt/XrayTools/botxray.py 2>/dev/null || true
-# .bot_env deve ser acessível pelo botxray via systemd EnvironmentFile
-chown root:botxray "$ENV_FILE"
-chmod 777 "$ENV_FILE"
+chmod 0755 /opt/XrayTools
 
-# --- SYSTEMD SERVICE com EnvironmentFile ---
+touch /opt/XrayTools/users.db
+chown botxray:botxray /opt/XrayTools/users.db
+chmod 0666 /opt/XrayTools/users.db
+
+# --- SYSTEMD SERVICE ---
 cat > /etc/systemd/system/botxray.service <<'SVCEOF'
 [Unit]
 Description=DragonCore Telegram Bot
@@ -322,9 +305,6 @@ User=botxray
 Group=botxray
 WorkingDirectory=/opt/XrayTools
 
-# Token e admin_id carregados via arquivo seguro — não hardcoded no código
-EnvironmentFile=/opt/XrayTools/.bot_env
-
 ExecStart=/opt/XrayTools/venv/bin/python /opt/XrayTools/botxray.py
 Restart=always
 RestartSec=10
@@ -333,7 +313,6 @@ RestartSec=10
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ProtectHome=true
 ReadWritePaths=/opt/XrayTools /tmp /root/backups
 
 [Install]
@@ -354,10 +333,7 @@ else
 fi
 
 echo ""
-echo -e "${AMARELO}IMPORTANTE:${RESET} O botxray.py precisa ler as variáveis de ambiente:"
-echo -e "   ${VERDE}BOT_TOKEN${RESET} e ${VERDE}ADMIN_ID${RESET} via ${VERDE}os.environ${RESET}"
-echo -e "   (não mais hardcoded no código-fonte)"
-echo ""
-systemctl status botxray --no-pager 2>/dev/null | sed -n '1,15p'
+# CORREÇÃO CRÍTICA: '|| true' protege o pipeline do erro "código 3" se o serviço estiver inativo.
+systemctl status botxray --no-pager 2>/dev/null | sed -n '1,15p' || true
 echo ""
 read -rp "Pressione ENTER para voltar..."
