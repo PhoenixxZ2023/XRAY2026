@@ -156,7 +156,7 @@ fi
 
 # Aplica e corrige permissões
 mv -f "$tmp_cfg" "$CONFIG_PATH"
-chmod 0640 "$CONFIG_PATH"
+chmod 777 "$CONFIG_PATH"
 chown root:nogroup "$CONFIG_PATH"
 
 # Restart com verificação e rollback em falha
@@ -164,7 +164,7 @@ if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
    ! systemctl restart xray >/dev/null 2>&1; then
     echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}"
     mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    chmod 0640 "$CONFIG_PATH"
+    chmod 777 "$CONFIG_PATH"
     echo -e "${TXT_YELLOW}Config revertido. Usuário NÃO bloqueado.${RESET}"
     journalctl -u xray -n 15 --no-pager 2>/dev/null || true
     sleep 3; exit 1
@@ -174,7 +174,7 @@ sleep 1
 if ! systemctl is-active --quiet xray 2>/dev/null; then
     echo -e "${TXT_RED}❌ Xray não ficou ativo. Revertendo...${RESET}"
     mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    chmod 0640 "$CONFIG_PATH"
+    chmod 777 "$CONFIG_PATH"
     systemctl restart xray >/dev/null 2>&1 || true
     sleep 2; exit 1
 fi
