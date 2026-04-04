@@ -1,10 +1,9 @@
 """
 botxray.py - DragonCore Telegram Bot V7.5
-Correções: token/admin via os.environ (não hardcoded), sudo sem bash,
-           load_config com try/except, IP via HTTPS, tempfile seguro,
-           UUID truncado na lista, validação de intervalo de dias,
-           backup deletado só após confirmação de envio, log configurável.
+Compatível com Python 3.8+ (sem X | Y syntax, usa Optional)
 """
+
+from __future__ import annotations
 
 import os
 import json
@@ -16,6 +15,7 @@ import re
 import tempfile
 import stat
 from datetime import datetime, timedelta
+from typing import Optional, Tuple, List
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -24,8 +24,7 @@ from telegram.ext import (
 )
 import io
 
-# --- CONFIGURAÇÃO VIA VARIÁVEIS DE AMBIENTE (EnvironmentFile no systemd) ---
-# Nunca hardcode token ou admin_id aqui — use /opt/XrayTools/.bot_env
+# --- CONFIGURAÇÃO VIA VARIÁVEIS DE AMBIENTE ---
 _missing = []
 _token = os.environ.get("BOT_TOKEN", "")
 _admin  = os.environ.get("ADMIN_ID", "")
@@ -36,23 +35,21 @@ if not _admin:
     _missing.append("ADMIN_ID")
 if _missing:
     raise EnvironmentError(
-        f"Variáveis de ambiente obrigatórias não definidas: {', '.join(_missing)}\n"
-        "Verifique /opt/XrayTools/.bot_env e o EnvironmentFile= no botxray.service."
+        f"Variáveis obrigatórias não definidas: {', '.join(_missing)}\n"
+        "Verifique /opt/XrayTools/.bot_env e EnvironmentFile= no botxray.service."
     )
 
 try:
     ADMIN_ID: int = int(_admin)
 except ValueError:
-    raise EnvironmentError(f"ADMIN_ID deve ser um número inteiro, obtido: '{_admin}'")
+    raise EnvironmentError(f"ADMIN_ID deve ser inteiro, obtido: '{_admin}'")
 
 BOT_TOKEN: str = _token
 
 # --- CAMINHOS ---
 CONFIG_PATH  = "/usr/local/etc/xray/config.json"
 USER_DB      = "/opt/XrayTools/users.db"
-XRAY_SERVICE = "xray"
 
-# Scripts chamados via sudo (sem /bin/bash — sudoers autoriza o script diretamente)
 SCRIPTS = {
     "create":  "/usr/local/bin/add_user.sh",
     "delete":  "/usr/local/bin/remover_user.sh",
@@ -67,7 +64,7 @@ ALLOWED_EXT    = (".tar.gz",)
 MIN_DAYS       = 1
 MAX_DAYS       = 3650
 
-# --- LOGGING CONFIGURÁVEL ---
+# --- LOGGING ---
 _log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -75,7 +72,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# RotatingFileHandler opcional
 _log_file = os.environ.get("LOG_FILE", "")
 if _log_file:
     try:
@@ -87,7 +83,7 @@ if _log_file:
     except Exception as e:
         logger.warning(f"Não foi possível abrir log file '{_log_file}': {e}")
 
-# --- ESTADOS DO CONVERSATION HANDLER ---
+# --- ESTADOS ---
 (
     SELECTING_ACTION,
     GET_USERNAME_CREATE,
@@ -103,8 +99,7 @@ if _log_file:
 # FUNÇÕES DE SISTEMA
 # ─────────────────────────────────────────────
 
-def load_config() -> dict | None:
-    """Lê e parseia config.json com tratamento de erro explícito."""
+def load_config() -> Optional[dict]:
     if not os.path.exists(CONFIG_PATH):
         logger.warning("config.json não encontrado: %s", CONFIG_PATH)
         return None
@@ -112,7 +107,7 @@ def load_config() -> dict | None:
         with open(CONFIG_PATH, "r", encoding="utf-8", errors="ignore") as f:
             return json.load(f)
     except json.JSONDecodeError as e:
-        logger.error("config.json inválido (JSON corrompido): %s", e)
+        logger.error("config.json inválido: %s", e)
         return None
     except OSError as e:
         logger.error("Erro ao ler config.json: %s", e)
@@ -120,7 +115,6 @@ def load_config() -> dict | None:
 
 
 def get_ip() -> str:
-    """Obtém IP público via HTTPS com timeout e fallback."""
     sources = [
         ["curl", "-4", "-fsSL", "--max-time", "10", "--connect-timeout", "5",
          "https://icanhazip.com"],
@@ -137,8 +131,7 @@ def get_ip() -> str:
     return "127.0.0.1"
 
 
-def read_uuid_from_db(nick: str) -> str | None:
-    """Lê UUID do users.db para um nick específico."""
+def read_uuid_from_db(nick: str) -> Optional[str]:
     try:
         if not os.path.exists(USER_DB):
             return None
@@ -154,55 +147,49 @@ def read_uuid_from_db(nick: str) -> str | None:
 
 
 # ─────────────────────────────────────────────
-# EXECUÇÃO DE SCRIPTS VIA SUDO
-# Chamada direta ao script — sem "bash" no meio
-# (consistente com sudoers que autoriza o script diretamente)
+# EXECUÇÃO VIA SUDO (sem /bin/bash prefixado)
 # ─────────────────────────────────────────────
 
-def run_script(path: str, input_text: str = "", timeout: int = 180) -> tuple[int, str]:
-    """Executa script via sudo com stdin. Sem /bin/bash prefixado."""
+def run_script(path: str, input_text: str = "", timeout: int = 180) -> Tuple[int, str]:
     try:
         p = subprocess.run(
-            ["sudo", "-n", path],          # sem "bash" — sudo autoriza o script diretamente
+            ["sudo", "-n", path],
             input=input_text.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
             timeout=timeout,
         )
-        out = p.stdout.decode("utf-8", errors="ignore")
-        return p.returncode, out
+        return p.returncode, p.stdout.decode("utf-8", errors="ignore")
     except subprocess.TimeoutExpired:
         return 124, "⏱️ Timeout executando o script."
     except Exception as e:
         logger.exception("Erro em run_script(%s)", path)
-        return 1, f"Erro ao executar script: {e}"
+        return 1, f"Erro: {e}"
 
 
-def run_script_args(path: str, args: list[str], timeout: int = 300) -> tuple[int, str]:
-    """Executa script via sudo com argumentos posicionais. Sem /bin/bash."""
+def run_script_args(path: str, args: List[str], timeout: int = 300) -> Tuple[int, str]:
     try:
         p = subprocess.run(
-            ["sudo", "-n", path] + args,   # sem "bash"
+            ["sudo", "-n", path] + args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
             timeout=timeout,
         )
-        out = p.stdout.decode("utf-8", errors="ignore")
-        return p.returncode, out
+        return p.returncode, p.stdout.decode("utf-8", errors="ignore")
     except subprocess.TimeoutExpired:
         return 124, "⏱️ Timeout executando o script."
     except Exception as e:
         logger.exception("Erro em run_script_args(%s)", path)
-        return 1, f"Erro ao executar script: {e}"
+        return 1, f"Erro: {e}"
 
 
 # ─────────────────────────────────────────────
 # GERADOR DE LINK VLESS
 # ─────────────────────────────────────────────
 
-def generate_link(client_uuid: str | None, client_email: str) -> str:
+def generate_link(client_uuid: Optional[str], client_email: str) -> str:
     try:
         data = load_config()
         if not data:
@@ -223,7 +210,7 @@ def generate_link(client_uuid: str | None, client_email: str) -> str:
         sni = ""
         host = ""
         if security == "tls":
-            tls = stream.get("tlsSettings", {})
+            tls  = stream.get("tlsSettings", {})
             sni  = tls.get("serverName", "") or ""
             host = sni
 
@@ -239,7 +226,7 @@ def generate_link(client_uuid: str | None, client_email: str) -> str:
                     break
 
         if not client_uuid:
-            return "UUID não encontrado para gerar link."
+            return "UUID não encontrado."
 
         sec_param = "security=tls" if security == "tls" else "security=none"
 
@@ -285,7 +272,7 @@ def generate_link(client_uuid: str | None, client_email: str) -> str:
 # FUNÇÕES CORE
 # ─────────────────────────────────────────────
 
-def core_create_user(nick: str, days: str) -> tuple[bool, str]:
+def core_create_user(nick: str, days: str) -> Tuple[bool, str]:
     code, out = run_script(SCRIPTS["create"], f"{nick}\n{days}\n\n", timeout=120)
     if code == 0:
         user_uuid = read_uuid_from_db(nick)
@@ -295,7 +282,7 @@ def core_create_user(nick: str, days: str) -> tuple[bool, str]:
             f"✅ *Usuário Criado!*\n\n"
             f"👤 `{nick}`\n📅 `{expiry}`\n\n🔗 *Link VLESS:*\n`{link}`"
         )
-    return False, f"❌ Falha ao criar usuário.\n\n```\n{out[-1500:]}\n```"
+    return False, f"❌ Falha ao criar.\n\n```\n{out[-1500:]}\n```"
 
 
 def core_delete_user(nick: str) -> str:
@@ -320,15 +307,13 @@ def core_unblock_user(nick: str) -> str:
 
 
 def core_list_users_text() -> str:
-    """Lista usuários com UUID truncado — não expõe credenciais completas."""
     if not os.path.exists(USER_DB):
         return "Nenhum usuário cadastrado."
 
-    locked_users: set[str] = set()
+    locked_users: set = set()
     data = load_config()
     if data:
-        inbounds = data.get("inbounds", [])
-        target   = next((i for i in inbounds if i.get("tag") == "inbound-dragoncore"), None)
+        target = next((i for i in data.get("inbounds", []) if i.get("tag") == "inbound-dragoncore"), None)
         if target:
             for c in target.get("settings", {}).get("clients", []):
                 email = c.get("email", "")
@@ -339,7 +324,7 @@ def core_list_users_text() -> str:
     lines += ["=" * 65]
     lines += [f"{'NOME':<14} | {'VENCIMENTO':<11} | {'UUID (resumido)':<18} | STATUS"]
     lines += ["=" * 65]
-    lines += ["(UUIDs completos disponíveis em /opt/XrayTools/users/<nick>.txt no servidor)"]
+    lines += ["(UUIDs completos em /opt/XrayTools/users/<nick>.txt no servidor)"]
     lines += ["-" * 65]
 
     try:
@@ -350,7 +335,6 @@ def core_list_users_text() -> str:
                     nick       = parts[0]
                     uuid_full  = parts[1]
                     expiry     = parts[2]
-                    # UUID truncado: primeiros 8 + últimos 4
                     uuid_short = f"{uuid_full[:8]}...{uuid_full[-4:]}" if len(uuid_full) >= 12 else uuid_full
                     status     = "⛔" if nick in locked_users else "✅"
                     lines.append(f"{nick:<14} | {expiry:<11} | {uuid_short:<18} | {status}")
@@ -361,7 +345,7 @@ def core_list_users_text() -> str:
 
 
 # ─────────────────────────────────────────────
-# HELPERS DO TELEGRAM
+# HELPERS TELEGRAM
 # ─────────────────────────────────────────────
 
 def is_admin(update: Update) -> bool:
@@ -446,11 +430,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=close_btn,
         )
-        await query.edit_message_text(
-            "✅ *Lista enviada!*",
-            parse_mode="Markdown",
-            reply_markup=build_menu(),
-        )
+        await query.edit_message_text("✅ *Lista enviada!*", parse_mode="Markdown", reply_markup=build_menu())
         return SELECTING_ACTION
 
     if query.data == "backup_start":
@@ -459,17 +439,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if code != 0:
             await query.edit_message_text(
                 f"❌ Falha ao criar backup.\n\n```\n{out[-1200:]}\n```",
-                reply_markup=build_menu(),
-                parse_mode="Markdown",
+                reply_markup=build_menu(), parse_mode="Markdown",
             )
             return SELECTING_ACTION
 
         bkp_file = out.strip().splitlines()[-1].strip()
         if not os.path.exists(bkp_file):
-            await query.edit_message_text(
-                "❌ Arquivo de backup não encontrado.",
-                reply_markup=build_menu(),
-            )
+            await query.edit_message_text("❌ Arquivo de backup não encontrado.", reply_markup=build_menu())
             return SELECTING_ACTION
 
         close_btn = InlineKeyboardMarkup(
@@ -488,23 +464,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             send_ok = True
         except Exception as e:
-            logger.error("Falha ao enviar backup via Telegram: %s", e)
-            await query.edit_message_text(
-                f"❌ Backup criado mas falhou ao enviar: {e}",
-                reply_markup=build_menu(),
-            )
+            logger.error("Falha ao enviar backup: %s", e)
+            await query.edit_message_text(f"❌ Backup criado mas falhou ao enviar: {e}", reply_markup=build_menu())
 
-        # Só remove o arquivo local após confirmação de envio bem-sucedido
         if send_ok:
             try:
                 os.remove(bkp_file)
             except Exception:
                 pass
-            await query.edit_message_text(
-                "✅ *Backup enviado!*",
-                parse_mode="Markdown",
-                reply_markup=build_menu(),
-            )
+            await query.edit_message_text("✅ *Backup enviado!*", parse_mode="Markdown", reply_markup=build_menu())
 
         return SELECTING_ACTION
 
@@ -536,56 +504,41 @@ async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     doc = update.message.document
     if not doc:
-        await update.message.reply_text(
-            "Envie um arquivo `.tar.gz` (backup).",
-            reply_markup=build_menu(),
-        )
+        await update.message.reply_text("Envie um arquivo `.tar.gz`.", reply_markup=build_menu())
         return SELECTING_ACTION
 
     filename = (doc.file_name or "").strip()
     if not filename.endswith(ALLOWED_EXT):
-        await update.message.reply_text("❌ Apenas arquivos `.tar.gz`.", reply_markup=build_menu())
+        await update.message.reply_text("❌ Apenas `.tar.gz`.", reply_markup=build_menu())
         return SELECTING_ACTION
 
     if doc.file_size and doc.file_size > (MAX_RESTORE_MB * 1024 * 1024):
-        await update.message.reply_text(
-            f"❌ Arquivo muito grande (máx {MAX_RESTORE_MB} MB).",
-            reply_markup=build_menu(),
-        )
+        await update.message.reply_text(f"❌ Muito grande (máx {MAX_RESTORE_MB} MB).", reply_markup=build_menu())
         return SELECTING_ACTION
 
     await update.message.reply_text("⬇️ Baixando backup...")
 
-    # Arquivo temporário com permissão restrita — não world-readable
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tar.gz", prefix="restore_")
     os.close(tmp_fd)
-    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
 
     try:
         tg_file = await doc.get_file()
         await tg_file.download_to_drive(custom_path=tmp_path)
 
-        await update.message.reply_text("⚙️ Restaurando... (pode reiniciar serviços)")
+        await update.message.reply_text("⚙️ Restaurando...")
         code, out = run_script_args(SCRIPTS["restore"], [tmp_path], timeout=300)
 
         if code == 0 and "OK" in out:
-            await update.message.reply_text(
-                "✅ RESTORE concluído com sucesso.",
-                reply_markup=build_menu(),
-            )
+            await update.message.reply_text("✅ RESTORE concluído.", reply_markup=build_menu())
         else:
             await update.message.reply_text(
                 f"❌ Falha no RESTORE.\n\n```\n{out[-1500:]}\n```",
-                parse_mode="Markdown",
-                reply_markup=build_menu(),
+                parse_mode="Markdown", reply_markup=build_menu(),
             )
-
     except Exception as e:
         logger.exception("Erro no restore_file_handler")
-        await update.message.reply_text(
-            f"❌ Erro no RESTORE: {e}",
-            reply_markup=build_menu(),
-        )
+        await update.message.reply_text(f"❌ Erro: {e}", reply_markup=build_menu())
     finally:
         try:
             if os.path.exists(tmp_path):
@@ -607,15 +560,12 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode
     if mode == "create_nick":
         if not re.match(r"^[a-zA-Z0-9]{5,9}$", text):
             await update.message.reply_text(
-                "❌ *Nome inválido!*\n\n• 5-9 caracteres\n• Apenas letras e números\n\nTente novamente:",
+                "❌ *Nome inválido!*\n\n• 5-9 caracteres\n• Letras e números\n\nTente novamente:",
                 parse_mode="Markdown",
             )
             return GET_USERNAME_CREATE
         context.user_data["nick"] = text
-        await update.message.reply_text(
-            f"Validade (dias) para `{text}` [{MIN_DAYS}-{MAX_DAYS}]:",
-            parse_mode="Markdown",
-        )
+        await update.message.reply_text(f"Validade (dias) para `{text}` [{MIN_DAYS}-{MAX_DAYS}]:", parse_mode="Markdown")
         return GET_EXPIRY_DAYS_CREATE
 
     if mode == "create_days":
@@ -624,9 +574,7 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode
             return GET_EXPIRY_DAYS_CREATE
         days_int = int(text)
         if not (MIN_DAYS <= days_int <= MAX_DAYS):
-            await update.message.reply_text(
-                f"❌ Validade deve ser entre {MIN_DAYS} e {MAX_DAYS} dias."
-            )
+            await update.message.reply_text(f"❌ Entre {MIN_DAYS} e {MAX_DAYS} dias.")
             return GET_EXPIRY_DAYS_CREATE
         res, msg = core_create_user(context.user_data["nick"], text)
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu())
@@ -648,7 +596,6 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode
         return SELECTING_ACTION
 
 
-# Wrappers para o ConversationHandler
 async def h_create_nick(u, c): return await input_handler(u, c, "create_nick")
 async def h_create_days(u, c): return await input_handler(u, c, "create_days")
 async def h_delete(u, c):      return await input_handler(u, c, "delete")
@@ -701,9 +648,7 @@ def main():
                 CallbackQueryHandler(unexpected_button),
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
-                    lambda u, c: u.message.reply_text(
-                        "Envie um arquivo `.tar.gz`.", reply_markup=build_menu()
-                    ),
+                    lambda u, c: u.message.reply_text("Envie um arquivo `.tar.gz`.", reply_markup=build_menu()),
                 ),
             ],
         },
