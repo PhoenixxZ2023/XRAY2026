@@ -51,12 +51,12 @@ CONFIG_PATH  = "/usr/local/etc/xray/config.json"
 USER_DB      = "/opt/XrayTools/users.db"
 
 SCRIPTS = {
-    "create":  "/usr/local/bin/add_user.sh",
-    "delete":  "/usr/local/bin/remover_user.sh",
-    "block":   "/usr/local/bin/block_user.sh",
-    "unblock": "/usr/local/bin/unblock_user.sh",
-    "backup":  "/usr/local/bin/backup_bot.sh",
-    "restore": "/usr/local/bin/restore_bot.sh",
+    "create":  "/usr/local/bin/wrap_add_user",
+    "delete":  "/usr/local/bin/wrap_remover_user",
+    "block":   "/usr/local/bin/wrap_block_user",
+    "unblock": "/usr/local/bin/wrap_unblock_user",
+    "backup":  "/usr/local/bin/wrap_backup_bot",
+    "restore": "/usr/local/bin/wrap_restore_bot",
 }
 
 MAX_RESTORE_MB = 50
@@ -147,13 +147,13 @@ def read_uuid_from_db(nick: str) -> Optional[str]:
 
 
 # ─────────────────────────────────────────────
-# EXECUÇÃO VIA SUDO (sem /bin/bash prefixado)
+# EXECUÇÃO DIRETA via wrappers setuid (sem sudo)
 # ─────────────────────────────────────────────
 
 def run_script(path: str, input_text: str = "", timeout: int = 180) -> Tuple[int, str]:
     try:
         p = subprocess.run(
-            ["sudo", "-n", path],
+            [path],
             input=input_text.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -171,7 +171,7 @@ def run_script(path: str, input_text: str = "", timeout: int = 180) -> Tuple[int
 def run_script_args(path: str, args: List[str], timeout: int = 300) -> Tuple[int, str]:
     try:
         p = subprocess.run(
-            ["sudo", "-n", path] + args,
+            [path] + args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
