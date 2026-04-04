@@ -193,8 +193,8 @@ cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
 
 # Aplica atomicamente e corrige permissões
 mv -f "$tmp_cfg" "$CONFIG_PATH"
-chmod 0600 "$CONFIG_PATH"
-chown root:root "$CONFIG_PATH"
+chmod 0640 "$CONFIG_PATH"
+chown root:nogroup "$CONFIG_PATH"
 
 # --- RESTART COM VERIFICAÇÃO E ROLLBACK ---
 if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
