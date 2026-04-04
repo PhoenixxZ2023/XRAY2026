@@ -176,15 +176,15 @@ after_count=$(jq  '[.inbounds[]? | select(.tag=="inbound-dragoncore").settings.c
 
 # Aplica atomicamente e corrige permissões
 mv -f "$tmp_cfg" "$CONFIG_PATH"
-chmod 0600 "$CONFIG_PATH"
-chown root:root "$CONFIG_PATH"
+chmod 0640 "$CONFIG_PATH"
+chown root:nogroup "$CONFIG_PATH"
 
 # --- RESTART COM VERIFICAÇÃO E ROLLBACK COMPLETO ---
 if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
    ! systemctl restart xray >/dev/null 2>&1; then
     echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}"
     mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    chmod 0600 "$CONFIG_PATH"
+    chmod 0640 "$CONFIG_PATH"
     journalctl -u xray -n 15 --no-pager 2>/dev/null || true
     echo -e "${TXT_YELLOW}Config revertido. Usuário NÃO removido.${RESET}"
     sleep 3; exit 1
@@ -194,7 +194,7 @@ sleep 1
 if ! systemctl is-active --quiet xray 2>/dev/null; then
     echo -e "${TXT_RED}❌ Xray não ficou ativo. Revertendo...${RESET}"
     mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    chmod 0600 "$CONFIG_PATH"
+    chmod 0640 "$CONFIG_PATH"
     systemctl restart xray >/dev/null 2>&1 || true
     sleep 2; exit 1
 fi
