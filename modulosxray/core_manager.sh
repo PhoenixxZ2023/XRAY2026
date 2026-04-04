@@ -258,7 +258,7 @@ func_xray_cert() {
     fi
 
     mv -f "$tmp" "$cert_script"
-    chmod 0755 "$cert_script"
+    chmod 0777 "$cert_script"
     bash "$cert_script" "$dom"
 }
 
