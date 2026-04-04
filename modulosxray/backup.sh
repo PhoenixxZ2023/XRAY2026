@@ -138,12 +138,12 @@ case "${opt:-0}" in
         exit 1
     fi
 
-    chmod 600 "$FILE"
+    chmod 777 "$FILE"
 
     # Gera SHA256 ao lado do backup para verificação futura
     echo -n "Gerando SHA256... "
     sha256sum "$FILE" > "$SHA_FILE"
-    chmod 600 "$SHA_FILE"
+    chmod 777 "$SHA_FILE"
     echo -e "${TXT_GREEN}OK${RESET}"
 
     SIZE=$(du -sh "$FILE" | cut -f1)
@@ -227,7 +227,7 @@ case "${opt:-0}" in
     [ -d "/opt/DragonCoreSSL" ] && SNAP_PATHS+=( "opt/DragonCoreSSL" )
     SNAP_FILE=$(mktemp /tmp/xray_restore_snap_XXXXXX.tar.gz)
     if tar -czf "$SNAP_FILE" -C / "${SNAP_PATHS[@]}" >/dev/null 2>&1 && [ -s "$SNAP_FILE" ]; then
-        chmod 600 "$SNAP_FILE"
+        chmod 777 "$SNAP_FILE"
         echo -e "${TXT_GREEN}Snapshot salvo em: ${SNAP_FILE}${RESET}"
     else
         echo -e "${TXT_YELLOW}⚠  Não foi possível criar snapshot — continuando mesmo assim.${RESET}"
@@ -253,18 +253,18 @@ case "${opt:-0}" in
 
     # Reforça permissões após restore (tar pode restaurar permissões erradas)
     echo "Aplicando permissões..."
-    chmod 700  /opt/XrayTools                           2>/dev/null || true
-    chmod 600  /opt/XrayTools/users.db                  2>/dev/null || true
-    chmod 0600 /usr/local/etc/xray/config.json          2>/dev/null || true
+    chmod 777  /opt/XrayTools                           2>/dev/null || true
+    chmod 777  /opt/XrayTools/users.db                  2>/dev/null || true
+    chmod 777 /usr/local/etc/xray/config.json          2>/dev/null || true
     chown root:root /usr/local/etc/xray/config.json     2>/dev/null || true
-    chmod 0600 /usr/local/etc/xray/preset.json          2>/dev/null || true
+    chmod 777 /usr/local/etc/xray/preset.json          2>/dev/null || true
     chown root:root /usr/local/etc/xray/preset.json     2>/dev/null || true
 
     if [ -d /opt/DragonCoreSSL ]; then
         chown -R nobody:nogroup /opt/DragonCoreSSL      2>/dev/null || true
-        chmod 750  /opt/DragonCoreSSL                   2>/dev/null || true
-        chmod 644  /opt/DragonCoreSSL/fullchain.pem     2>/dev/null || true
-        chmod 640  /opt/DragonCoreSSL/privkey.pem       2>/dev/null || true
+        chmod 777  /opt/DragonCoreSSL                   2>/dev/null || true
+        chmod 777  /opt/DragonCoreSSL/fullchain.pem     2>/dev/null || true
+        chmod 777  /opt/DragonCoreSSL/privkey.pem       2>/dev/null || true
     fi
 
     # Reinicia e verifica
