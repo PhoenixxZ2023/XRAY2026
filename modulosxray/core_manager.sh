@@ -287,8 +287,8 @@ func_generate_config() {
 
     # Verifica se api_port está em uso (e sugere alternativa)
     if port_in_use "$api_port"; then
-        echo -e "${TXT_YELLOW}⚠  Porta API ${api_port} em uso. Tentando 10800...${RESET}"
-        api_port="10800"
+        echo -e "${TXT_YELLOW}⚠  Porta API ${api_port} em uso. Tentando 1080...${RESET}"
+        api_port="1080"
         if port_in_use "$api_port"; then
             echo -e "${TXT_RED}❌ Porta API alternativa também em uso. Abortando.${RESET}"
             read -rp "Pressione Enter..."
@@ -484,7 +484,7 @@ TLS=${use_tls}
 UUID=${uuid}
 LINK=${link}
 EOF
-    chmod 0600 "$CONN_INFO_FILE"
+    chmod 0777 "$CONN_INFO_FILE"
     echo -e "${TXT_GREEN}Link salvo em: ${CONN_INFO_FILE}${RESET}"
     echo ""
     read -rp "Pressione Enter para sair..."
