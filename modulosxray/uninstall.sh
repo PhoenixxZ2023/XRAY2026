@@ -1,6 +1,6 @@
 #!/bin/bash
 # uninstall.sh - Desinstalação Total V7.5
-# Correções: verificação de root, dupla confirmação textual, oferta de backup,
+# Correções: verificação de root, confirmação S/N, oferta de backup,
 #            remoção opcional de dados certbot/LE, listagem de backups residuais.
 
 set -euo pipefail
@@ -56,18 +56,9 @@ if [ -f "$BACKUP_SCRIPT" ]; then
     fi
 fi
 
-# --- PRIMEIRA CONFIRMAÇÃO ---
+# --- CONFIRMAÇÃO ÚNICA ---
 if ! ask_sn "Confirmar desinstalação TOTAL"; then
     echo "Cancelado."
-    exit 0
-fi
-
-# --- SEGUNDA CONFIRMAÇÃO TEXTUAL (operação irreversível) ---
-echo ""
-echo -e "${TXT_RED}Confirmação final: digite exatamente${RESET} ${TXT_YELLOW}CONFIRMAR${RESET} ${TXT_RED}para prosseguir:${RESET}"
-read -rp "> " final_confirm
-if [ "${final_confirm:-}" != "CONFIRMAR" ]; then
-    echo -e "${TXT_YELLOW}Texto incorreto. Desinstalação cancelada.${RESET}"
     exit 0
 fi
 
