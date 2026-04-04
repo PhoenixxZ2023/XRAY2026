@@ -1,6 +1,7 @@
 #!/bin/bash
-# core_manager.sh - DragonCore V7.8
+# core_manager.sh - DragonCore V7.8.1
 # PERMISSÃO CORRETA: 0640 root:nogroup — Xray roda como User=nobody (grupo nogroup)
+# CORREÇÃO: "set -e gotchas" resolvidos. Substituídos atalhos && por blocos if estruturados.
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; read -rp "Enter para continuar...";' ERR
@@ -43,7 +44,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 _PKG_MANAGER=""
 _detect_pkg_manager() {
-    [ -n "$_PKG_MANAGER" ] && return
+    if [ -n "$_PKG_MANAGER" ]; then return 0; fi
     if   command -v apt-get &>/dev/null; then _PKG_MANAGER="apt"
     elif command -v dnf     &>/dev/null; then _PKG_MANAGER="dnf"
     elif command -v yum     &>/dev/null; then _PKG_MANAGER="yum"
@@ -54,11 +55,14 @@ _detect_pkg_manager() {
 _APT_UPDATED=0
 ensure_cmd() {
     local cmd="$1" pkg="$2"
-    command -v "$cmd" &>/dev/null && return 0
+    if command -v "$cmd" &>/dev/null; then return 0; fi
     _detect_pkg_manager
     case "$_PKG_MANAGER" in
         apt)
-            [ "$_APT_UPDATED" -eq 0 ] && { apt-get update -y >>"$LOG_FILE" 2>&1 || true; _APT_UPDATED=1; }
+            if [ "$_APT_UPDATED" -eq 0 ]; then
+                apt-get update -y >>"$LOG_FILE" 2>&1 || true
+                _APT_UPDATED=1
+            fi
             apt-get install -y "$pkg" >>"$LOG_FILE" 2>&1 ;;
         dnf|yum) "$_PKG_MANAGER" install -y "$pkg" >>"$LOG_FILE" 2>&1 ;;
         pacman)  pacman -Sy --noconfirm "$pkg"      >>"$LOG_FILE" 2>&1 ;;
@@ -68,11 +72,12 @@ ensure_cmd() {
 header_blue() { clear; echo -e "${TITLE_BAR}   $1   ${RESET}"; echo ""; }
 
 require_root() {
-    [ "${EUID:-$(id -u)}" -ne 0 ] && echo -e "${TXT_RED}❌ Execute como root!${RESET}" && exit 1
+    if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+        echo -e "${TXT_RED}❌ Execute como root!${RESET}"
+        exit 1
+    fi
 }
 
-# Permissão correta: root:nogroup 0640
-# Xray (nobody) pertence ao grupo nogroup e precisa de leitura no config
 _apply_config_perms() {
     chmod 0640 "$CONFIG_PATH"
     chown root:"$XRAY_GROUP" "$CONFIG_PATH"
@@ -80,23 +85,29 @@ _apply_config_perms() {
 
 validate_port() {
     local p="$1"
-    [[ "$p" =~ ^[0-9]{1,5}$ ]] && (( p >= 1 && p <= 65535 ))
+    if [[ "$p" =~ ^[0-9]{1,5}$ ]]; then
+        if (( p >= 1 && p <= 65535 )); then return 0; fi
+    fi
+    return 1
 }
 
 validate_domain() {
     local d="${1:-}"
-    [ -n "$d" ] || return 1
-    [[ "$d" =~ ^[0-9.]+$ ]] && return 1
-    [[ "$d" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]
+    if [ -z "$d" ]; then return 1; fi
+    if [[ "$d" =~ ^[0-9.]+$ ]]; then return 1; fi
+    if [[ "$d" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then return 0; fi
+    return 1
 }
 
 validate_domain_or_ip() {
     local d="${1:-}"
-    [ -n "$d" ] || return 1
+    if [ -z "$d" ]; then return 1; fi
     if [[ "$d" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
         local IFS='.'
         read -ra parts <<< "$d"
-        for p in "${parts[@]}"; do (( p <= 255 )) || return 1; done
+        for p in "${parts[@]}"; do
+            if ! (( p <= 255 )); then return 1; fi
+        done
         return 0
     fi
     validate_domain "$d"
@@ -116,26 +127,27 @@ _verify_sha256() {
     local file="$1" sha_url="$2" label="$3"
     local expected
     expected=$(curl -fLsS --max-time 10 --connect-timeout 5 "$sha_url" 2>/dev/null | awk '{print $1}')
-    [ -z "$expected" ] && {
+    if [ -z "$expected" ]; then
         echo -e "${TXT_YELLOW}⚠  Hash não encontrado para ${label} — verificação ignorada.${RESET}" >&2
         return 0
-    }
+    fi
     local actual
     actual=$(sha256sum "$file" | awk '{print $1}')
-    [ "$expected" = "$actual" ] || {
+    if [ "$expected" != "$actual" ]; then
         echo -e "${TXT_RED}❌ Falha de integridade: ${label}${RESET}" >&2
         return 1
-    }
+    fi
+    return 0
 }
 
 port_in_use() {
     local port="$1"
     if command -v ss &>/dev/null; then
-        ss -tlnp 2>/dev/null | grep -q ":${port} " && return 0
+        if ss -tlnp 2>/dev/null | grep -q ":${port} "; then return 0; fi
     elif command -v netstat &>/dev/null; then
-        netstat -tlnp 2>/dev/null | grep -q ":${port} " && return 0
+        if netstat -tlnp 2>/dev/null | grep -q ":${port} "; then return 0; fi
     elif command -v lsof &>/dev/null; then
-        lsof -Pi :"$port" -sTCP:LISTEN -t &>/dev/null && return 0
+        if lsof -Pi :"$port" -sTCP:LISTEN -t &>/dev/null; then return 0; fi
     fi
     return 1
 }
@@ -151,19 +163,23 @@ func_install_official_core() {
 
     echo "Baixando instalador oficial Xray..."
     rm -f "$install_script"
-    curl -fLsS --retry 3 --retry-delay 2 --max-time 120 --connect-timeout 15 \
+    if ! curl -fLsS --retry 3 --retry-delay 2 --max-time 120 --connect-timeout 15 \
         -o "$install_script" \
-        "https://github.com/XTLS/Xray-install/raw/main/install-release.sh" 2>>"$LOG_FILE" || {
-        echo -e "${TXT_RED}❌ Erro no download.${RESET}"; sleep 2; return 1; }
+        "https://github.com/XTLS/Xray-install/raw/main/install-release.sh" 2>>"$LOG_FILE"; then
+        echo -e "${TXT_RED}❌ Erro no download.${RESET}"; sleep 2; return 1
+    fi
 
-    [ -s "$install_script" ] || { echo -e "${TXT_RED}❌ Arquivo vazio.${RESET}"; return 1; }
+    if [ ! -s "$install_script" ]; then
+        echo -e "${TXT_RED}❌ Arquivo vazio.${RESET}"; return 1
+    fi
 
-    _verify_sha256 "$install_script" "$sha_url" "install-release.sh" || {
-        rm -f "$install_script"; sleep 2; return 1; }
+    if ! _verify_sha256 "$install_script" "$sha_url" "install-release.sh"; then
+        rm -f "$install_script"; sleep 2; return 1
+    fi
 
-    local hb; hb=$(head -c 12 "$install_script")
-    [[ "$hb" == "#!/bin/bash"* ]] || [[ "$hb" == "#!/usr/bin/e"* ]] || {
-        echo -e "${TXT_RED}❌ Script inválido.${RESET}"; rm -f "$install_script"; return 1; }
+    if ! head -n 1 "$install_script" | grep -qE "bash|env"; then
+        echo -e "${TXT_RED}❌ Script inválido.${RESET}"; rm -f "$install_script"; return 1
+    fi
 
     chmod +x "$install_script"
     bash "$install_script" install
@@ -178,16 +194,18 @@ func_xray_cert() {
     ensure_cmd curl curl
 
     local tmp; tmp=$(mktemp /tmp/certxray_XXXXXX)
-    curl -fLsS --retry 3 --retry-delay 2 --max-time 60 --connect-timeout 10 \
-        -o "$tmp" "$CERT_SCRIPT_URL" 2>>"$LOG_FILE" || {
-        echo -e "${TXT_RED}❌ Erro ao baixar certxray.sh${RESET}"; rm -f "$tmp"; return 1; }
+    if ! curl -fLsS --retry 3 --retry-delay 2 --max-time 60 --connect-timeout 10 \
+        -o "$tmp" "$CERT_SCRIPT_URL" 2>>"$LOG_FILE"; then
+        echo -e "${TXT_RED}❌ Erro ao baixar certxray.sh${RESET}"; rm -f "$tmp"; return 1
+    fi
 
-    _verify_sha256 "$tmp" "${CERT_SCRIPT_URL}.sha256" "certxray.sh" || {
-        rm -f "$tmp"; return 1; }
+    if ! _verify_sha256 "$tmp" "${CERT_SCRIPT_URL}.sha256" "certxray.sh"; then
+        rm -f "$tmp"; return 1
+    fi
 
-    local hb; hb=$(head -c 12 "$tmp")
-    [[ "$hb" == "#!/bin/bash"* ]] || [[ "$hb" == "#!/usr/bin/e"* ]] || {
-        echo -e "${TXT_RED}❌ certxray.sh inválido.${RESET}"; rm -f "$tmp"; return 1; }
+    if ! head -n 1 "$tmp" | grep -qE "bash|env"; then
+        echo -e "${TXT_RED}❌ certxray.sh inválido.${RESET}"; rm -f "$tmp"; return 1
+    fi
 
     mv -f "$tmp" "$cert_script"
     chmod 0755 "$cert_script"
@@ -201,17 +219,19 @@ func_generate_config() {
     mkdir -p "$(dirname "$CONFIG_PATH")" "$XRAYTOOLS_DIR" "$SSL_DIR"
 
     if [ "$use_tls" = "true" ]; then
-        { [ -s "$CRT_FILE" ] && [ -s "$KEY_FILE" ]; } || {
+        if [ ! -s "$CRT_FILE" ] || [ ! -s "$KEY_FILE" ]; then
             echo -e "${TXT_RED}❌ Certificado não encontrado: $CRT_FILE / $KEY_FILE${RESET}"
-            read -rp "Pressione Enter..."; return 1; }
+            read -rp "Pressione Enter..."; return 1
+        fi
     fi
 
     if port_in_use "$api_port"; then
         echo -e "${TXT_YELLOW}⚠  Porta API ${api_port} em uso. Tentando 10800...${RESET}"
         api_port="10800"
-        port_in_use "$api_port" && {
+        if port_in_use "$api_port"; then
             echo -e "${TXT_RED}❌ Porta 10800 também em uso.${RESET}"
-            read -rp "Pressione Enter..."; return 1; }
+            read -rp "Pressione Enter..."; return 1
+        fi
     fi
 
     local policy='{"levels":{"0":{"statsUserUplink":true,"statsUserDownlink":true}},"system":{"statsInboundUplink":true,"statsInboundDownlink":true}}'
@@ -248,7 +268,9 @@ func_generate_config() {
     esac
 
     local uuid; uuid=$(generate_uuid)
-    [ -n "$uuid" ] || { echo -e "${TXT_RED}❌ Falha ao gerar UUID.${RESET}"; return 1; }
+    if [ -z "$uuid" ]; then
+        echo -e "${TXT_RED}❌ Falha ao gerar UUID.${RESET}"; return 1
+    fi
 
     local clients_json
     if [ "$network" = "vision" ]; then
@@ -257,7 +279,9 @@ func_generate_config() {
         clients_json=$(jq -n --arg uuid "$uuid" '[{"id":$uuid,"level":0}]')
     fi
 
-    [ -f "$CONFIG_PATH" ] && cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
+    if [ -f "$CONFIG_PATH" ]; then
+        cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
+    fi
 
     local tmp_config; tmp_config=$(mktemp /tmp/xray_config_XXXXXX.json)
 
@@ -271,12 +295,12 @@ func_generate_config() {
         '{log:{loglevel:"warning"},stats:{},api:{services:["HandlerService","LoggerService","StatsService"],tag:"api"},policy:$pol,inbounds:[{tag:"api",port:($api|tonumber),protocol:"dokodemo-door",settings:{address:"127.0.0.1"},listen:"127.0.0.1"},{tag:"inbound-dragoncore",port:($port|tonumber),protocol:"vless",settings:{clients:$clients,decryption:"none",fallbacks:[]},streamSettings:$stream}],outbounds:[{protocol:"freedom",tag:"direct"},{protocol:"blackhole",tag:"blocked"},{protocol:"freedom",tag:"api"}],routing:{domainStrategy:"AsIs",rules:$rules}}' \
         > "$tmp_config"
 
-    jq empty "$tmp_config" 2>/dev/null || {
-        echo -e "${TXT_RED}❌ Config JSON inválido.${RESET}"; rm -f "$tmp_config"; return 1; }
+    if ! jq empty "$tmp_config" 2>/dev/null; then
+        echo -e "${TXT_RED}❌ Config JSON inválido.${RESET}"; rm -f "$tmp_config"; return 1
+    fi
 
     mv -f "$tmp_config" "$CONFIG_PATH"
 
-    # CORREÇÃO CRÍTICA: 0640 root:nogroup — nobody precisa ler, outros não
     _apply_config_perms
 
     jq -n --arg network "$network" --arg port "$port" --arg domain "$domain" --arg tls "$use_tls" \
@@ -287,25 +311,33 @@ func_generate_config() {
     echo "$domain" > "$ACTIVE_DOMAIN_FILE"
 
     echo -e "Reiniciando Xray..."
-    systemctl restart xray >>"$LOG_FILE" 2>&1 || {
+    if ! systemctl restart xray >>"$LOG_FILE" 2>&1; then
         echo -e "${TXT_RED}❌ Falha ao reiniciar Xray:${RESET}"
         journalctl -u xray -n 25 --no-pager 2>/dev/null || true
-        [ -f "${CONFIG_PATH}.bak" ] && mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH" && _apply_config_perms
-        read -rp "Pressione Enter..."; return 1; }
+        if [ -f "${CONFIG_PATH}.bak" ]; then
+            mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+            _apply_config_perms
+        fi
+        read -rp "Pressione Enter..."; return 1
+    fi
     sleep 2
 
     header_blue "CONFIGURAÇÃO CONCLUÍDA (V7.8)"
 
     local status_show="${TXT_RED}FALHA${RESET}"
-    systemctl is-active --quiet xray 2>/dev/null && status_show="${TXT_GREEN}ATIVO${RESET}"
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        status_show="${TXT_GREEN}ATIVO${RESET}"
+    fi
 
     local tls_msg="${TXT_RED}DESATIVADO${RESET}"
-    [ "$use_tls" = "true" ] && tls_msg="${TXT_GREEN}ATIVADO (TLS 1.2+)${RESET}"
+    if [ "$use_tls" = "true" ]; then
+        tls_msg="${TXT_GREEN}ATIVADO (TLS 1.2+)${RESET}"
+    fi
 
     echo -e "STATUS: $status_show"
     echo ""
     echo "========================================="
-    echo -e " ${TXT_YELLOW}PROTOCOLO:${RESET}     ${TXT_CYAN}${network^^}${RESET}"
+    echo -e " ${TXT_YELLOW}PROTOCOLO:${RESET}   ${TXT_CYAN}${network^^}${RESET}"
     echo -e " ${TXT_YELLOW}DOMÍNIO/SNI:${RESET}   ${TXT_CYAN}${domain}${RESET}"
     echo -e " ${TXT_YELLOW}PORTA:${RESET}         ${TXT_CYAN}${port}${RESET}"
     echo -e " ${TXT_YELLOW}API INTERNA:${RESET}   ${TXT_CYAN}127.0.0.1:${api_port}${RESET}"
@@ -314,7 +346,9 @@ func_generate_config() {
     echo ""
 
     local sec="none"
-    [ "$use_tls" = "true" ] && sec="tls"
+    if [ "$use_tls" = "true" ]; then
+        sec="tls"
+    fi
 
     local link=""
     case "$network" in
@@ -355,7 +389,9 @@ func_wizard_install() {
     header_blue "PASSO 1/5 — INSTALAÇÃO DO CORE"
     echo -e "${TXT_YELLOW}Deseja instalar/atualizar o Xray Core?${RESET}"
     read -rp "[s] Sim / [n] Não: " inst
-    [[ "$inst" =~ ^[Ss]$ ]] && { func_install_official_core || true; }
+    if [[ "$inst" =~ ^[Ss]$ ]]; then
+        func_install_official_core || true
+    fi
 
     header_blue "PASSO 2/5 — CRIPTOGRAFIA (TLS)"
     echo -e "${TXT_YELLOW}Deseja usar TLS?${RESET}"
@@ -363,17 +399,30 @@ func_wizard_install() {
     echo " [2] NÃO — Sem TLS (porta 80)"
     read -rp "Opção [1/2]: " tls_opt
     local use_tls="false"
-    [ "${tls_opt:-2}" = "1" ] && use_tls="true"
+    if [ "${tls_opt:-2}" = "1" ]; then
+        use_tls="true"
+    fi
 
     header_blue "PASSO 3/5 — PORTA DE CONEXÃO"
-    [ "$use_tls" = "true" ] && echo -e "Sugestões: ${TXT_CYAN}443, 8443, 2053${RESET}" || echo -e "Sugestões: ${TXT_CYAN}80, 8080, 8880${RESET}"
+    if [ "$use_tls" = "true" ]; then
+        echo -e "Sugestões: ${TXT_CYAN}443, 8443, 2053${RESET}"
+    else
+        echo -e "Sugestões: ${TXT_CYAN}80, 8080, 8880${RESET}"
+    fi
     read -rp "Porta [Enter = padrão]: " pub_port
-    [ -z "${pub_port:-}" ] && { [ "$use_tls" = "true" ] && pub_port="443" || pub_port="80"; }
-    validate_port "$pub_port" || { echo -e "${TXT_RED}❌ Porta inválida.${RESET}"; read -rp "Enter..."; return 1; }
+    
+    if [ -z "${pub_port:-}" ]; then
+        if [ "$use_tls" = "true" ]; then pub_port="443"; else pub_port="80"; fi
+    fi
+    
+    if ! validate_port "$pub_port"; then
+        echo -e "${TXT_RED}❌ Porta inválida.${RESET}"; read -rp "Enter..."; return 1
+    fi
+    
     if port_in_use "$pub_port"; then
         echo -e "${TXT_RED}⚠  Porta ${pub_port} em uso.${RESET}"
         read -rp "Continuar mesmo assim? [s/N]: " force
-        [[ "${force:-n}" =~ ^[Ss]$ ]] || return 1
+        if [[ ! "${force:-n}" =~ ^[Ss]$ ]]; then return 1; fi
     fi
 
     header_blue "PASSO 4/5 — DOMÍNIO / ENDEREÇO"
@@ -383,12 +432,17 @@ func_wizard_install() {
     if [ "$use_tls" = "true" ]; then
         echo -e "${TXT_YELLOW}Digite o domínio (ex: meusite.com):${RESET}"
         read -rp "Domínio: " domain_val
-        validate_domain "$domain_val" || { echo -e "${TXT_RED}❌ Domínio inválido.${RESET}"; read -rp "Enter..."; return 1; }
+        if ! validate_domain "$domain_val"; then
+            echo -e "${TXT_RED}❌ Domínio inválido.${RESET}"; read -rp "Enter..."; return 1
+        fi
 
-        func_xray_cert "$domain_val" || { echo -e "${TXT_RED}❌ Falha no certificado.${RESET}"; read -rp "Enter..."; return 1; }
+        if ! func_xray_cert "$domain_val"; then
+            echo -e "${TXT_RED}❌ Falha no certificado.${RESET}"; read -rp "Enter..."; return 1
+        fi
 
-        { [ -s "$CRT_FILE" ] && [ -s "$KEY_FILE" ]; } || {
-            echo -e "${TXT_RED}❌ Certificado não gerado.${RESET}"; read -rp "Enter..."; return 1; }
+        if [ ! -s "$CRT_FILE" ] || [ ! -s "$KEY_FILE" ]; then
+            echo -e "${TXT_RED}❌ Certificado não gerado.${RESET}"; read -rp "Enter..."; return 1
+        fi
     else
         echo -e "${TXT_YELLOW}IP da VPS ou domínio (sem TLS):${RESET}"
         read -rp "Endereço [Enter = detectar IP]: " domain_val
@@ -398,18 +452,20 @@ func_wizard_install() {
                          curl -fsSL --max-time 10 "https://api.ipify.org"  2>/dev/null || echo "")
             echo "${domain_val:-falhou}"
         fi
-        validate_domain_or_ip "$domain_val" || { echo -e "${TXT_RED}❌ Endereço inválido.${RESET}"; read -rp "Enter..."; return 1; }
+        if ! validate_domain_or_ip "$domain_val"; then
+            echo -e "${TXT_RED}❌ Endereço inválido.${RESET}"; read -rp "Enter..."; return 1
+        fi
     fi
 
     mkdir -p "$XRAYTOOLS_DIR"
     echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
 
     header_blue "PASSO 5/5 — PROTOCOLO"
-    echo " [1] WS      — Websocket"
-    echo " [2] GRPC    — gRPC"
-    echo " [3] XHTTP   — Otimizado (recomendado)"
-    echo " [4] TCP     — TCP simples"
-    echo " [5] VISION  — XTLS Vision (exige TLS)"
+    echo " [1] WS     — Websocket"
+    echo " [2] GRPC   — gRPC"
+    echo " [3] XHTTP  — Otimizado (recomendado)"
+    echo " [4] TCP    — TCP simples"
+    echo " [5] VISION — XTLS Vision (exige TLS)"
     read -rp "Opção [1-5]: " prot_opt
 
     local selected_net=""
@@ -422,8 +478,9 @@ func_wizard_install() {
         *) echo -e "${TXT_RED}❌ Opção inválida.${RESET}"; read -rp "Enter..."; return 1 ;;
     esac
 
-    [ "$selected_net" = "vision" ] && [ "$use_tls" = "false" ] && {
-        echo -e "${TXT_RED}❌ Vision exige TLS.${RESET}"; read -rp "Enter..."; return 1; }
+    if [ "$selected_net" = "vision" ] && [ "$use_tls" = "false" ]; then
+        echo -e "${TXT_RED}❌ Vision exige TLS.${RESET}"; read -rp "Enter..."; return 1
+    fi
 
     header_blue "RESUMO DA CONFIGURAÇÃO"
     echo "========================================="
@@ -434,7 +491,10 @@ func_wizard_install() {
     echo "========================================="
     echo ""
     read -rp "Confirmar e aplicar? [s/N]: " confirm
-    [[ "${confirm:-n}" =~ ^[Ss]$ ]] || { echo "Cancelado."; sleep 1; return 0; }
+    
+    if [[ ! "${confirm:-n}" =~ ^[Ss]$ ]]; then
+        echo "Cancelado."; sleep 1; return 0
+    fi
 
     func_generate_config "$pub_port" "$selected_net" "$domain_val" "1080" "$use_tls"
 }
