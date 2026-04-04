@@ -89,8 +89,8 @@ ensure_ssl_dir() {
 apply_perms() {
     ensure_ssl_dir || return 1
     chown -R "$XRAY_USER:$XRAY_GROUP" "$SSL_DIR" 2>/dev/null || true
-    chmod 750 "$SSL_DIR" 2>/dev/null || true
-    chmod 640 "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" 2>/dev/null || true
+    chmod 777 "$SSL_DIR" 2>/dev/null || true
+    chmod 777 "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" 2>/dev/null || true
 }
 
 # --- BACKUP DOS CERTS ATUAIS ---
@@ -179,8 +179,8 @@ mkdir -p "${SSL_DIR}"
 cp -f "${LE_DIR}/fullchain.pem" "${SSL_DIR}/fullchain.pem"
 cp -f "${LE_DIR}/privkey.pem"   "${SSL_DIR}/privkey.pem"
 chown -R ${XRAY_USER}:${XRAY_GROUP} "${SSL_DIR}" 2>/dev/null || true
-chmod 750 "${SSL_DIR}" 2>/dev/null || true
-chmod 640 "${SSL_DIR}/fullchain.pem" "${SSL_DIR}/privkey.pem" 2>/dev/null || true
+chmod 777 "${SSL_DIR}" 2>/dev/null || true
+chmod 777 "${SSL_DIR}/fullchain.pem" "${SSL_DIR}/privkey.pem" 2>/dev/null || true
 
 systemctl restart xray >/dev/null 2>&1 || true
 sleep 3
@@ -195,7 +195,7 @@ fi
 echo "Renovação concluída com sucesso." >> "\$LOG"
 RENEW_EOF
 
-    chmod 0700 "$RENEW_SCRIPT"
+    chmod 777 "$RENEW_SCRIPT"
     chown root:root "$RENEW_SCRIPT"
 
     # Agenda cron mensal sem duplicatas
