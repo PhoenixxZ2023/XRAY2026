@@ -60,7 +60,7 @@ _refresh_status_cache() {
     if (( now - _STATUS_CACHE_TIME >= _STATUS_CACHE_TTL )); then
         _CACHED_XRAY_ACTIVE=$(systemctl is-active xray 2>/dev/null || echo "inactive")
         _CACHED_BOT_ACTIVE=$(systemctl is-active botxray 2>/dev/null || echo "inactive")
-        _CACHED_USERS=$(wc -l < "$USER_DB" 2>/dev/null || echo "0")
+        _CACHED_USERS=$([ -f "$USER_DB" ] && wc -l < "$USER_DB" 2>/dev/null || echo "0")
         _CACHED_NET=""
         _CACHED_PORT=""
         if [ "$_CACHED_XRAY_ACTIVE" = "active" ]; then
