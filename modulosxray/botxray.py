@@ -1,9 +1,6 @@
 """
-botxray.py - DragonCore Telegram Bot V7.5
-Correções: token/admin via os.environ (não hardcoded), sudo sem bash,
-           load_config com try/except, IP via HTTPS, tempfile seguro,
-           UUID truncado na lista, validação de intervalo de dias,
-           backup deletado só após confirmação de envio, log configurável.
+botxray.py - DragonCore Telegram Bot V7.5.4
+Correções: Compatibilidade de Tipagem para Python 3.8 (Ubuntu 20.04).
 """
 
 import os
@@ -24,8 +21,7 @@ from telegram.ext import (
 )
 import io
 
-# --- CONFIGURAÇÃO VIA VARIÁVEIS DE AMBIENTE (EnvironmentFile no systemd) ---
-# Nunca hardcode token ou admin_id aqui — use /opt/XrayTools/.bot_env
+# --- CONFIGURAÇÃO VIA VARIÁVEIS DE AMBIENTE ---
 _missing = []
 _token = os.environ.get("BOT_TOKEN", "")
 _admin  = os.environ.get("ADMIN_ID", "")
@@ -41,18 +37,18 @@ if _missing:
     )
 
 try:
-    ADMIN_ID: int = int(_admin)
+    ADMIN_ID = int(_admin)
 except ValueError:
     raise EnvironmentError(f"ADMIN_ID deve ser um número inteiro, obtido: '{_admin}'")
 
-BOT_TOKEN: str = _token
+BOT_TOKEN = _token
 
 # --- CAMINHOS ---
 CONFIG_PATH  = "/usr/local/etc/xray/config.json"
 USER_DB      = "/opt/XrayTools/users.db"
 XRAY_SERVICE = "xray"
 
-# Scripts chamados via sudo (sem /bin/bash — sudoers autoriza o script diretamente)
+# Scripts chamados via sudo
 SCRIPTS = {
     "create":  "/usr/local/bin/add_user.sh",
     "delete":  "/usr/local/bin/remover_user.sh",
@@ -75,7 +71,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# RotatingFileHandler opcional
 _log_file = os.environ.get("LOG_FILE", "")
 if _log_file:
     try:
@@ -98,13 +93,11 @@ if _log_file:
     WAIT_RESTORE_FILE,
 ) = range(7)
 
-
 # ─────────────────────────────────────────────
 # FUNÇÕES DE SISTEMA
 # ─────────────────────────────────────────────
 
-def load_config() -> dict | None:
-    """Lê e parseia config.json com tratamento de erro explícito."""
+def load_config():
     if not os.path.exists(CONFIG_PATH):
         logger.warning("config.json não encontrado: %s", CONFIG_PATH)
         return None
@@ -118,14 +111,10 @@ def load_config() -> dict | None:
         logger.error("Erro ao ler config.json: %s", e)
         return None
 
-
-def get_ip() -> str:
-    """Obtém IP público via HTTPS com timeout e fallback."""
+def get_ip():
     sources = [
-        ["curl", "-4", "-fsSL", "--max-time", "10", "--connect-timeout", "5",
-         "https://icanhazip.com"],
-        ["curl", "-4", "-fsSL", "--max-time", "10", "--connect-timeout", "5",
-         "https://api.ipify.org"],
+        ["curl", "-4", "-fsSL", "--max-time", "10", "--connect-timeout", "5", "https://icanhazip.com"],
+        ["curl", "-4", "-fsSL", "--max-time", "10", "--connect-timeout", "5", "https://api.ipify.org"],
     ]
     for cmd in sources:
         try:
@@ -136,9 +125,7 @@ def get_ip() -> str:
             continue
     return "127.0.0.1"
 
-
-def read_uuid_from_db(nick: str) -> str | None:
-    """Lê UUID do users.db para um nick específico."""
+def read_uuid_from_db(nick):
     try:
         if not os.path.exists(USER_DB):
             return None
@@ -152,18 +139,14 @@ def read_uuid_from_db(nick: str) -> str | None:
         logger.error("Erro ao ler users.db: %s", e)
     return None
 
-
 # ─────────────────────────────────────────────
 # EXECUÇÃO DE SCRIPTS VIA SUDO
-# Chamada direta ao script — sem "bash" no meio
-# (consistente com sudoers que autoriza o script diretamente)
 # ─────────────────────────────────────────────
 
-def run_script(path: str, input_text: str = "", timeout: int = 180) -> tuple[int, str]:
-    """Executa script via sudo com stdin. Sem /bin/bash prefixado."""
+def run_script(path, input_text="", timeout=180):
     try:
         p = subprocess.run(
-            ["sudo", "-n", path],          # sem "bash" — sudo autoriza o script diretamente
+            ["sudo", "-n", path],
             input=input_text.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -178,12 +161,10 @@ def run_script(path: str, input_text: str = "", timeout: int = 180) -> tuple[int
         logger.exception("Erro em run_script(%s)", path)
         return 1, f"Erro ao executar script: {e}"
 
-
-def run_script_args(path: str, args: list[str], timeout: int = 300) -> tuple[int, str]:
-    """Executa script via sudo com argumentos posicionais. Sem /bin/bash."""
+def run_script_args(path, args, timeout=300):
     try:
         p = subprocess.run(
-            ["sudo", "-n", path] + args,   # sem "bash"
+            ["sudo", "-n", path] + args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
@@ -197,12 +178,11 @@ def run_script_args(path: str, args: list[str], timeout: int = 300) -> tuple[int
         logger.exception("Erro em run_script_args(%s)", path)
         return 1, f"Erro ao executar script: {e}"
 
-
 # ─────────────────────────────────────────────
 # GERADOR DE LINK VLESS
 # ─────────────────────────────────────────────
 
-def generate_link(client_uuid: str | None, client_email: str) -> str:
+def generate_link(client_uuid, client_email):
     try:
         data = load_config()
         if not data:
@@ -280,12 +260,11 @@ def generate_link(client_uuid: str | None, client_email: str) -> str:
         logger.exception("Erro em generate_link")
         return f"Erro Link: {e}"
 
-
 # ─────────────────────────────────────────────
 # FUNÇÕES CORE
 # ─────────────────────────────────────────────
 
-def core_create_user(nick: str, days: str) -> tuple[bool, str]:
+def core_create_user(nick, days):
     code, out = run_script(SCRIPTS["create"], f"{nick}\n{days}\n\n", timeout=120)
     if code == 0:
         user_uuid = read_uuid_from_db(nick)
@@ -295,426 +274,15 @@ def core_create_user(nick: str, days: str) -> tuple[bool, str]:
             f"✅ *Usuário Criado!*\n\n"
             f"👤 `{nick}`\n📅 `{expiry}`\n\n🔗 *Link VLESS:*\n`{link}`"
         )
-    return False, f"❌ Falha ao criar usuário.\n\n```\n{out[-1500:]}\n```"
-
-
-def core_delete_user(nick: str) -> str:
-    code, out = run_script(SCRIPTS["delete"], f"{nick}\ns\n", timeout=60)
-    if code == 0:
-        return f"✅ Usuário `{nick}` removido.\n\n```\n{out[-1200:]}\n```"
-    return f"❌ Falha ao remover.\n\n```\n{out[-1200:]}\n```"
-
-
-def core_block_user(nick: str) -> str:
-    code, out = run_script(SCRIPTS["block"], f"{nick}\ns\n", timeout=60)
-    if code == 0:
-        return f"⛔ Usuário `{nick}` SUSPENSO.\n\n```\n{out[-1200:]}\n```"
-    return f"❌ Falha ao suspender.\n\n```\n{out[-1200:]}\n```"
-
-
-def core_unblock_user(nick: str) -> str:
-    code, out = run_script(SCRIPTS["unblock"], f"{nick}\ns\n", timeout=60)
-    if code == 0:
-        return f"✅ Usuário `{nick}` REATIVADO.\n\n```\n{out[-1200:]}\n```"
-    return f"❌ Falha ao reativar.\n\n```\n{out[-1200:]}\n```"
-
-
-def core_list_users_text() -> str:
-    """Lista usuários com UUID truncado — não expõe credenciais completas."""
-    if not os.path.exists(USER_DB):
-        return "Nenhum usuário cadastrado."
-
-    locked_users: set[str] = set()
-    data = load_config()
-    if data:
-        inbounds = data.get("inbounds", [])
-        target   = next((i for i in inbounds if i.get("tag") == "inbound-dragoncore"), None)
-        if target:
-            for c in target.get("settings", {}).get("clients", []):
-                email = c.get("email", "")
-                if isinstance(email, str) and email.startswith("LOCKED_"):
-                    locked_users.add(email.replace("LOCKED_", "", 1))
-
-    lines  = ["LISTA DE USUÁRIOS - DRAGONCORE"]
-    lines += ["=" * 65]
-    lines += [f"{'NOME':<14} | {'VENCIMENTO':<11} | {'UUID (resumido)':<18} | STATUS"]
-    lines += ["=" * 65]
-    lines += ["(UUIDs completos disponíveis em /opt/XrayTools/users/<nick>.txt no servidor)"]
-    lines += ["-" * 65]
-
-    try:
-        with open(USER_DB, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                parts = line.strip().split("|")
-                if len(parts) >= 3:
-                    nick       = parts[0]
-                    uuid_full  = parts[1]
-                    expiry     = parts[2]
-                    # UUID truncado: primeiros 8 + últimos 4
-                    uuid_short = f"{uuid_full[:8]}...{uuid_full[-4:]}" if len(uuid_full) >= 12 else uuid_full
-                    status     = "⛔" if nick in locked_users else "✅"
-                    lines.append(f"{nick:<14} | {expiry:<11} | {uuid_short:<18} | {status}")
-    except OSError as e:
-        lines.append(f"Erro ao ler users.db: {e}")
-
-    return "\n".join(lines)
-
-
-# ─────────────────────────────────────────────
-# HELPERS DO TELEGRAM
-# ─────────────────────────────────────────────
-
-def is_admin(update: Update) -> bool:
-    return bool(update.effective_user and update.effective_user.id == ADMIN_ID)
-
-
-def build_menu() -> InlineKeyboardMarkup:
-    keyboard = [
-        [InlineKeyboardButton("👤 CRIAR",     callback_data="create_start"),
-         InlineKeyboardButton("🗑️ REMOVER",  callback_data="delete_start")],
-        [InlineKeyboardButton("⛔ SUSPENDER", callback_data="block_start"),
-         InlineKeyboardButton("✅ REATIVAR",  callback_data="unblock_start")],
-        [InlineKeyboardButton("📋 LISTAR",    callback_data="list_users"),
-         InlineKeyboardButton("📥 BACKUP",    callback_data="backup_start")],
-        [InlineKeyboardButton("♻️ RESTORE",   callback_data="restore_start"),
-         InlineKeyboardButton("❌ SAIR",       callback_data="cancel")],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-# ─────────────────────────────────────────────
-# HANDLERS
-# ─────────────────────────────────────────────
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    context.user_data.clear()
-    await update.message.reply_text(
-        "🐉 *PAINEL DRAGONCORE V7.5*",
-        reply_markup=build_menu(),
-        parse_mode="Markdown",
-    )
-    return SELECTING_ACTION
-
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "close_file":
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        return SELECTING_ACTION
-
-    if query.data == "cancel":
-        await query.edit_message_text("Painel Fechado.", reply_markup=None)
-        return ConversationHandler.END
-
-    if query.data == "create_start":
-        await query.edit_message_text("Nome do usuário (5-9 letras/números):")
-        return GET_USERNAME_CREATE
-
-    if query.data == "delete_start":
-        await query.edit_message_text("Nome para remover:")
-        return GET_USER_TO_DELETE
-
-    if query.data == "block_start":
-        await query.edit_message_text("Nome para ⛔ SUSPENDER:")
-        return GET_USER_TO_BLOCK
-
-    if query.data == "unblock_start":
-        await query.edit_message_text("Nome para ✅ REATIVAR:")
-        return GET_USER_TO_UNBLOCK
-
-    if query.data == "list_users":
-        report = core_list_users_text()
-        f = io.BytesIO(report.encode("utf-8"))
-        f.name = "usuarios.txt"
-        close_btn = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🗑 Fechar Lista", callback_data="close_file")]]
-        )
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=f,
-            caption="📂 *Lista gerada* (UUIDs truncados por segurança)",
-            parse_mode="Markdown",
-            reply_markup=close_btn,
-        )
-        await query.edit_message_text(
-            "✅ *Lista enviada!*",
-            parse_mode="Markdown",
-            reply_markup=build_menu(),
-        )
-        return SELECTING_ACTION
-
-    if query.data == "backup_start":
-        await query.edit_message_text("📦 Gerando Backup...")
-        code, out = run_script(SCRIPTS["backup"], "", timeout=180)
-        if code != 0:
-            await query.edit_message_text(
-                f"❌ Falha ao criar backup.\n\n```\n{out[-1200:]}\n```",
-                reply_markup=build_menu(),
-                parse_mode="Markdown",
-            )
-            return SELECTING_ACTION
-
-        bkp_file = out.strip().splitlines()[-1].strip()
-        if not os.path.exists(bkp_file):
-            await query.edit_message_text(
-                "❌ Arquivo de backup não encontrado.",
-                reply_markup=build_menu(),
-            )
-            return SELECTING_ACTION
-
-        close_btn = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🗑 Fechar Backup", callback_data="close_file")]]
-        )
-        send_ok = False
-        try:
-            with open(bkp_file, "rb") as fobj:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=fobj,
-                    filename=os.path.basename(bkp_file),
-                    caption="🔐 *Backup do Sistema*",
-                    parse_mode="Markdown",
-                    reply_markup=close_btn,
-                )
-            send_ok = True
-        except Exception as e:
-            logger.error("Falha ao enviar backup via Telegram: %s", e)
-            await query.edit_message_text(
-                f"❌ Backup criado mas falhou ao enviar: {e}",
-                reply_markup=build_menu(),
-            )
-
-        # Só remove o arquivo local após confirmação de envio bem-sucedido
-        if send_ok:
-            try:
-                os.remove(bkp_file)
-            except Exception:
-                pass
-            await query.edit_message_text(
-                "✅ *Backup enviado!*",
-                parse_mode="Markdown",
-                reply_markup=build_menu(),
-            )
-
-        return SELECTING_ACTION
-
-    if query.data == "restore_start":
-        warn = (
-            "♻️ *RESTORE*\n\n"
-            f"Envie o arquivo `backup_dragoncore_XXXX.tar.gz`.\n"
-            f"• Somente `.tar.gz`  •  Máx: {MAX_RESTORE_MB} MB\n\n"
-            "_Atenção: restaura config/usuários/SSL e reinicia serviços._"
-        )
-        await query.edit_message_text(warn, parse_mode="Markdown")
-        return WAIT_RESTORE_FILE
-
-    await query.edit_message_text("OK.", reply_markup=build_menu())
-    return SELECTING_ACTION
-
-
-async def unexpected_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    return await button_handler(update, context)
-
-
-async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return SELECTING_ACTION
-    if not update.message:
-        return WAIT_RESTORE_FILE
-
-    doc = update.message.document
-    if not doc:
-        await update.message.reply_text(
-            "Envie um arquivo `.tar.gz` (backup).",
-            reply_markup=build_menu(),
-        )
-        return SELECTING_ACTION
-
-    filename = (doc.file_name or "").strip()
-    if not filename.endswith(ALLOWED_EXT):
-        await update.message.reply_text("❌ Apenas arquivos `.tar.gz`.", reply_markup=build_menu())
-        return SELECTING_ACTION
-
-    if doc.file_size and doc.file_size > (MAX_RESTORE_MB * 1024 * 1024):
-        await update.message.reply_text(
-            f"❌ Arquivo muito grande (máx {MAX_RESTORE_MB} MB).",
-            reply_markup=build_menu(),
-        )
-        return SELECTING_ACTION
-
-    await update.message.reply_text("⬇️ Baixando backup...")
-
-    # Arquivo temporário com permissão restrita — não world-readable
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tar.gz", prefix="restore_")
-    os.close(tmp_fd)
-    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
-
-    try:
-        tg_file = await doc.get_file()
-        await tg_file.download_to_drive(custom_path=tmp_path)
-
-        await update.message.reply_text("⚙️ Restaurando... (pode reiniciar serviços)")
-        code, out = run_script_args(SCRIPTS["restore"], [tmp_path], timeout=300)
-
-        if code == 0 and "OK" in out:
-            await update.message.reply_text(
-                "✅ RESTORE concluído com sucesso.",
-                reply_markup=build_menu(),
-            )
-        else:
-            await update.message.reply_text(
-                f"❌ Falha no RESTORE.\n\n```\n{out[-1500:]}\n```",
-                parse_mode="Markdown",
-                reply_markup=build_menu(),
-            )
-
-    except Exception as e:
-        logger.exception("Erro no restore_file_handler")
-        await update.message.reply_text(
-            f"❌ Erro no RESTORE: {e}",
-            reply_markup=build_menu(),
-        )
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
-
-    return SELECTING_ACTION
-
-
-async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str):
-    if not is_admin(update):
-        return
-    if not update.message or not update.message.text:
-        return
-
-    text = update.message.text.strip().split()[0]
-
-    if mode == "create_nick":
-        if not re.match(r"^[a-zA-Z0-9]{5,9}$", text):
-            await update.message.reply_text(
-                "❌ *Nome inválido!*\n\n• 5-9 caracteres\n• Apenas letras e números\n\nTente novamente:",
-                parse_mode="Markdown",
-            )
-            return GET_USERNAME_CREATE
-        context.user_data["nick"] = text
-        await update.message.reply_text(
-            f"Validade (dias) para `{text}` [{MIN_DAYS}-{MAX_DAYS}]:",
-            parse_mode="Markdown",
-        )
-        return GET_EXPIRY_DAYS_CREATE
-
-    if mode == "create_days":
-        if not text.isdigit():
-            await update.message.reply_text(f"Apenas números ({MIN_DAYS}-{MAX_DAYS}).")
-            return GET_EXPIRY_DAYS_CREATE
-        days_int = int(text)
-        if not (MIN_DAYS <= days_int <= MAX_DAYS):
-            await update.message.reply_text(
-                f"❌ Validade deve ser entre {MIN_DAYS} e {MAX_DAYS} dias."
-            )
-            return GET_EXPIRY_DAYS_CREATE
-        res, msg = core_create_user(context.user_data["nick"], text)
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu())
-        return SELECTING_ACTION
-
-    if mode == "delete":
-        msg = core_delete_user(text)
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu())
-        return SELECTING_ACTION
-
-    if mode == "block":
-        msg = core_block_user(text)
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu())
-        return SELECTING_ACTION
-
-    if mode == "unblock":
-        msg = core_unblock_user(text)
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu())
-        return SELECTING_ACTION
-
-
-# Wrappers para o ConversationHandler
-async def h_create_nick(u, c): return await input_handler(u, c, "create_nick")
-async def h_create_days(u, c): return await input_handler(u, c, "create_days")
-async def h_delete(u, c):      return await input_handler(u, c, "delete")
-async def h_block(u, c):       return await input_handler(u, c, "block")
-async def h_unblock(u, c):     return await input_handler(u, c, "unblock")
-
-
-async def cancel_op(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message:
-        await update.message.reply_text("Cancelado.", reply_markup=build_menu())
-    return SELECTING_ACTION
-
-
-# ─────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────
-
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start),
-            CommandHandler("menu",  start),
-        ],
-        states={
-            SELECTING_ACTION: [CallbackQueryHandler(button_handler)],
-            GET_USERNAME_CREATE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, h_create_nick),
-                CallbackQueryHandler(unexpected_button),
-            ],
-            GET_EXPIRY_DAYS_CREATE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, h_create_days),
-                CallbackQueryHandler(unexpected_button),
-            ],
-            GET_USER_TO_DELETE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, h_delete),
-                CallbackQueryHandler(unexpected_button),
-            ],
-            GET_USER_TO_BLOCK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, h_block),
-                CallbackQueryHandler(unexpected_button),
-            ],
-            GET_USER_TO_UNBLOCK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, h_unblock),
-                CallbackQueryHandler(unexpected_button),
-            ],
-            WAIT_RESTORE_FILE: [
-                MessageHandler(filters.Document.ALL, restore_file_handler),
-                CallbackQueryHandler(unexpected_button),
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
-                    lambda u, c: u.message.reply_text(
-                        "Envie um arquivo `.tar.gz`.", reply_markup=build_menu()
-                    ),
-                ),
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_op)],
-        allow_reentry=True,
-    )
-
-    app.add_handler(conv)
-    logger.info("DragonCore Bot V7.5 iniciado. Admin ID: %d", ADMIN_ID)
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+    return False, f"❌ Falha ao criar usuário.\n\n
+http://googleusercontent.com/immersive_entry_chip/0
+http://googleusercontent.com/immersive_entry_chip/1
+http://googleusercontent.com/immersive_entry_chip/2
+http://googleusercontent.com/immersive_entry_chip/3
+http://googleusercontent.com/immersive_entry_chip/4
+http://googleusercontent.com/immersive_entry_chip/5
+http://googleusercontent.com/immersive_entry_chip/6
+http://googleusercontent.com/immersive_entry_chip/7
+http://googleusercontent.com/immersive_entry_chip/8
+
+A palavra **`Active: active (running)`** vai aparecer verde na sua tela. Mande um `/start` lá no Telegram do seu bot e veja o painel nascer!
