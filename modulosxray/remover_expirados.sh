@@ -152,8 +152,8 @@ fi
 
 # Aplica atomicamente com permissões corretas
 mv -f "$tmp_cfg" "$CONFIG_PATH"
-chmod 0600 "$CONFIG_PATH"
-chown root:root "$CONFIG_PATH"
+chmod 0640 "$CONFIG_PATH"
+chown root:nogroup "$CONFIG_PATH"
 
 # --- PASSO 2: RESTART COM VERIFICAÇÃO ---
 echo -e "Reiniciando Xray..."
@@ -161,7 +161,7 @@ if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
    ! systemctl restart xray >/dev/null 2>&1; then
     echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}"
     mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    chmod 0600 "$CONFIG_PATH"
+    chmod 0640 "$CONFIG_PATH"
     journalctl -u xray -n 15 --no-pager 2>/dev/null || true
     echo -e "${TXT_YELLOW}Config revertido. Nenhum usuário foi removido.${RESET}"
     sleep 3; exit 1
@@ -171,7 +171,7 @@ sleep 1
 if ! systemctl is-active --quiet xray 2>/dev/null; then
     echo -e "${TXT_RED}❌ Xray não ficou ativo. Revertendo config...${RESET}"
     mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    chmod 0600 "$CONFIG_PATH"
+    chmod 0640 "$CONFIG_PATH"
     systemctl restart xray >/dev/null 2>&1 || true
     sleep 2; exit 1
 fi
