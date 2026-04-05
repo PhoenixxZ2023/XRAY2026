@@ -333,27 +333,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return SELECTING_ACTION
         
     elif query.data == 'backup_start':
-        await query.edit_message_text("📦 Gerando Backup Avançado...", parse_mode='Markdown')
+        await query.edit_message_text("📦 Gerando Backup...", parse_mode='Markdown')
         
-        # Melhoria 4: Integração total com seu script de backup shell seguro (com sha256)
-        result = subprocess.run([WRAP_BACKUP], capture_output=True, text=True)
-        bkp_file = result.stdout.strip()
+        # Método nativo que respeita as permissões do usuário do bot no systemd
+        date_str = datetime.now().strftime('%Y%m%d_%H%M')
+        bkp_file = f"/tmp/backup_{date_str}.tar.gz"
         
-        if bkp_file and os.path.exists(bkp_file):
+        # O comando tar agora inclui a pasta do SSL (ignorando erros se ela não existir)
+        subprocess.run(f"tar -czPf {bkp_file} /opt/XrayTools /usr/local/etc/xray /opt/DragonCoreSSL 2>/dev/null", shell=True)
+        
+        if os.path.exists(bkp_file):
             with open(bkp_file, 'rb') as f:
                 close_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Fechar Backup", callback_data='close_file')]])
                 await context.bot.send_document(
                     chat_id=update.effective_chat.id, 
                     document=f, 
                     filename=os.path.basename(bkp_file),
-                    caption="🔐 *Backup do Sistema (Seguro)*\n\n_Inclui Xray, DB e SSL_",
+                    caption="🔐 *Backup do Sistema*\n\n_Inclui Xray, Banco de Dados e SSL_",
                     parse_mode='Markdown',
                     reply_markup=close_btn
                 )
-            # O sistema mantem uma copia em /root/backups via o .sh, então não precisa dar os.remove() aqui
+            os.remove(bkp_file) # Limpa o temporário após o envio
             await query.edit_message_text("✅ *Backup enviado abaixo!*", parse_mode='Markdown', reply_markup=build_menu())
         else:
-            logger.error(f"Erro no backup: {result.stderr}")
             await query.edit_message_text("❌ Falha ao criar backup. Verifique os logs.", reply_markup=build_menu())
         return SELECTING_ACTION
     
