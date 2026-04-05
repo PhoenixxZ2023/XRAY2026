@@ -14,23 +14,31 @@ from telegram.ext import (
 )
 import io
 
-# --- CONFIGURAÇÃO (SERÁ SUBSTITUÍDA PELO INSTALADOR) ---
-BOT_TOKEN = "SEU_TOKEN_AQUI"
-ADMIN_ID = 123456789 
+# --- CONFIGURACAO VIA VARIAVEIS DE AMBIENTE ---
+# Lido do EnvironmentFile=/opt/XrayTools/.bot_env no systemd
+_token = os.environ.get("BOT_TOKEN", "")
+_admin = os.environ.get("ADMIN_ID", "")
+if not _token or not _admin:
+    raise EnvironmentError(
+        "BOT_TOKEN e ADMIN_ID devem estar definidos.\n"
+        "Verifique /opt/XrayTools/.bot_env e EnvironmentFile= no botxray.service."
+    )
+BOT_TOKEN = _token
+try:
+    ADMIN_ID = int(_admin)
+except ValueError:
+    raise EnvironmentError(f"ADMIN_ID deve ser inteiro, obtido: '{_admin}'")
 
 CONFIG_PATH = "/usr/local/etc/xray/config.json"
 USER_DB = "/opt/XrayTools/users.db"
 XRAY_SERVICE = "xray"
-
-# Wrapper gerado pelo seu botxray.sh para backup seguro
-WRAP_BACKUP = "/usr/local/bin/wrap_backup_bot"
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 (SELECTING_ACTION, GET_USERNAME_CREATE, GET_EXPIRY_DAYS_CREATE, GET_USER_TO_DELETE, GET_USER_TO_BLOCK, GET_USER_TO_UNBLOCK) = range(6)
 
-# --- FUNÇÕES DE SISTEMA ---
+# --- FUNCOES DE SISTEMA ---
 
 def restart_xray():
     subprocess.run(["systemctl", "restart", XRAY_SERVICE], check=False)
@@ -45,15 +53,23 @@ def load_config():
         return None
 
 def save_config(data):
-    # Voltando ao método de gravação direta para evitar erro de permissão com .tmp
+    # Salva diretamente e aplica permissao correta para Xray (nobody) ler
     try:
         with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
+        # nobody:nogroup 0644 — Xray (User=nobody) consegue ler
+        os.chmod(CONFIG_PATH, 0o644)
+        try:
+            import pwd, grp
+            uid = pwd.getpwnam("nobody").pw_uid
+            gid = grp.getgrnam("nogroup").gr_gid
+            os.chown(CONFIG_PATH, uid, gid)
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Erro fatal ao salvar config: {e}")
 
 def get_ip():
-    # Melhoria 3: Pega o IP nativamente pelo Python (Mais rápido e seguro que curl via shell=True)
     try:
         with urllib.request.urlopen('https://ifconfig.me', timeout=3) as response:
             return response.read().decode('utf-8').strip()
@@ -117,7 +133,7 @@ def generate_link(client_uuid, client_email):
     except Exception as e:
         return f"Erro Link: {str(e)}"
 
-# --- FUNÇÕES CORE ---
+# --- FUNCOES CORE ---
 
 def core_create_user(nick, days):
     if os.path.exists(USER_DB):
@@ -265,7 +281,7 @@ def core_list_users_text():
                 msg += f"{nick:<15} | {expiry:<11} | {uuid_real:<36} | {status}\n"
     return msg
 
-# --- FUNÇÕES DO TELEGRAM ---
+# --- FUNCOES DO TELEGRAM ---
 
 def is_admin(update: Update) -> bool:
     if update.effective_user.id != ADMIN_ID: return False
@@ -315,7 +331,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = core_list_users_text()
         f = io.BytesIO(report.encode('utf-8'))
         f.name = "usuarios.txt"
-        
         close_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Fechar Lista", callback_data='close_file')]])
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
@@ -324,7 +339,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown',
             reply_markup=close_btn
         )
-        
         await query.edit_message_text(
             "✅ *Lista enviada abaixo!*\nVerifique o arquivo ou escolha outra opção:",
             parse_mode='Markdown',
@@ -335,14 +349,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'backup_start':
         await query.edit_message_text("📦 Gerando Backup...", parse_mode='Markdown')
         
-        # Método nativo que respeita as permissões do usuário do bot no systemd
         date_str = datetime.now().strftime('%Y%m%d_%H%M')
         bkp_file = f"/tmp/backup_{date_str}.tar.gz"
+
+        # Copia apenas arquivos essenciais para tmpdir (exclui venv, .py, backups)
+        import tempfile, shutil
+        tmpdir = tempfile.mkdtemp()
+        try:
+            # DBs e dados do XrayTools
+            os.makedirs(f"{tmpdir}/opt/XrayTools", exist_ok=True)
+            for fname in ["users.db", "limits.db", "usage.db", "session.db", "active_domain"]:
+                src = f"/opt/XrayTools/{fname}"
+                if os.path.exists(src):
+                    shutil.copy2(src, f"{tmpdir}/opt/XrayTools/{fname}")
+
+            # Config do Xray
+            if os.path.isdir("/usr/local/etc/xray"):
+                shutil.copytree("/usr/local/etc/xray", f"{tmpdir}/usr/local/etc/xray",
+                                dirs_exist_ok=True)
+
+            # Certificados SSL
+            if os.path.isdir("/opt/DragonCoreSSL"):
+                shutil.copytree("/opt/DragonCoreSSL", f"{tmpdir}/opt/DragonCoreSSL",
+                                dirs_exist_ok=True)
+
+            # Compacta sem shell=True
+            result = subprocess.run(
+                ["tar", "-czf", bkp_file, "-C", tmpdir, "."],
+                check=False, capture_output=True
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
         
-        # O comando tar agora inclui a pasta do SSL (ignorando erros se ela não existir)
-        subprocess.run(f"tar -czPf {bkp_file} /opt/XrayTools /usr/local/etc/xray /opt/DragonCoreSSL 2>/dev/null", shell=True)
-        
-        if os.path.exists(bkp_file):
+        if os.path.exists(bkp_file) and os.path.getsize(bkp_file) > 0:
             with open(bkp_file, 'rb') as f:
                 close_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Fechar Backup", callback_data='close_file')]])
                 await context.bot.send_document(
@@ -353,7 +392,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode='Markdown',
                     reply_markup=close_btn
                 )
-            os.remove(bkp_file) # Limpa o temporário após o envio
+            os.remove(bkp_file)
             await query.edit_message_text("✅ *Backup enviado abaixo!*", parse_mode='Markdown', reply_markup=build_menu())
         else:
             await query.edit_message_text("❌ Falha ao criar backup. Verifique os logs.", reply_markup=build_menu())
@@ -407,14 +446,11 @@ async def cancel_op(u, c): await u.message.reply_text("Cancelado.", reply_markup
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    
-    txt_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, None)
 
     conv = ConversationHandler(
         entry_points=[CommandHandler('start', start), CommandHandler('menu', start)],
         states={
             SELECTING_ACTION: [CallbackQueryHandler(button_handler)],
-            
             GET_USERNAME_CREATE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, h_create_nick),
                 CallbackQueryHandler(unexpected_button)
@@ -436,10 +472,11 @@ def main():
                 CallbackQueryHandler(unexpected_button)
             ],
         },
-        fallbacks=[CommandHandler('cancel', cancel_op)]
+        fallbacks=[CommandHandler('cancel', cancel_op)],
+        allow_reentry=True,
     )
     app.add_handler(conv)
-    print("Bot Iniciado com Proteções de Segurança...")
+    logger.info("DragonCore Bot V7.7 iniciado. Admin ID: %d", ADMIN_ID)
     app.run_polling()
 
 if __name__ == '__main__':
