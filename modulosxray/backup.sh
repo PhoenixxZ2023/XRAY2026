@@ -122,11 +122,28 @@ case "${opt:-0}" in
     FILE="${BACKUP_DIR}/backup_dragoncore_${TIMESTAMP}.tar.gz"
     SHA_FILE="${FILE}.sha256"
 
-    paths=( "opt/XrayTools" "usr/local/etc/xray" )
-    [ -d "/opt/DragonCoreSSL" ] && paths+=( "opt/DragonCoreSSL" )
+    # Copia apenas arquivos essenciais para tmpdir
+    # Exclui venv, backups anteriores, botxray.py e arquivos desnecessarios
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    trap 'rm -rf "$tmpdir"' EXIT
+
+    mkdir -p "$tmpdir/opt/XrayTools"
+    for f in users.db limits.db usage.db session.db active_domain; do
+        [ -f "/opt/XrayTools/$f" ] && cp -f "/opt/XrayTools/$f" "$tmpdir/opt/XrayTools/$f"
+    done
+    [ -d "/opt/XrayTools/users" ] && cp -r "/opt/XrayTools/users" "$tmpdir/opt/XrayTools/" 2>/dev/null || true
+
+    mkdir -p "$tmpdir/usr/local/etc"
+    cp -a /usr/local/etc/xray "$tmpdir/usr/local/etc/" 2>/dev/null || true
+
+    if [ -d "/opt/DragonCoreSSL" ]; then
+        mkdir -p "$tmpdir/opt"
+        cp -a /opt/DragonCoreSSL "$tmpdir/opt/" 2>/dev/null || true
+    fi
 
     echo "Criando backup..."
-    if ! tar -czf "$FILE" -C / "${paths[@]}" >/dev/null 2>&1; then
+    if ! tar -czf "$FILE" -C "$tmpdir" . >/dev/null 2>&1; then
         echo -e "${TXT_RED}❌ Falha ao criar arquivo tar.${RESET}"
         rm -f "$FILE"
         exit 1
@@ -138,12 +155,12 @@ case "${opt:-0}" in
         exit 1
     fi
 
-    chmod 777 "$FILE"
+    chmod 600 "$FILE"
 
     # Gera SHA256 ao lado do backup para verificação futura
     echo -n "Gerando SHA256... "
     sha256sum "$FILE" > "$SHA_FILE"
-    chmod 777 "$SHA_FILE"
+    chmod 600 "$SHA_FILE"
     echo -e "${TXT_GREEN}OK${RESET}"
 
     SIZE=$(du -sh "$FILE" | cut -f1)
@@ -227,7 +244,7 @@ case "${opt:-0}" in
     [ -d "/opt/DragonCoreSSL" ] && SNAP_PATHS+=( "opt/DragonCoreSSL" )
     SNAP_FILE=$(mktemp /tmp/xray_restore_snap_XXXXXX.tar.gz)
     if tar -czf "$SNAP_FILE" -C / "${SNAP_PATHS[@]}" >/dev/null 2>&1 && [ -s "$SNAP_FILE" ]; then
-        chmod 777 "$SNAP_FILE"
+        chmod 600 "$SNAP_FILE"
         echo -e "${TXT_GREEN}Snapshot salvo em: ${SNAP_FILE}${RESET}"
     else
         echo -e "${TXT_YELLOW}⚠  Não foi possível criar snapshot — continuando mesmo assim.${RESET}"
@@ -253,18 +270,18 @@ case "${opt:-0}" in
 
     # Reforça permissões após restore (tar pode restaurar permissões erradas)
     echo "Aplicando permissões..."
-    chmod 777  /opt/XrayTools                           2>/dev/null || true
-    chmod 777  /opt/XrayTools/users.db                  2>/dev/null || true
-    chmod 777 /usr/local/etc/xray/config.json          2>/dev/null || true
+    chmod 700  /opt/XrayTools                           2>/dev/null || true
+    chmod 600  /opt/XrayTools/users.db                  2>/dev/null || true
+    chmod 0600 /usr/local/etc/xray/config.json          2>/dev/null || true
     chown root:root /usr/local/etc/xray/config.json     2>/dev/null || true
-    chmod 777 /usr/local/etc/xray/preset.json          2>/dev/null || true
+    chmod 0600 /usr/local/etc/xray/preset.json          2>/dev/null || true
     chown root:root /usr/local/etc/xray/preset.json     2>/dev/null || true
 
     if [ -d /opt/DragonCoreSSL ]; then
         chown -R nobody:nogroup /opt/DragonCoreSSL      2>/dev/null || true
-        chmod 777  /opt/DragonCoreSSL                   2>/dev/null || true
-        chmod 777  /opt/DragonCoreSSL/fullchain.pem     2>/dev/null || true
-        chmod 777  /opt/DragonCoreSSL/privkey.pem       2>/dev/null || true
+        chmod 750  /opt/DragonCoreSSL                   2>/dev/null || true
+        chmod 644  /opt/DragonCoreSSL/fullchain.pem     2>/dev/null || true
+        chmod 640  /opt/DragonCoreSSL/privkey.pem       2>/dev/null || true
     fi
 
     # Reinicia e verifica
