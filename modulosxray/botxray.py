@@ -45,11 +45,12 @@ def load_config():
         return None
 
 def save_config(data):
-    # Melhoria 1: Escrita Atômica (Evita corromper o arquivo se o servidor travar)
-    tmp_path = f"{CONFIG_PATH}.tmp"
-    with open(tmp_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp_path, CONFIG_PATH)
+    # Voltando ao método de gravação direta para evitar erro de permissão com .tmp
+    try:
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Erro fatal ao salvar config: {e}")
 
 def get_ip():
     # Melhoria 3: Pega o IP nativamente pelo Python (Mais rápido e seguro que curl via shell=True)
