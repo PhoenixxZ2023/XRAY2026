@@ -124,26 +124,25 @@ case "${opt:-0}" in
 
     # Copia apenas arquivos essenciais para tmpdir
     # Exclui venv, backups anteriores, botxray.py e arquivos desnecessarios
-    local tmpdir
-    tmpdir=$(mktemp -d)
-    trap 'rm -rf "$tmpdir"' EXIT
+    TMPDIR_BKP=$(mktemp -d)
+    trap 'rm -rf "$TMPDIR_BKP"' EXIT
 
-    mkdir -p "$tmpdir/opt/XrayTools"
+    mkdir -p "$TMPDIR_BKP/opt/XrayTools"
     for f in users.db limits.db usage.db session.db active_domain; do
-        [ -f "/opt/XrayTools/$f" ] && cp -f "/opt/XrayTools/$f" "$tmpdir/opt/XrayTools/$f"
+        [ -f "/opt/XrayTools/$f" ] && cp -f "/opt/XrayTools/$f" "$TMPDIR_BKP/opt/XrayTools/$f"
     done
-    [ -d "/opt/XrayTools/users" ] && cp -r "/opt/XrayTools/users" "$tmpdir/opt/XrayTools/" 2>/dev/null || true
+    [ -d "/opt/XrayTools/users" ] && cp -r "/opt/XrayTools/users" "$TMPDIR_BKP/opt/XrayTools/" 2>/dev/null || true
 
-    mkdir -p "$tmpdir/usr/local/etc"
-    cp -a /usr/local/etc/xray "$tmpdir/usr/local/etc/" 2>/dev/null || true
+    mkdir -p "$TMPDIR_BKP/usr/local/etc"
+    cp -a /usr/local/etc/xray "$TMPDIR_BKP/usr/local/etc/" 2>/dev/null || true
 
     if [ -d "/opt/DragonCoreSSL" ]; then
-        mkdir -p "$tmpdir/opt"
-        cp -a /opt/DragonCoreSSL "$tmpdir/opt/" 2>/dev/null || true
+        mkdir -p "$TMPDIR_BKP/opt"
+        cp -a /opt/DragonCoreSSL "$TMPDIR_BKP/opt/" 2>/dev/null || true
     fi
 
     echo "Criando backup..."
-    if ! tar -czf "$FILE" -C "$tmpdir" . >/dev/null 2>&1; then
+    if ! tar -czf "$FILE" -C "$TMPDIR_BKP" . >/dev/null 2>&1; then
         echo -e "${TXT_RED}❌ Falha ao criar arquivo tar.${RESET}"
         rm -f "$FILE"
         exit 1
