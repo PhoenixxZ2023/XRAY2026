@@ -4,7 +4,7 @@
 #   - chmod 777 → 640/600/700 em todos os arquivos sensíveis
 #   - connection_info.txt (UUID + link) agora 600 root:root
 #   - certxray.sh agora 700 root:root — impede substituição por processo não-root
-#   - Porta API configurável via XRAY_API_PORT com fallback dinâmico
+#   - Porta API padrão 1080 com fallback dinâmico via _find_free_api_port()
 #   - Validação de shebang BOM-safe em func_install_official_core e func_xray_cert
 #   - validate_domain_or_ip rejeita loopback, broadcast e endereços reservados óbvios
 
@@ -25,9 +25,9 @@ CRT_FILE="$SSL_DIR/fullchain.pem"
 XRAY_USER="nobody"
 XRAY_GROUP="nogroup"
 
-# CORREÇÃO: porta API configurável via variável de ambiente.
-# Padrão 10085 — fora do range comum de aplicações, evita conflito com SOCKS5 (1080).
-API_PORT="${XRAY_API_PORT:-10085}"
+# Porta API configurável via variável de ambiente.
+# Padrão 1080 — porta padrão do projeto DragonCore.
+API_PORT="${XRAY_API_PORT:-1080}"
 
 _validate_repo_base() {
     local url="$1"
@@ -183,12 +183,12 @@ port_in_use() {
 # Evita conflito com SOCKS5 (1080) e com a porta pública do Xray.
 # Itera a partir do valor base até encontrar uma porta disponível.
 _find_free_api_port() {
-    local port="${1:-10085}"
-    local max_port=10200
+    local port="${1:-1080}"
+    local max_port=1200
     while port_in_use "$port"; do
         port=$((port + 1))
         if [ "$port" -gt "$max_port" ]; then
-            echo -e "${TXT_RED}❌ Nenhuma porta livre encontrada para a API (${1:-10085}-${max_port}).${RESET}" >&2
+            echo -e "${TXT_RED}❌ Nenhuma porta livre encontrada para a API (${1:-1080}-${max_port}).${RESET}" >&2
             return 1
         fi
     done
