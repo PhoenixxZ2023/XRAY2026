@@ -100,26 +100,29 @@ def load_config() -> dict | None:
 
 def save_config(data: dict) -> bool:
     """
-    CORREÇÃO: escrita atômica via tmpfile + os.replace().
-    Versão anterior abria CONFIG_PATH com 'w' diretamente — interrupção no meio
-    da escrita (SIGKILL, disco cheio) corromperia o config.json permanentemente.
-    CORREÇÃO: chmod 0o640 em vez de 0o644 — config não deve ser lido por outros
-    usuários do sistema (contém UUIDs dos clientes).
+    Escrita atômica: tmpfile em /tmp → os.replace() para CONFIG_PATH.
+    Funciona porque botxray tem SupplementaryGroups=nogroup no systemd,
+    e config.json tem permissão 0o660 root:nogroup (grupo pode escrever).
     """
-    tmp_path = CONFIG_PATH + ".tmp"
+    tmp_path = f"/tmp/xray_config_bot_{os.getpid()}.json"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        os.chmod(tmp_path, 0o640)
-        os.replace(tmp_path, CONFIG_PATH)  # atômico no mesmo filesystem
+        os.replace(tmp_path, CONFIG_PATH)
+        # Garante que permissão não mudou após replace
+        os.chmod(CONFIG_PATH, 0o660)
         return True
+    except PermissionError as e:
+        logger.error("save_config: sem permissão — verifique SupplementaryGroups=nogroup no serviço: %s", e)
+        return False
     except Exception as e:
         logger.error("Erro ao salvar config: %s", e)
+        return False
+    finally:
         try:
             os.remove(tmp_path)
         except OSError:
             pass
-        return False
 
 
 def get_ip() -> str:
@@ -605,9 +608,9 @@ async def input_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str
 ):
     if not is_admin(update):
-        return
+        return SELECTING_ACTION
     if not update.message or not update.message.text:
-        return
+        return SELECTING_ACTION
 
     # CORREÇÃO: normaliza para minúsculas — usuários criados pelos scripts Shell
     # são gravados em minúsculas; sem normalização, block/delete/unblock falhavam
@@ -650,6 +653,11 @@ async def input_handler(
         msg = core_unblock_user(text)
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu())
         return SELECTING_ACTION
+
+    # Fallback — modo desconhecido, retorna ao menu sem travar
+    logger.warning("input_handler: modo desconhecido '%s'", mode)
+    await update.message.reply_text("❌ Operação inválida.", reply_markup=build_menu())
+    return SELECTING_ACTION
 
 
 # Wrappers assíncronos
