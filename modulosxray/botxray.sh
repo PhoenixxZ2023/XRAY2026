@@ -4,7 +4,7 @@
 #   - Wrappers setuid: chmod 4755 → 4750 + chown root:botxray — apenas botxray executa como root
 #   - restore_bot.sh: chmod 0644 → 640 root:nogroup no config.json
 #   - restore_bot.sh: whitelist de paths mais restrita — bloqueia substituição do venv
-#   - Token lido com read -rs (modo silencioso) — não aparece no terminal
+#   - Token lido com read -r + trim automático — compatível com todos os terminais SSH
 #   - ReadWritePaths remove /usr/local/bin — bot não precisa escrever em scripts do sistema
 #   - chown -R cirúrgico — não sobrescreve permissões de .bot_env e botxray.py
 #   - _wait_service_active() com retry de 5s substitui sleep 2 + is-active simples
@@ -86,10 +86,10 @@ func_install_bot() {
 
     echo ""
     echo -e "${AMARELO}1. Token do BotFather (formato: 123456789:ABCdef...):${RESET}"
-    # CORREÇÃO: read -rs — modo silencioso, token não aparece no terminal.
-    # Previne exposição acidental em gravações de tela ou sessões compartilhadas.
-    read -rs -p "Token: " bot_token
-    echo ""   # newline após input silencioso
+    echo -e "${AMARELO}   Cole o token e pressione Enter:${RESET}"
+    read -r bot_token
+    # Remove espaços e caracteres de controle que podem vir ao colar do Telegram
+    bot_token="$(echo "${bot_token:-}" | tr -d '[:space:][:cntrl:]')"
 
     echo ""
     echo -e "${AMARELO}2. Seu ID numerico do Telegram (Admin):${RESET}"
