@@ -38,7 +38,7 @@ trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; 
 # --- PERMISSÕES DO CONFIG ---
 # CORREÇÃO: centralizada — 640 root:nogroup em fluxo normal e em todos os rollbacks.
 _apply_config_perms() {
-    chmod 0640 "$CONFIG_PATH"
+    chmod 0660 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
