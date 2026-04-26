@@ -104,9 +104,16 @@ validate_port() {
 
 validate_domain() {
     local d="${1:-}"
+    # Remove espacos, tabs e caracteres de controle invisiveis (comum em input colado)
+    d="$(echo "$d" | tr -d '[:space:][:cntrl:]')"
     if [ -z "$d" ]; then return 1; fi
+    # Rejeita IPs puros
     if [[ "$d" =~ ^[0-9.]+$ ]]; then return 1; fi
-    if [[ "$d" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then return 0; fi
+    # RFC 1123: labels de 1-63 chars alfanum/hifen, nao comeca/termina com hifen.
+    # Aceita labels curtas (ex: "pp" em "pp.ua") e hifens no meio (ex: "turbonet-vpn").
+    if [[ "$d" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+        return 0
+    fi
     return 1
 }
 
@@ -115,6 +122,8 @@ validate_domain() {
 # link-local (169.254.x) e multicast (224-239.x).
 validate_domain_or_ip() {
     local d="${1:-}"
+    # Remove caracteres de controle e espaços (input colado com formatação)
+    d="$(echo "$d" | tr -d '[:space:][:cntrl:]')"
     if [ -z "$d" ]; then return 1; fi
 
     if [[ "$d" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
@@ -483,6 +492,7 @@ func_wizard_install() {
     if [ "$use_tls" = "true" ]; then
         echo -e "${TXT_YELLOW}Digite o domínio (ex: meusite.com):${RESET}"
         read -rp "Domínio: " domain_val
+        domain_val="$(echo "${domain_val:-}" | tr -d '[:space:][:cntrl:]')"
         if ! validate_domain "$domain_val"; then
             echo -e "${TXT_RED}❌ Domínio inválido.${RESET}"; read -rp "Enter..."; return 1
         fi
@@ -497,6 +507,7 @@ func_wizard_install() {
     else
         echo -e "${TXT_YELLOW}IP público da VPS ou domínio (sem TLS):${RESET}"
         read -rp "Endereço [Enter = detectar IP]: " domain_val
+        domain_val="$(echo "${domain_val:-}" | tr -d '[:space:][:cntrl:]')" 
         if [ -z "${domain_val:-}" ]; then
             echo -n "Detectando IP... "
             domain_val=$(curl -fsSL --max-time 10 "https://icanhazip.com" 2>/dev/null || \
