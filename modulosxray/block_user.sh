@@ -35,7 +35,7 @@ export DEBIAN_FRONTEND=noninteractive
 # --- PERMISSÕES DO CONFIG ---
 # CORREÇÃO: centralizada — 640 root:nogroup em fluxo normal e todos os rollbacks.
 _apply_config_perms() {
-    chmod 0640 "$CONFIG_PATH"
+    chmod 0660 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
