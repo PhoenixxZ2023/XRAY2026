@@ -39,7 +39,7 @@ trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; 
 # CORREÇÃO: 640 root:nogroup — Xray lê como nobody/nogroup, não precisa escrever.
 # Centralizado para garantir consistência em fluxo normal e rollbacks.
 _apply_config_perms() {
-    chmod 640 "$CONFIG_PATH"
+    chmod 660 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
