@@ -244,6 +244,48 @@ run_module() {
     bash "$local_path"
 }
 
+# --- DOWNLOAD DE MÓDULO (SEM EXECUTAR) ---
+# Usado pela opção 99 — baixa e valida o módulo mas NÃO executa.
+# Evita o travamento causado por run_module que sempre executa o script após download.
+download_module() {
+    local script_name="$1"
+    local local_path="${LOCAL_BIN}/${script_name}"
+    local tmp_path
+
+    tmp_path=$(mktemp /tmp/xray_module_XXXXXX)
+
+    echo -ne "${TXT_YELLOW}Atualizando ${script_name}...${RESET} "
+
+    if ! curl -fLsS             --retry 3             --retry-delay 2             --max-time 60             --connect-timeout 10             -o "$tmp_path"             "${MODULES_URL}/${script_name}" 2>>"$LOG_FILE"; then
+        echo -e "${TXT_RED}FALHOU (download)${RESET}"
+        rm -f "$tmp_path"
+        return 1
+    fi
+
+    if [ ! -s "$tmp_path" ]; then
+        echo -e "${TXT_RED}FALHOU (vazio)${RESET}"
+        rm -f "$tmp_path"
+        return 1
+    fi
+
+    if ! LC_ALL=C head -n 1 "$tmp_path" | grep -qP '^(\xEF\xBB\xBF)?#!.*(bash|env\s)'; then
+        echo -e "${TXT_RED}FALHOU (shebang inválido)${RESET}"
+        rm -f "$tmp_path"
+        return 1
+    fi
+
+    if ! _verify_module_hash "$tmp_path" "$script_name" 2>/dev/null; then
+        echo -e "${TXT_RED}FALHOU (hash)${RESET}"
+        rm -f "$tmp_path"
+        return 1
+    fi
+
+    mv -f "$tmp_path" "$local_path"
+    chmod 0755 "$local_path"
+    echo -e "${TXT_GREEN}OK${RESET}"
+    return 0
+}
+
 # --- CONFIRMAÇÃO PARA AÇÕES DESTRUTIVAS ---
 _confirm_destructive() {
     local msg="$1"
@@ -322,35 +364,37 @@ menu_display() {
         11)   run_module "unblock_user.sh"      "Desbloqueio" ;;
         12)   run_module "onlinexray.sh"        "Monitor" ;;
         99)
-            # CORREÇÃO: opção 99 agora reutiliza run_module() — elimina lógica duplicada.
-            # FORCE_UPDATE passado como variável de ambiente prefixada na chamada
-            # (sem export global) para não vazar para módulos filhos.
-            echo -e "${TXT_YELLOW}Atualizando todos os módulos...${RESET}"
+            # Usa download_module() — baixa e valida SEM executar.
+            # run_module() sempre executa o script após download, travando em módulos
+            # que aguardam input do usuário (botxray.sh, backup.sh, etc.)
+            clear
+            echo -e "${TXT_YELLOW}================================================${RESET}"
+            echo -e "${TXT_YELLOW}   ATUALIZANDO TODOS OS MÓDULOS               ${RESET}"
+            echo -e "${TXT_YELLOW}================================================${RESET}"
+            echo ""
             _STATUS_CACHE_TIME=0
 
             local modules=(
                 add_user.sh remover_user.sh lista_users.sh core_manager.sh
                 remover_expirados.sh uninstall.sh limiterxray.sh botxray.sh
                 backup.sh block_user.sh unblock_user.sh onlinexray.sh
+                certxray.sh
             )
 
             local ok=0 fail=0
             for mod in "${modules[@]}"; do
-                echo -ne "${TXT_YELLOW}Atualizando ${mod}...${RESET} "
-                # FORCE_UPDATE=1 prefixado: escopo limitado a este run_module,
-                # não afeta o loop principal nem módulos subsequentes.
-                if FORCE_UPDATE=1 run_module "$mod" "$mod" >/dev/null 2>&1; then
-                    echo -e "${TXT_GREEN}OK${RESET}"
+                if download_module "$mod"; then
                     ok=$((ok + 1))
                 else
-                    echo -e "${TXT_RED}FALHOU${RESET}"
                     fail=$((fail + 1))
                 fi
             done
 
             echo ""
-            echo -e "${TXT_GREEN}Atualização concluída: ${ok} OK, ${fail} falharam.${RESET}"
-            sleep 2
+            echo -e "${TXT_GREEN}================================================${RESET}"
+            echo -e "${TXT_GREEN}Concluído: ${ok} OK${RESET}  ${TXT_RED}${fail} falharam${RESET}"
+            echo -e "${TXT_GREEN}================================================${RESET}"
+            sleep 3
             ;;
         0|00)
             echo -e "${TXT_GREEN}Saindo...${RESET}"
