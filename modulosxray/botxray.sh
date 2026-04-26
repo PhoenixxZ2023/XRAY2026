@@ -306,7 +306,7 @@ if ! tar -xzf "$FILE" -C / --no-overwrite-dir --no-same-permissions 2>/dev/null;
 fi
 # CORREÇÃO: 640 root:nogroup — Xray (nobody/nogroup) precisa ler o config.
 # Versão anterior usava 644 — qualquer usuário lia o config com UUIDs dos clientes.
-chmod 0640 /usr/local/etc/xray/config.json 2>/dev/null || true
+chmod 0660 /usr/local/etc/xray/config.json 2>/dev/null || true
 chown root:nogroup /usr/local/etc/xray/config.json 2>/dev/null || true
 [ -f /usr/local/etc/xray/preset.json ] && {
     chmod 0640 /usr/local/etc/xray/preset.json 2>/dev/null || true
@@ -379,6 +379,9 @@ After=network.target
 Type=simple
 User=botxray
 Group=botxray
+# SupplementaryGroups=nogroup permite que botxray leia/escreva arquivos
+# com permissão root:nogroup 640 (config.json, preset.json, privkey.pem)
+SupplementaryGroups=nogroup
 WorkingDirectory=/opt/XrayTools
 EnvironmentFile=/opt/XrayTools/.bot_env
 ExecStart=/opt/XrayTools/venv/bin/python /opt/XrayTools/botxray.py
