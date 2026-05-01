@@ -407,11 +407,12 @@ def core_list_users_text() -> str:
                     if email.startswith("LOCKED_"):
                         locked_users.add(email.replace("LOCKED_", "", 1))
 
+    sep = "-" * 65
     header = (
-        "LISTA DE USUÁRIOS - DRAGONCORE\n"
-        "=" * 79 + "\n"
-        f"{'NOME':<15} | {'VENCIMENTO':<11} | {'UUID':<36} | STATUS\n"
-        + "=" * 79 + "\n"
+        "📋 LISTA DE USUÁRIOS - DRAGONCORE\n"
+        + sep + "\n"
+        + f"{'NOME':<12} | {'VENCIMENTO':<11} | {'UUID (resumido)':<20} | STATUS\n"
+        + sep + "\n"
     )
     rows = []
     with open(USER_DB, "r") as f:
@@ -419,10 +420,13 @@ def core_list_users_text() -> str:
             parts = line.strip().split("|")
             if len(parts) >= 3:
                 nick_r, uuid_r, expiry_r = parts[0], parts[1], parts[2]
-                status = "⛔️" if nick_r in locked_users else "✅"
-                rows.append(f"{nick_r:<15} | {expiry_r:<11} | {uuid_r:<36} | {status}")
+                status = "⛔" if nick_r in locked_users else "✅"
+                # UUID truncado — não expõe credencial completa no chat
+                uuid_short = uuid_r[:8] + "..." + uuid_r[-4:] if len(uuid_r) >= 12 else uuid_r
+                rows.append(f"{nick_r:<12} | {expiry_r:<11} | {uuid_short:<20} | {status}")
 
-    return header + "\n".join(rows) if rows else header + "(vazio)"
+    footer = "\n" + sep + f"\nTotal: {len(rows)} usuário(s)"
+    return header + "\n".join(rows) + footer if rows else header + "(vazio)"
 
 
 # =============================================================
