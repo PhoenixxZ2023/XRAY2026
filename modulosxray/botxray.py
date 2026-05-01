@@ -100,20 +100,30 @@ def load_config() -> dict | None:
 
 def save_config(data: dict) -> bool:
     """
-    Escrita atômica: tmpfile em /tmp → os.replace() para CONFIG_PATH.
-    Funciona porque botxray tem SupplementaryGroups=nogroup no systemd,
-    e config.json tem permissão 0o660 root:nogroup (grupo pode escrever).
+    Escrita atômica: tmpfile no mesmo diretório do config → os.replace().
+    - tmpfile no mesmo dir evita cross-device link (PrivateTmp=true no systemd
+      cria /tmp isolado, impossibilitando os.replace() de /tmp para /usr/local).
+    - Após replace, restaura dono root:nogroup e permissão 660 — o os.replace()
+      herda dono do tmpfile (botxray:botxray), não do arquivo original.
     """
-    tmp_path = f"/tmp/xray_config_bot_{os.getpid()}.json"
+    tmp_path = CONFIG_PATH + f".tmp.{os.getpid()}"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         os.replace(tmp_path, CONFIG_PATH)
-        # Garante que permissão não mudou após replace
+        # Restaura permissão e dono corretos após replace
+        # (os.replace herda dono do tmpfile — botxray:botxray — em vez do original)
         os.chmod(CONFIG_PATH, 0o660)
+        try:
+            import grp
+            gid = grp.getgrnam("nogroup").gr_gid
+            os.chown(CONFIG_PATH, 0, gid)  # root:nogroup
+        except Exception as e:
+            logger.warning("save_config: não foi possível restaurar chown root:nogroup: %s", e)
         return True
     except PermissionError as e:
-        logger.error("save_config: sem permissão — verifique SupplementaryGroups=nogroup no serviço: %s", e)
+        logger.error("save_config: sem permissão — verifique chmod 770 em %s e SupplementaryGroups=nogroup: %s",
+                     os.path.dirname(CONFIG_PATH), e)
         return False
     except Exception as e:
         logger.error("Erro ao salvar config: %s", e)
