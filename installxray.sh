@@ -176,9 +176,6 @@ clear
 echo -e "${AZUL}==================================================${RESET}"
 echo -e "${AMARELO}🚀 DRAGONCORE MODULAR - LAUNCHER V7.5${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
-echo -e "  Ref:  ${VERDE}${REPO_REF}${RESET}"
-echo -e "  Log:  ${VERDE}${LOG_FILE}${RESET}"
-echo -e "${AZUL}==================================================${RESET}"
 
 # --- VERIFICAÇÃO DE ROOT ---
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
@@ -285,8 +282,6 @@ echo ""
 echo -e "${AZUL}==================================================${RESET}"
 echo -e "${VERDE}🎉 SISTEMA MODULAR PRONTO! (V7.5)${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
-echo -e "  Acesso:  ${VERDE}xray-menu${RESET}"
-echo -e "  Log:     ${VERDE}${LOG_FILE}${RESET}"
 if [ -f "$MENU_BACKUP" ]; then
     echo -e "  Backup:  ${VERDE}${MENU_BACKUP}${RESET}"
 fi
