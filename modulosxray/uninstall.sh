@@ -119,6 +119,8 @@ echo -e "${TXT_GREEN}OK${RESET}"
 # NOTA: renew_cert.sh fica em /opt/DragonCoreSSL (removido no step 3).
 # A entrada de cron que aponta para ele é removida no step 6.
 echo -n " Removendo scripts DragonCore... "
+# Remove lock files que possam ter ficado de instalações anteriores
+rm -f /tmp/xray-install.lock /tmp/limiterxray.lock /tmp/menuxray.lock
 rm -f /usr/bin/xray-menu
 rm -f /usr/local/bin/xray-menu
 rm -f /usr/local/bin/menuxray.sh
