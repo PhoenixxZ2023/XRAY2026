@@ -42,21 +42,77 @@ echo -e " Algoritmo TCP:  ${TXT_YELLOW}${current_cc}${RESET}"
 echo -e " Fila (qdisc):   ${TXT_YELLOW}${current_qdisc}${RESET}"
 echo ""
 
-# --- VERIFICA SE JÁ ESTÁ ATIVO ---
-if [ "$current_cc" = "bbr" ]; then
-    echo -e "${TXT_GREEN}✅ BBR já está ativo neste sistema!${RESET}"
+# --- FUNÇÃO DE DESATIVAÇÃO ---
+_disable_bbr() {
     echo ""
+    echo -e "${TXT_YELLOW}Desativando BBR e restaurando padrão do sistema...${RESET}"
 
-    # Verifica se está realmente funcionando (não apenas configurado)
-    if lsmod 2>/dev/null | grep -q tcp_bbr; then
-        echo -e " Módulo kernel: ${TXT_GREEN}tcp_bbr carregado${RESET}"
+    # Remove arquivo de config dedicado do DragonCore
+    rm -f /etc/sysctl.d/99-bbr-dragoncore.conf
+
+    # Remove entradas do sysctl.conf se existirem
+    if [ -f /etc/sysctl.conf ]; then
+        sed -i '/net\.core\.default_qdisc.*fq/d'           /etc/sysctl.conf
+        sed -i '/net\.ipv4\.tcp_congestion_control.*bbr/d' /etc/sysctl.conf
+    fi
+
+    # Remove autoload do módulo no boot
+    rm -f /etc/modules-load.d/tcp_bbr.conf
+
+    # Restaura para o padrão do sistema (cubic é o padrão Linux)
+    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
+    sysctl -w net.core.default_qdisc=pfifo_fast      >/dev/null 2>&1 || true
+
+    local new_cc; new_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "?")
+    local new_qdisc; new_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "?")
+
+    echo ""
+    if [ "$new_cc" != "bbr" ]; then
+        echo -e "${TXT_GREEN}✅ BBR desativado com sucesso!${RESET}"
+        echo "-----------------------------------------"
+        echo -e " Algoritmo TCP:  ${TXT_GREEN}${new_cc}${RESET} (padrão)"
+        echo -e " Fila (qdisc):   ${TXT_GREEN}${new_qdisc}${RESET} (padrão)"
+        echo "-----------------------------------------"
+        echo ""
+        echo -e "${TXT_YELLOW}Nota:${RESET} A mudança é imediata. Novas conexões usarão ${new_cc}."
+        echo -e " O BBR não voltará após reiniciar o servidor."
     else
-        echo -e " Módulo kernel: ${TXT_YELLOW}tcp_bbr não detectado no lsmod (pode ser built-in)${RESET}"
+        echo -e "${TXT_RED}❌ Não foi possível desativar o BBR.${RESET}"
+        echo -e " Pode estar configurado em outro arquivo de sysctl."
+        echo -e " Verifique: ${TXT_CYAN}sysctl -a | grep congestion${RESET}"
     fi
 
     echo ""
     read -rp "Pressione Enter para voltar..."
-    exit 0
+}
+
+# --- VERIFICA SE JÁ ESTÁ ATIVO ---
+if [ "$current_cc" = "bbr" ]; then
+    echo -e "${TXT_GREEN}✅ BBR está ativo neste sistema.${RESET}"
+    echo ""
+
+    if lsmod 2>/dev/null | grep -q tcp_bbr; then
+        echo -e " Módulo kernel: ${TXT_GREEN}tcp_bbr carregado${RESET}"
+    else
+        echo -e " Módulo kernel: ${TXT_YELLOW}built-in no kernel (normal em kernels 5.x+)${RESET}"
+    fi
+
+    echo ""
+    echo -e "${TXT_CYAN}[1] Manter BBR ativo${RESET}"
+    echo -e "${TXT_RED}[2] Desativar BBR (restaurar padrão do sistema)${RESET}"
+    echo -e "${TXT_CYAN}[0] Voltar${RESET}"
+    echo ""
+    read -rp "Opção: " bbr_opt
+    case "${bbr_opt:-0}" in
+        1) echo -e "${TXT_GREEN}BBR mantido.${RESET}"; sleep 1; exit 0 ;;
+        2)
+            read -rp "Confirmar desativação do BBR? [s/N]: " conf
+            [[ "${conf:-n}" =~ ^[Ss]$ ]] || { echo "Cancelado."; sleep 1; exit 0; }
+            _disable_bbr
+            exit 0
+            ;;
+        *) exit 0 ;;
+    esac
 fi
 
 # --- VERIFICA SUPORTE DO KERNEL ---
