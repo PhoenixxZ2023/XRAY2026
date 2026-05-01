@@ -156,8 +156,16 @@ _verify_sha256() {
 
 # --- LOCK: evita execuções paralelas ---
 if [ -e "$LOCK_FILE" ]; then
-    echo -e "${VERMELHO}❌ Outra instalação está em andamento (${LOCK_FILE} existe).${RESET}"
-    exit 1
+    # Se o lock tiver mais de 10 minutos, é resquício de instalação anterior — remove
+    lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0) ))
+    if [ "$lock_age" -gt 600 ]; then
+        echo -e "${AMARELO}⚠  Lock file antigo encontrado (${lock_age}s). Removendo e continuando...${RESET}"
+        rm -f "$LOCK_FILE"
+    else
+        echo -e "${VERMELHO}❌ Outra instalação está em andamento (${LOCK_FILE} existe).${RESET}"
+        echo -e "${AMARELO}   Se não há instalação em curso, execute: rm -f ${LOCK_FILE}${RESET}"
+        exit 1
+    fi
 fi
 touch "$LOCK_FILE"
 
