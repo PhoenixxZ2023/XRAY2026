@@ -1,13 +1,16 @@
 #!/bin/bash
-# botxray.sh - DragonCore V7.7.1
+# botxray.sh - DragonCore V7.7.2
 # Correções aplicadas:
 #   - Wrappers setuid: chmod 4755 → 4750 + chown root:botxray — apenas botxray executa como root
-#   - restore_bot.sh: chmod 0644 → 640 root:nogroup no config.json
+#   - restore_bot.sh: chmod 0644 → 660 root:nogroup no config.json
 #   - restore_bot.sh: whitelist de paths mais restrita — bloqueia substituição do venv
 #   - Token lido com read -r + trim automático — compatível com todos os terminais SSH
 #   - ReadWritePaths remove /usr/local/bin — bot não precisa escrever em scripts do sistema
 #   - chown -R cirúrgico — não sobrescreve permissões de .bot_env e botxray.py
 #   - _wait_service_active() com retry de 5s substitui sleep 2 + is-active simples
+#   - /usr/local/etc/xray/ com chmod 770 root:nogroup — botxray cria tmpfiles para os.replace()
+#   - config.json com 660 root:nogroup — grupo lê E escreve (necessário para escrita atômica)
+#   - PrivateTmp=true impede uso de /tmp cross-device; tmpfile agora no mesmo dir do config
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (codigo: $?)"; read -rp "Enter...";' ERR
@@ -306,6 +309,9 @@ if ! tar -xzf "$FILE" -C / --no-overwrite-dir --no-same-permissions 2>/dev/null;
 fi
 # CORREÇÃO: 640 root:nogroup — Xray (nobody/nogroup) precisa ler o config.
 # Versão anterior usava 644 — qualquer usuário lia o config com UUIDs dos clientes.
+# Diretório com 770 — botxray precisa criar tmpfiles aqui para escrita atômica
+chmod 770 /usr/local/etc/xray 2>/dev/null || true
+chown root:nogroup /usr/local/etc/xray 2>/dev/null || true
 chmod 0660 /usr/local/etc/xray/config.json 2>/dev/null || true
 chown root:nogroup /usr/local/etc/xray/config.json 2>/dev/null || true
 [ -f /usr/local/etc/xray/preset.json ] && {
@@ -344,6 +350,22 @@ RSTEOF
     # CORREÇÃO: chown cirúrgico — apenas subdiretórios que o bot precisa escrever.
     # chown -R botxray:botxray /opt/XrayTools anterior sobrescrevia .bot_env e botxray.py
     # (root:botxray 640), que precisavam ser reconfigurados logo depois.
+
+    # CORREÇÃO: diretório /usr/local/etc/xray com 770 root:nogroup —
+    # botxray (via SupplementaryGroups=nogroup) precisa criar tmpfiles aqui
+    # para escrita atômica do config.json (tmpfile no mesmo dir → os.replace() funciona).
+    # PrivateTmp=true no serviço impede uso de /tmp para cross-device replace.
+    if [ -d /usr/local/etc/xray ]; then
+        chmod 770 /usr/local/etc/xray
+        chown root:nogroup /usr/local/etc/xray
+    fi
+
+    # config.json com 660 — grupo pode ler E escrever
+    if [ -f /usr/local/etc/xray/config.json ]; then
+        chmod 660 /usr/local/etc/xray/config.json
+        chown root:nogroup /usr/local/etc/xray/config.json
+    fi
+
     mkdir -p /opt/XrayTools/backups /opt/XrayTools/users
     chown botxray:botxray /opt/XrayTools/backups
     chmod 0750 /opt/XrayTools/backups
