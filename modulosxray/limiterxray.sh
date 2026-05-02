@@ -1,5 +1,5 @@
 #!/bin/bash
-# limiterxray.sh - DragonCore V7.4.1
+# limiterxray.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - chmod 0600 root:root → 640 root:nogroup no config.json (safe_config_write e func_check_and_block)
 #     Xray roda como nobody/nogroup — 600 impedia leitura do config após operações do limiter
@@ -105,7 +105,7 @@ release_lock() { flock -u 9; rm -f "$LOCK_FILE"; }
 # CORREÇÃO: centralizada — 640 root:nogroup em toda escrita e rollbacks.
 # 600 root:root anterior impedia que o Xray (nobody/nogroup) lesse o config.
 _apply_config_perms() {
-    chmod 0640 "$CONFIG_PATH"
+    chmod 0660 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
