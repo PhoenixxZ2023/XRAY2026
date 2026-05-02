@@ -1,5 +1,5 @@
 #!/bin/bash
-# uninstall.sh - DragonCore V7.5.1
+# uninstall.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - ACTIVE_DOMAIN lido ANTES de qualquer rm -rf — era lido após /opt/XrayTools já deletado
 #   - set -Eeuo pipefail — consistente com demais módulos
@@ -48,15 +48,15 @@ fi
 BACKUP_DIR="/root/backups"
 
 clear
-echo -e "${TITLE_BAR}   DESINSTALAÇÃO TOTAL DO DRAGONCORE   ${RESET}"
+echo -e "${TITLE_BAR}   DESINSTALAÇÃO TOTAL DO TURBONET XRAY   ${RESET}"
 echo ""
 echo -e "${TXT_YELLOW}Será removido permanentemente:${RESET}"
 echo " • Xray Core (binário, configs, serviço)"
 echo " • Bot Telegram (serviço e scripts)"
 echo " • Usuários e banco de dados (/opt/XrayTools)"
-echo " • Certificados SSL (/opt/DragonCoreSSL)"
-echo " • Todos os scripts do DragonCore (/usr/local/bin)"
-echo " • Entradas de cron do DragonCore"
+echo " • Certificados SSL (/opt/TurbonetCoreSSL)"
+echo " • Todos os scripts do TURBONET XRAY (/usr/local/bin)"
+echo " • Entradas de cron do TURBONET XRAY"
 echo ""
 echo -e "${TXT_RED}⚠  Esta operação é IRREVERSÍVEL sem um backup prévio.${RESET}"
 echo ""
@@ -103,7 +103,7 @@ echo -e "${TXT_GREEN}OK${RESET}"
 echo -n " Removendo dados e configs... "
 rm -rf /usr/local/etc/xray
 rm -rf /opt/XrayTools
-rm -rf /opt/DragonCoreSSL
+rm -rf /opt/TurbonetCoreSSL
 rm -rf /var/log/xray
 echo -e "${TXT_GREEN}OK${RESET}"
 
@@ -116,9 +116,9 @@ rmdir /usr/local/share/xray             2>/dev/null || true
 echo -e "${TXT_GREEN}OK${RESET}"
 
 # --- 5) SCRIPTS E ATALHOS ---
-# NOTA: renew_cert.sh fica em /opt/DragonCoreSSL (removido no step 3).
+# NOTA: renew_cert.sh fica em /opt/TurbonetCoreSSL (removido no step 3).
 # A entrada de cron que aponta para ele é removida no step 6.
-echo -n " Removendo scripts DragonCore... "
+echo -n " Removendo scripts TURBONET XRAY... "
 # Remove lock files que possam ter ficado de instalações anteriores
 rm -f /tmp/xray-install.lock /tmp/limiterxray.lock /tmp/menuxray.lock
 rm -f /usr/bin/xray-menu
@@ -143,7 +143,7 @@ rm -f /usr/local/bin/remover_expirados.sh
 rm -f /usr/local/bin/purge_users.sh
 echo -e "${TXT_GREEN}OK${RESET}"
 
-# --- 6) CRON (apenas entradas DragonCore) ---
+# --- 6) CRON (apenas entradas TURBONET XRAY) ---
 echo -n " Limpando cron... "
 (crontab -l 2>/dev/null \
     | grep -v "limiterxray" \
