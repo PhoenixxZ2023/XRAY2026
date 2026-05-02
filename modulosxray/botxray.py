@@ -67,24 +67,61 @@ logger = logging.getLogger(__name__)
 # FUNÇÕES DE SISTEMA
 # =============================================================
 
-def restart_xray() -> bool:
+def reload_xray_user(action: str, nick: str, user_uuid: str, inbound_tag: str = "inbound-dragoncore") -> bool:
     """
-    CORREÇÃO: retorna bool e loga stderr em falha.
-    Versão anterior usava check=False e ignorava o resultado silenciosamente —
-    o bot reportava sucesso mesmo com Xray parado.
+    Adiciona ou remove usuário via API do Xray em tempo real — sem restart.
+    Não derruba conexões de outros clientes.
+    action: "add" ou "remove"
+    Requer inbound api configurado (tag: api) e XRAY_BIN disponível.
     """
-    result = subprocess.run(
-        ["systemctl", "restart", XRAY_SERVICE],
-        check=False,
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        logger.error(
-            "Xray restart falhou (código %d): %s",
-            result.returncode,
-            result.stderr.decode(errors="replace").strip(),
-        )
-    return result.returncode == 0
+    try:
+        # Descobre a porta da API no config
+        data = load_config()
+        if not data:
+            return False
+        api_port = None
+        for inb in data.get("inbounds", []):
+            if inb.get("tag") == "api":
+                api_port = str(inb.get("port", ""))
+                break
+        if not api_port:
+            logger.warning("reload_xray_user: inbound api não encontrado")
+            return False
+
+        xray_bin = "/usr/local/bin/xray"
+        if not os.path.exists(xray_bin):
+            logger.warning("reload_xray_user: xray binário não encontrado")
+            return False
+
+        if action == "add":
+            user_json = json.dumps({
+                "id": user_uuid,
+                "email": nick,
+                "level": 0
+            })
+            cmd = [xray_bin, "api", "adduser",
+                   f"-server=127.0.0.1:{api_port}",
+                   f"-inboundTag={inbound_tag}",
+                   f"-user={user_json}"]
+        elif action == "remove":
+            cmd = [xray_bin, "api", "removeuser",
+                   f"-server=127.0.0.1:{api_port}",
+                   f"-inboundTag={inbound_tag}",
+                   f"-email={nick}"]
+        else:
+            return False
+
+        result = subprocess.run(cmd, check=False, capture_output=True, timeout=5)
+        if result.returncode == 0:
+            logger.info("reload_xray_user: %s '%s' via API OK", action, nick)
+            return True
+        else:
+            logger.warning("reload_xray_user %s falhou: %s",
+                          action, result.stderr.decode(errors="replace").strip())
+            return False
+    except Exception as e:
+        logger.error("reload_xray_user erro: %s", e)
+        return False
 
 
 def load_config() -> dict | None:
@@ -273,15 +310,14 @@ def core_create_user(nick: str, days: str) -> tuple[bool, str]:
     with open(USER_DB, "a") as f:
         f.write(f"{nick}|{user_uuid}|{expiry_date}\n")
 
-    # CORREÇÃO: verifica resultado do restart e informa falha ao usuário.
-    ok = restart_xray()
-    status = "" if ok else "\n⚠️ *Atenção:* Xray não reiniciou — verifique os logs."
+    # Adiciona usuário via API do Xray em tempo real (sem restart, sem derrubar outros)
+    reload_xray_user("add", nick, user_uuid)
 
-    link = generate_link(user_uuid, nick)
     return True, (
         f"✅ *Usuário Criado!*\n\n"
-        f"👤 `{nick}`\n📅 `{expiry_date}`\n\n"
-        f"🔗 *Link VLESS:*\n`{link}`{status}"
+        f"👤 Nome:   `{nick}`\n"
+        f"🔑 UUID:   `{user_uuid}`\n"
+        f"📅 Expira: `{expiry_date}`"
     )
 
 
@@ -321,9 +357,9 @@ def core_delete_user(nick: str) -> str:
     if not found:
         return "❌ Usuário não encontrado no sistema."
 
-    ok = restart_xray()
-    suffix = "" if ok else "\n⚠️ Xray não reiniciou — verifique os logs."
-    return f"✅ Usuário removido do sistema.{suffix}"
+    # Remove usuário via API do Xray em tempo real
+    reload_xray_user("remove", nick, "")
+    return "✅ Usuário removido do sistema."
 
 
 def core_block_user(nick: str) -> str:
@@ -349,9 +385,12 @@ def core_block_user(nick: str) -> str:
     if not save_config(data):
         return "❌ Falha ao salvar config.json."
 
-    ok = restart_xray()
-    suffix = "" if ok else "\n⚠️ Xray não reiniciou — verifique os logs."
-    return f"⛔ Usuário `{nick}` foi SUSPENSO.{suffix}"
+    # Remove o usuário com UUID real e adiciona com UUID falso via API (sem restart)
+    reload_xray_user("remove", nick, "")
+    locked_nick = f"LOCKED_{nick}"
+    fake_uuid_str = str(uuid.uuid4())
+    reload_xray_user("add", locked_nick, fake_uuid_str)
+    return f"⛔ Usuário `{nick}` foi SUSPENSO."
 
 
 def core_unblock_user(nick: str) -> str:
@@ -388,9 +427,10 @@ def core_unblock_user(nick: str) -> str:
     if not save_config(data):
         return "❌ Falha ao salvar config.json."
 
-    ok = restart_xray()
-    suffix = "" if ok else "\n⚠️ Xray não reiniciou — verifique os logs."
-    return f"✅ Usuário `{nick}` REATIVADO com sucesso.{suffix}"
+    # Remove entrada LOCKED_ e adiciona com UUID real via API (sem restart)
+    reload_xray_user("remove", f"LOCKED_{nick}", "")
+    reload_xray_user("add", nick, real_uuid)
+    return f"✅ Usuário `{nick}` REATIVADO com sucesso."
 
 
 def core_list_users_text() -> str:
@@ -732,3 +772,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+  
