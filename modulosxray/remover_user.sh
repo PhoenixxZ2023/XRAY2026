@@ -1,5 +1,5 @@
 #!/bin/bash
-# remover_user.sh - DragonCore V7.5.1
+# remover_user.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - chmod 777 → _apply_config_perms() (640 root:nogroup) nos 3 pontos
 #   - _cleanup() + trap EXIT desde o início — elimina trap tardio após mktemp
