@@ -277,11 +277,6 @@ echo "-----------------------------------------"
 echo -e " Nome:   ${TXT_CYAN}${nick}${RESET}"
 echo -e " UUID:   ${TXT_YELLOW}${uuid}${RESET}"
 echo -e " Expira: ${expiry} (${days} dias)"
-if [ -n "$link" ]; then
-    echo ""
-    echo -e " ${TXT_YELLOW}Link VLESS:${RESET}"
-    echo -e " ${TXT_CYAN}${link}${RESET}"
-fi
 echo "-----------------------------------------"
 echo -e " Salvo em: ${user_file}"
 echo "-----------------------------------------"
