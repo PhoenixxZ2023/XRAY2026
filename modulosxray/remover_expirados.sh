@@ -1,5 +1,5 @@
 #!/bin/bash
-# remover_expirados.sh - DragonCore V7.5.1
+# remover_expirados.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - _cleanup() separado da mensagem de erro — não exibe [ERRO] em saída normal
 #   - chmod 777 → _apply_config_perms() (640 root:nogroup) nos 3 pontos
@@ -39,7 +39,7 @@ export DEBIAN_FRONTEND=noninteractive
 # --- PERMISSÕES DO CONFIG ---
 # CORREÇÃO: centralizada — 640 root:nogroup em fluxo normal e todos os rollbacks.
 _apply_config_perms() {
-    chmod 0640 "$CONFIG_PATH"
+    chmod 0660 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
