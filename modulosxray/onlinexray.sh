@@ -1,5 +1,5 @@
 #!/bin/bash
-# onlinexray.sh - DragonCore V7.5.1
+# onlinexray.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - API_PORT fallback 10085 → 1080 (alinhado com core_manager)
 #   - bytes_human() usa awk — elimina dependência de bc
