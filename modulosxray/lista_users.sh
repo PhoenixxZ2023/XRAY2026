@@ -1,5 +1,5 @@
 #!/bin/bash
-# lista_users.sh - DragonCore V7.5.1
+# lista_users.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - set -Eeuo pipefail — consistente com demais módulos
 #   - Status do config.json pré-carregado em um único jq antes do loop (O(1) vs O(2n))
