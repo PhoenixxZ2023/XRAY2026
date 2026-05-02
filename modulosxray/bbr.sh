@@ -1,5 +1,5 @@
 #!/bin/bash
-# bbr.sh - Ativador de BBR V1.0 — DragonCore
+# bbr.sh - Ativador de BBR V1.0 — TURBONET XRAY
 # BBR (Bottleneck Bandwidth and Round-trip propagation time) é um algoritmo
 # de controle de congestionamento TCP desenvolvido pelo Google.
 # Melhora velocidade e estabilidade da conexão VPN, especialmente em redes
@@ -22,7 +22,7 @@ if [ "${EUID:-$(id -u)}" -ne 0 ]; then
 fi
 
 clear
-echo -e "${TITLE_BAR}   ATIVADOR DE BBR — DragonCore   ${RESET}"
+echo -e "${TITLE_BAR}   ATIVADOR DE BBR — TURBONET XRAY   ${RESET}"
 echo ""
 
 # --- STATUS ATUAL ---
@@ -47,7 +47,7 @@ _disable_bbr() {
     echo ""
     echo -e "${TXT_YELLOW}Desativando BBR e restaurando padrão do sistema...${RESET}"
 
-    # Remove arquivo de config dedicado do DragonCore
+    # Remove arquivo de config dedicado do TURBONET XRAY
     rm -f /etc/sysctl.d/99-bbr-dragoncore.conf
 
     # Remove entradas do sysctl.conf se existirem
@@ -192,7 +192,7 @@ fi
 # Cria ou atualiza arquivo de configuração dedicado
 SYSCTL_FILE="/etc/sysctl.d/99-bbr-dragoncore.conf"
 cat > "$SYSCTL_FILE" << 'EOF'
-# DragonCore — BBR TCP Congestion Control
+# TURBONET XRAY — BBR TCP Congestion Control
 # Ativado pelo módulo bbr.sh
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
