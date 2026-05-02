@@ -1,5 +1,5 @@
 #!/bin/bash
-# backup.sh - DragonCore V7.5.1
+# backup.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - chmod 0600 root:root → 640 root:nogroup no config.json e preset.json pós-restore
 #   - Permissões de /opt/XrayTools/users/*.txt restauradas explicitamente (600)
@@ -62,7 +62,7 @@ _wait_xray_active() {
 # 600 root:root anterior impedia que o Xray (nobody/nogroup) lesse o config.
 _apply_config_perms() {
     local f="$1"
-    chmod 0640 "$f"
+    chmod 0660 "$f"
     chown root:nogroup "$f"
 }
 
@@ -78,7 +78,7 @@ is_safe_tar() {
         case "$entry" in
             opt/XrayTools|opt/XrayTools/*)            ;;
             usr/local/etc/xray|usr/local/etc/xray/*)  ;;
-            opt/DragonCoreSSL|opt/DragonCoreSSL/*)    ;;
+            opt/TurbonetCoreSSL|opt/TurbonetCoreSSL/*)    ;;
             *) return 1 ;;
         esac
     done < <(tar -tzf "$tarfile" 2>/dev/null)
@@ -174,9 +174,9 @@ case "${opt:-0}" in
     mkdir -p "$_TMPDIR_BKP/usr/local/etc"
     cp -a /usr/local/etc/xray "$_TMPDIR_BKP/usr/local/etc/" 2>/dev/null || true
 
-    if [ -d "/opt/DragonCoreSSL" ]; then
+    if [ -d "/opt/TurbonetCoreSSL" ]; then
         mkdir -p "$_TMPDIR_BKP/opt"
-        cp -a /opt/DragonCoreSSL "$_TMPDIR_BKP/opt/" 2>/dev/null || true
+        cp -a /opt/TurbonetCoreSSL "$_TMPDIR_BKP/opt/" 2>/dev/null || true
     fi
 
     echo "Criando backup..."
@@ -206,8 +206,8 @@ case "${opt:-0}" in
     echo -e " Arquivo: ${TXT_CYAN}$(basename "$FILE")${RESET}"
     echo -e " Tamanho: ${SIZE}"
     echo -e " SHA256:  $(basename "$SHA_FILE")"
-    if [ ! -d "/opt/DragonCoreSSL" ]; then
-        echo -e "${TXT_CYAN}Nota:${RESET} /opt/DragonCoreSSL não existia e não foi incluída."
+    if [ ! -d "/opt/TurbonetCoreSSL" ]; then
+        echo -e "${TXT_CYAN}Nota:${RESET} /opt/TurbonetCoreSSL não existia e não foi incluída."
     fi
     echo "-----------------------------------------"
 
@@ -274,7 +274,7 @@ case "${opt:-0}" in
     echo ""
     echo "Criando snapshot do estado atual (segurança)..."
     SNAP_PATHS=( "opt/XrayTools" "usr/local/etc/xray" )
-    [ -d "/opt/DragonCoreSSL" ] && SNAP_PATHS+=( "opt/DragonCoreSSL" )
+    [ -d "/opt/TurbonetCoreSSL" ] && SNAP_PATHS+=( "opt/TurbonetCoreSSL" )
     _SNAP_FILE=$(mktemp /tmp/xray_restore_snap_XXXXXX.tar.gz)
     if tar -czf "$_SNAP_FILE" -C / "${SNAP_PATHS[@]}" >/dev/null 2>&1 && [ -s "$_SNAP_FILE" ]; then
         chmod 600 "$_SNAP_FILE"
@@ -334,13 +334,13 @@ case "${opt:-0}" in
             -exec chown root:root {} \; 2>/dev/null || true
     fi
 
-    if [ -d /opt/DragonCoreSSL ]; then
-        chmod 750 /opt/DragonCoreSSL
-        chown root:nogroup /opt/DragonCoreSSL                  2>/dev/null || true
-        chmod 644 /opt/DragonCoreSSL/fullchain.pem              2>/dev/null || true
-        chown root:root /opt/DragonCoreSSL/fullchain.pem        2>/dev/null || true
-        chmod 640 /opt/DragonCoreSSL/privkey.pem                2>/dev/null || true
-        chown root:nogroup /opt/DragonCoreSSL/privkey.pem       2>/dev/null || true
+    if [ -d /opt/TurbonetCoreSSL ]; then
+        chmod 750 /opt/TurbonetCoreSSL
+        chown root:nogroup /opt/TurbonetCoreSSL                  2>/dev/null || true
+        chmod 644 /opt/TurbonetCoreSSL/fullchain.pem              2>/dev/null || true
+        chown root:root /opt/TurbonetCoreSSL/fullchain.pem        2>/dev/null || true
+        chmod 640 /opt/TurbonetCoreSSL/privkey.pem                2>/dev/null || true
+        chown root:nogroup /opt/TurbonetCoreSSL/privkey.pem       2>/dev/null || true
     fi
 
     echo "Reiniciando serviços..."
