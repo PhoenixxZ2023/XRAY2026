@@ -1,5 +1,5 @@
 #!/bin/bash
-# certxray.sh - DragonCore V8.0.1
+# certxray.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - chmod 777 na chave privada → 640 root:nogroup (privkey.pem)
 #   - chmod 777 no certificado → 644 root:root (fullchain.pem)
@@ -16,7 +16,7 @@ set -Eeuo pipefail
 RAW_INPUT="$*"
 DOMAIN="$(echo "$RAW_INPUT" | awk '{print $NF}')"
 
-SSL_DIR="/opt/DragonCoreSSL"
+SSL_DIR="/opt/TurbonetCoreSSL"
 LE_DIR=""
 RENEW_SCRIPT="$SSL_DIR/renew_cert.sh"
 ACTIVE_DOMAIN_FILE="/opt/XrayTools/active_domain"
@@ -133,7 +133,7 @@ make_selfsigned() {
     ensure_ssl_dir || exit 1
 
     if ! openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-        -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
+        -subj "/C=BR/ST=SP/L=SaoPaulo/O=TurboNet/OU=VPN/CN=$DOMAIN" \
         -keyout "$SSL_DIR/privkey.pem" \
         -out "$SSL_DIR/fullchain.pem" >>"$LOG_FILE" 2>&1; then
         echo -e "${RB}❌ Falha ao gerar certificado autoassinado.${RESET}"
@@ -182,7 +182,7 @@ install_letsencrypt() {
     # Script de renovação gerado com permissões corretas e _wait_xray_active()
     cat > "$RENEW_SCRIPT" <<RENEW_EOF
 #!/bin/bash
-# renew_cert.sh — gerado por certxray.sh V8.0.1
+# renew_cert.sh — gerado por certxray.sh V1.0
 set -Eeuo pipefail
 LOG="/tmp/renew_cert.log"
 : > "\$LOG"
