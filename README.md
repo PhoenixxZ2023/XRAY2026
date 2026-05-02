@@ -1,4 +1,4 @@
-# ⚡ DragonCore Xray Manager | V7.7.1 (Modular)
+# ⚡ TURBONET XRAY Manager | V1.0 (Modular)
 
 ![Version](https://img.shields.io/badge/Version-7.7.1-blue?style=for-the-badge&labelColor=black)
 ![Bash](https://img.shields.io/badge/Language-Bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white)
@@ -51,7 +51,7 @@
 - Backup inclui apenas o essencial:
   - Bancos de dados: `users.db`, `limits.db`, `usage.db`, `session.db`
   - Configuração: `/usr/local/etc/xray/`
-  - Certificados: `/opt/DragonCoreSSL/`
+  - Certificados: `/opt/TurbonetCoreSSL/`
 - Arquivo SHA256 gerado ao lado do backup para verificação de integridade.
 - Extração com `--no-overwrite-dir --no-same-permissions` — tar não sobrescreve permissões existentes.
 - Permissões explícitas aplicadas após restore (640/600/750 nos arquivos corretos).
@@ -79,7 +79,7 @@
 | `limits.db / usage.db / session.db` | `0600` | `botxray:botxray` |
 | `.bot_env` | `0640` | `root:botxray` |
 | `botxray.py` | `0640` | `root:botxray` |
-| `DragonCoreSSL/` | `0750` | `root:nogroup` |
+| `TurbonetCoreSSL/` | `0750` | `root:nogroup` |
 | `fullchain.pem` | `0644` | `root:root` |
 | `privkey.pem` | `0640` | `root:nogroup` |
 | `renew_cert.sh` | `0700` | `root:root` |
@@ -105,7 +105,7 @@
 Execute como **root** na sua VPS:
 
 ```bash
-wget -qO installxray.sh https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/installxray.sh
+wget -qO installxray.sh https://raw.githubusercontent.com/PhoenixxZ2023/XRAY2026/main/installxray.sh
 chmod +x installxray.sh
 ./installxray.sh
 ```
@@ -113,7 +113,7 @@ chmod +x installxray.sh
 Ou em uma linha:
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main/installxray.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/PhoenixxZ2023/XRAY2026/main/installxray.sh)
 ```
 
 Após instalar, acesse o painel a qualquer momento com:
@@ -127,7 +127,7 @@ xray-menu
 ## 📁 Estrutura do Projeto
 
 ```
-XrayX-TLS/
+XRAY2026/
 ├── installxray.sh          # Instalador do launcher
 ├── menuxray.sh             # Menu principal (baixa módulos sob demanda)
 ├── modulosxray/
@@ -160,9 +160,9 @@ XrayX-TLS/
 | `/opt/XrayTools/users/` | Arquivos individuais de usuário com link VLESS (`0600`) |
 | `/usr/local/etc/xray/config.json` | Configuração principal do Xray (`0640 root:nogroup`) |
 | `/usr/local/etc/xray/preset.json` | Metadados da instalação (protocolo, porta, domínio) |
-| `/opt/DragonCoreSSL/fullchain.pem` | Certificado TLS público (`0644`) |
-| `/opt/DragonCoreSSL/privkey.pem` | Chave privada TLS (`0640 root:nogroup`) |
-| `/opt/DragonCoreSSL/renew_cert.sh` | Script de renovação automática (`0700 root:root`) |
+| `/opt/TurbonetCoreSSL/fullchain.pem` | Certificado TLS público (`0644`) |
+| `/opt/TurbonetCoreSSL/privkey.pem` | Chave privada TLS (`0640 root:nogroup`) |
+| `/opt/TurbonetCoreSSL/renew_cert.sh` | Script de renovação automática (`0700 root:root`) |
 | `/root/backups/` | Backups gerados pelo sistema |
 
 ---
@@ -200,7 +200,7 @@ No menu principal, selecione a opção `[99] ATUALIZAR MÓDULOS` para forçar o 
 
 ---
 
-## 📝 Notas de Versão — V7.7.1
+## 📝 Notas de Versão — V1.0
 
 ### Segurança
 - **`chmod 777` eliminado em todos os módulos** — substituído por permissões mínimas necessárias (`640/600/700/750`).
