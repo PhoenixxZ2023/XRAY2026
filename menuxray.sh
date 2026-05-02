@@ -1,5 +1,5 @@
 #!/bin/bash
-# menuxray.sh - DragonCore V7.5.1
+# menuxray.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - Aritmética de cache segura com set -e (substituído ((...)) por [...])
 #   - Validação de shebang robusta com suporte a BOM UTF-8
@@ -18,7 +18,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 # --- CONFIGURAÇÃO ---
 REPO_OWNER="PhoenixxZ2023"
-REPO_NAME="XrayX-TLS"
+REPO_NAME="XRAY2026"
 
 _validate_ref() {
     local ref="$1"
@@ -302,7 +302,7 @@ menu_display() {
     clear
     _refresh_status_cache
 
-    echo -e "${TITLE_BAR}        DRAGONCORE XRAY MANAGER (V7.5)        ${RESET}"
+    echo -e "${TITLE_BAR}        TURBONET XRAY MANAGER (V1.0)        ${RESET}"
     echo ""
 
     local status_txt="${TXT_RED}DESATIVADO${RESET}"
