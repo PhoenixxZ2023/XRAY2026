@@ -1,5 +1,5 @@
 #!/bin/bash
-# add_user.sh - DragonCore V7.5.1
+# add_user.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - chmod 777 → 640 root:nogroup em todos os pontos (fluxo normal + rollbacks)
 #   - trap duplo eliminado — _cleanup() centralizado com trap EXIT
@@ -261,7 +261,7 @@ link=$(generate_link "$uuid" "$nick")
 
 user_file="${CONN_INFO_DIR}/${nick}.txt"
 {
-    echo "# DragonCore - Usuário: ${nick}"
+    echo "# TURBONET XRAY - Usuário: ${nick}"
     echo "# Criado em: $(date '+%Y-%m-%d %H:%M:%S')"
     echo "NOME=${nick}"
     echo "UUID=${uuid}"
