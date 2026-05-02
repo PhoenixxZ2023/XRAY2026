@@ -1,5 +1,5 @@
 #!/bin/bash
-# unblock_user.sh - DragonCore V7.5.1
+# unblock_user.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - _apply_config_perms() centralizada — rollbacks agora incluem chown root:nogroup
 #   - _cleanup() + trap EXIT desde o início — elimina trap tardio após mktemp
