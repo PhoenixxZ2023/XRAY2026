@@ -1,5 +1,5 @@
 """
-botxray.py - DragonCore V7.7.1
+botxray.py - TURBONET XRAY V1.0
 Correções aplicadas:
   - save_config(): escrita atômica via tmpfile + os.replace() + chmod 0o640
   - core_delete_user(): USER_DB atômico via tmpfile + os.replace()
@@ -449,7 +449,7 @@ def core_list_users_text() -> str:
 
     sep = "-" * 65
     header = (
-        "📋 LISTA DE USUÁRIOS - DRAGONCORE\n"
+        "📋 LISTA DE USUÁRIOS - TURBONET XRAY\n"
         + sep + "\n"
         + f"{'NOME':<12} | {'VENCIMENTO':<11} | {'UUID (resumido)':<20} | STATUS\n"
         + sep + "\n"
@@ -501,7 +501,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data.clear()
     await update.message.reply_text(
-        "🐉 *PAINEL DRAGONCORE V7.7*",
+        "🐉 *PAINEL TURBONET XRAY V1.0*",
         reply_markup=build_menu(),
         parse_mode="Markdown",
     )
@@ -588,10 +588,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{tmpdir}/usr/local/etc/xray",
                     dirs_exist_ok=True,
                 )
-            if os.path.isdir("/opt/DragonCoreSSL"):
+            if os.path.isdir("/opt/TurbonetCoreSSL"):
                 shutil.copytree(
-                    "/opt/DragonCoreSSL",
-                    f"{tmpdir}/opt/DragonCoreSSL",
+                    "/opt/TurbonetCoreSSL",
+                    f"{tmpdir}/opt/TurbonetCoreSSL",
                     dirs_exist_ok=True,
                 )
             subprocess.run(
@@ -766,10 +766,9 @@ def main():
         allow_reentry=True,
     )
     app.add_handler(conv)
-    logger.info("DragonCore Bot V7.7.1 iniciado. Admin ID: %d", ADMIN_ID)
+    logger.info("TURBONET XRAY Bot V1.0 iniciado. Admin ID: %d", ADMIN_ID)
     app.run_polling()
 
 
 if __name__ == "__main__":
     main()
-  
