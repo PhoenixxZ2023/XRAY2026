@@ -1,5 +1,5 @@
 #!/bin/bash
-# installxray.sh - Instalador Premium V7.5.3 (Modular Launcher)
+# installxray.sh - Instalador Premium V1.0 (Modular Launcher)
 # Correções aplicadas:
 #   - Race condition: backup executado em sequência antes da limpeza
 #   - Validação de shebang mais robusta (suporte a BOM UTF-8)
@@ -27,7 +27,7 @@ RESET='\033[0m'
 
 # --- CONFIGURAÇÃO ---
 REPO_OWNER="PhoenixxZ2023"
-REPO_NAME="XrayX-TLS"
+REPO_NAME="XRAY2026"
 
 # Validação de REPO_REF — evita injeção de paths ou URLs via variável de ambiente
 _validate_ref() {
@@ -174,7 +174,10 @@ clear
 : > "$LOG_FILE"
 
 echo -e "${AZUL}==================================================${RESET}"
-echo -e "${AMARELO}🚀 DRAGONCORE MODULAR - LAUNCHER V7.5${RESET}"
+echo -e "${AMARELO}🚀 TURBONET XRAY MODULAR - LAUNCHER V1.0${RESET}"
+echo -e "${AZUL}==================================================${RESET}"
+echo -e "  Ref:  ${VERDE}${REPO_REF}${RESET}"
+echo -e "  Log:  ${VERDE}${LOG_FILE}${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
 
 # --- VERIFICAÇÃO DE ROOT ---
@@ -280,8 +283,10 @@ ln -sf "$MENU_PATH" "$SHORTCUT"
 
 echo ""
 echo -e "${AZUL}==================================================${RESET}"
-echo -e "${VERDE}🎉 SISTEMA MODULAR PRONTO! (V7.5)${RESET}"
+echo -e "${VERDE}🎉 SISTEMA MODULAR PRONTO! (V1.0)${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
+echo -e "  Acesso:  ${VERDE}xray-menu${RESET}"
+echo -e "  Log:     ${VERDE}${LOG_FILE}${RESET}"
 if [ -f "$MENU_BACKUP" ]; then
     echo -e "  Backup:  ${VERDE}${MENU_BACKUP}${RESET}"
 fi
