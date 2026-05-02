@@ -1,5 +1,5 @@
 #!/bin/bash
-# core_manager.sh - DragonCore V7.8.2
+# core_manager.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - chmod 777 → 640/600/700 em todos os arquivos sensíveis
 #   - connection_info.txt (UUID + link) agora 600 root:root
@@ -18,7 +18,7 @@ ACTIVE_DOMAIN_FILE="${XRAYTOOLS_DIR}/active_domain"
 CONN_INFO_FILE="${XRAYTOOLS_DIR}/connection_info.txt"
 LOG_FILE="/tmp/core_manager.log"
 
-SSL_DIR="/opt/DragonCoreSSL"
+SSL_DIR="/opt/TurbonetCoreSSL"
 KEY_FILE="$SSL_DIR/privkey.pem"
 CRT_FILE="$SSL_DIR/fullchain.pem"
 
@@ -26,7 +26,7 @@ XRAY_USER="nobody"
 XRAY_GROUP="nogroup"
 
 # Porta API configurável via variável de ambiente.
-# Padrão 1080 — porta padrão do projeto DragonCore.
+# Padrão 1080 — porta padrão do projeto TURBONET XRAY.
 API_PORT="${XRAY_API_PORT:-1080}"
 
 _validate_repo_base() {
@@ -37,7 +37,7 @@ _validate_repo_base() {
     fi
 }
 
-REPO_BASE="${REPO_BASE:-https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main}"
+REPO_BASE="${REPO_BASE:-https://raw.githubusercontent.com/PhoenixxZ2023/XRAY2026/main}"
 _validate_repo_base "$REPO_BASE"
 CERT_SCRIPT_URL="$REPO_BASE/modulosxray/certxray.sh"
 
@@ -90,7 +90,7 @@ require_root() {
 # CORREÇÃO: 640 root:nogroup — Xray lê como nobody/nogroup, não precisa escrever.
 # 777 anterior permitia que qualquer processo do sistema sobrescrevesse o config.
 _apply_config_perms() {
-    chmod 640 "$CONFIG_PATH"
+    chmod 660 "$CONFIG_PATH"
     chown root:"$XRAY_GROUP" "$CONFIG_PATH"
 }
 
@@ -384,7 +384,7 @@ func_generate_config() {
     fi
     sleep 2
 
-    header_blue "CONFIGURAÇÃO CONCLUÍDA (V7.8)"
+    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.0)"
 
     local status_show="${TXT_RED}FALHA${RESET}"
     if systemctl is-active --quiet xray 2>/dev/null; then
@@ -412,11 +412,11 @@ func_generate_config() {
 
     local link=""
     case "$network" in
-        grpc)   link="vless://${uuid}@${domain}:${port}?security=${sec}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#VLESS-DragonCore" ;;
-        ws)     link="vless://${uuid}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#VLESS-DragonCore" ;;
-        xhttp)  link="vless://${uuid}@${domain}:${port}?mode=auto&path=%2F&security=${sec}&encryption=none&host=${domain}&type=xhttp&sni=${domain}#VLESS-DragonCore" ;;
-        vision) link="vless://${uuid}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#VLESS-DragonCore" ;;
-        *)      link="vless://${uuid}@${domain}:${port}?security=${sec}&encryption=none&type=tcp&sni=${domain}#VLESS-DragonCore" ;;
+        grpc)   link="vless://${uuid}@${domain}:${port}?security=${sec}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#VLESS-TURBONET XRAY" ;;
+        ws)     link="vless://${uuid}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#VLESS-TURBONET XRAY" ;;
+        xhttp)  link="vless://${uuid}@${domain}:${port}?mode=auto&path=%2F&security=${sec}&encryption=none&host=${domain}&type=xhttp&sni=${domain}#VLESS-TURBONET XRAY" ;;
+        vision) link="vless://${uuid}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#VLESS-TURBONET XRAY" ;;
+        *)      link="vless://${uuid}@${domain}:${port}?security=${sec}&encryption=none&type=tcp&sni=${domain}#VLESS-TURBONET XRAY" ;;
     esac
 
     echo -e "${TXT_YELLOW}LINK DE CONEXÃO:${RESET}"
@@ -425,7 +425,7 @@ func_generate_config() {
 
     mkdir -p "$XRAYTOOLS_DIR"
     cat > "$CONN_INFO_FILE" <<EOF
-# DragonCore - Informações de Conexão
+# TURBONET XRAY - Informações de Conexão
 # Gerado em: $(date '+%Y-%m-%d %H:%M:%S')
 PROTOCOLO=${network^^}
 DOMINIO=${domain}
