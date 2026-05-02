@@ -1,5 +1,5 @@
 #!/bin/bash
-# botxray.sh - DragonCore V7.7.2
+# botxray.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - Wrappers setuid: chmod 4755 → 4750 + chown root:botxray — apenas botxray executa como root
 #   - restore_bot.sh: chmod 0644 → 660 root:nogroup no config.json
@@ -15,7 +15,7 @@
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (codigo: $?)"; read -rp "Enter...";' ERR
 
-REPO_BASE="${REPO_BASE:-https://raw.githubusercontent.com/PhoenixxZ2023/XrayX-TLS/main}"
+REPO_BASE="${REPO_BASE:-https://raw.githubusercontent.com/PhoenixxZ2023/XRAY2026/main}"
 LOG_FILE="/tmp/botxray_install.log"
 
 VERMELHO='\033[1;31m'
@@ -71,7 +71,7 @@ func_install_bot() {
     : > "$LOG_FILE"
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}      INSTALADOR BOT TELEGRAM - V7.7.1         ${RESET}"
+    echo -e "${AMARELO}      INSTALADOR BOT TELEGRAM - V1.0         ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
     echo ""
 
@@ -247,7 +247,7 @@ done
 mkdir -p "$tmpdir/usr/local/etc"
 cp -a /usr/local/etc/xray "$tmpdir/usr/local/etc/" 2>/dev/null || true
 mkdir -p "$tmpdir/opt"
-[ -d /opt/DragonCoreSSL ] && cp -a /opt/DragonCoreSSL "$tmpdir/opt/" 2>/dev/null || true
+[ -d /opt/TurbonetCoreSSL ] && cp -a /opt/TurbonetCoreSSL "$tmpdir/opt/" 2>/dev/null || true
 tar -czf "$OUT_FILE" -C "$tmpdir" opt usr >/dev/null 2>&1 || { echo "ERR: falha tar"; exit 3; }
 chmod 0600 "$OUT_FILE"
 sha256sum "$OUT_FILE" > "${OUT_FILE}.sha256"
@@ -290,14 +290,14 @@ while IFS= read -r entry; do
         opt/XrayTools/users/*|\
         usr/local/etc/xray|\
         usr/local/etc/xray/*|\
-        opt/DragonCoreSSL|\
-        opt/DragonCoreSSL/*) ;;
+        opt/TurbonetCoreSSL|\
+        opt/TurbonetCoreSSL/*) ;;
         *) echo "ERR: path nao permitido: $entry"; exit 9 ;;
     esac
 done < <(tar -tzf "$FILE" 2>/dev/null)
 SNAP=$(mktemp /tmp/restore_snap_XXXXXX.tar.gz)
 SNAP_PATHS=("opt/XrayTools" "usr/local/etc/xray")
-[ -d /opt/DragonCoreSSL ] && SNAP_PATHS+=("opt/DragonCoreSSL")
+[ -d /opt/TurbonetCoreSSL ] && SNAP_PATHS+=("opt/TurbonetCoreSSL")
 tar -czf "$SNAP" -C / "${SNAP_PATHS[@]}" >/dev/null 2>&1 && chmod 0600 "$SNAP" || SNAP=""
 systemctl stop xray    >/dev/null 2>&1 || true
 systemctl stop botxray >/dev/null 2>&1 || true
@@ -322,13 +322,13 @@ chown root:nogroup /usr/local/etc/xray/config.json 2>/dev/null || true
     find /opt/XrayTools/users -maxdepth 1 -name "*.txt" \
         -exec chmod 600 {} \; -exec chown root:root {} \; 2>/dev/null || true
 }
-[ -d /opt/DragonCoreSSL ] && {
-    chmod 750 /opt/DragonCoreSSL 2>/dev/null || true
-    chown root:nogroup /opt/DragonCoreSSL 2>/dev/null || true
-    chmod 644 /opt/DragonCoreSSL/fullchain.pem 2>/dev/null || true
-    chown root:root /opt/DragonCoreSSL/fullchain.pem 2>/dev/null || true
-    chmod 640 /opt/DragonCoreSSL/privkey.pem 2>/dev/null || true
-    chown root:nogroup /opt/DragonCoreSSL/privkey.pem 2>/dev/null || true
+[ -d /opt/TurbonetCoreSSL ] && {
+    chmod 750 /opt/TurbonetCoreSSL 2>/dev/null || true
+    chown root:nogroup /opt/TurbonetCoreSSL 2>/dev/null || true
+    chmod 644 /opt/TurbonetCoreSSL/fullchain.pem 2>/dev/null || true
+    chown root:root /opt/TurbonetCoreSSL/fullchain.pem 2>/dev/null || true
+    chmod 640 /opt/TurbonetCoreSSL/privkey.pem 2>/dev/null || true
+    chown root:nogroup /opt/TurbonetCoreSSL/privkey.pem 2>/dev/null || true
 }
 systemctl restart xray    >/dev/null 2>&1 || true
 systemctl restart botxray >/dev/null 2>&1 || true
@@ -394,7 +394,7 @@ RSTEOF
     # --- SYSTEMD SERVICE ---
     cat > /etc/systemd/system/botxray.service << 'SVCEOF'
 [Unit]
-Description=DragonCore Telegram Bot
+Description=TURBONET XRAY Telegram Bot
 After=network.target
 
 [Service]
@@ -475,7 +475,7 @@ func_view_logs() {
 while true; do
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V7.7.1        ${RESET}"
+    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.0        ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
 
     status_msg="${VERMELHO}NÃO INSTALADO${RESET}"
