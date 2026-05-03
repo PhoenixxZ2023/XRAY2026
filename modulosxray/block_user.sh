@@ -119,7 +119,7 @@ fi
 # sem isso, a lista ficava em branco sem contexto.
 echo -e "${TXT_CYAN}--- Usuários Ativos ---${RESET}"
 active_list=$(jq -r '
-    .inbounds[]? | select(.tag=="inbound-dragoncore")
+    .inbounds[]? | select(.tag=="inbound-turbonet")
     | .settings.clients[]?
     | select(.email? and (.email | startswith("LOCKED_") | not))
     | .email
@@ -154,7 +154,7 @@ if [ ! -f "$USER_DB" ] || \
 fi
 
 if ! jq -e --arg nick "$user_block" '
-    any(.inbounds[]? | select(.tag=="inbound-dragoncore").settings.clients[]?;
+    any(.inbounds[]? | select(.tag=="inbound-turbonet").settings.clients[]?;
         .email == $nick)
 ' "$CONFIG_PATH" >/dev/null 2>&1; then
     echo -e "${TXT_YELLOW}⚠  Usuário '${user_block}' não encontrado no config.json.${RESET}"
@@ -164,7 +164,7 @@ fi
 
 # Verifica se já está bloqueado
 if jq -e --arg lock "LOCKED_${user_block}" '
-    any(.inbounds[]? | select(.tag=="inbound-dragoncore").settings.clients[]?; .email == $lock)
+    any(.inbounds[]? | select(.tag=="inbound-turbonet").settings.clients[]?; .email == $lock)
 ' "$CONFIG_PATH" >/dev/null 2>&1; then
     echo -e "${TXT_YELLOW}⚠  Usuário '${user_block}' já está bloqueado.${RESET}"
     sleep 2; exit 0
@@ -187,10 +187,10 @@ _tmp_cfg=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")
 jq --arg nick   "$user_block" \
    --arg locked "LOCKED_$user_block" \
    --arg fake   "$FAKE_UUID" '
-    (.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+    (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
         (if type == "array" then . else [] end)
     |
-    (.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+    (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
         map(if .email == $nick then .email = $locked | .id = $fake else . end)
 ' "$CONFIG_PATH" > "$_tmp_cfg" 2>>"$LOG_FILE"
 
@@ -202,7 +202,7 @@ fi
 # CORREÇÃO: verificação pós-apply — confirma que LOCKED_ foi de fato inserido
 # no JSON antes de aplicar, além do jq empty.
 if ! jq -e --arg locked "LOCKED_${user_block}" '
-    any(.inbounds[]? | select(.tag=="inbound-dragoncore").settings.clients[]?;
+    any(.inbounds[]? | select(.tag=="inbound-turbonet").settings.clients[]?;
         .email == $locked)
 ' "$_tmp_cfg" >/dev/null 2>&1; then
     echo -e "${TXT_RED}❌ Verificação pós-geração falhou: LOCKED_ não encontrado no JSON.${RESET}"
@@ -214,26 +214,50 @@ _tmp_cfg=""   # já movido — _cleanup não deve tentar remover
 # CORREÇÃO: _apply_config_perms() em vez de chmod 777.
 _apply_config_perms
 
-# Restart com rollback em falha
-if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
-   ! systemctl restart xray >/dev/null 2>&1; then
-    echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}"
-    mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    # CORREÇÃO: rollback usa _apply_config_perms() — garante 640 + chown corretos.
-    _apply_config_perms
-    echo -e "${TXT_YELLOW}Config revertido. Usuário NÃO bloqueado.${RESET}"
-    journalctl -u xray -n 15 --no-pager 2>/dev/null || true
-    sleep 3; exit 1
-fi
+# --- HELPER: porta da API do Xray ---
+_xray_api_port() {
+    jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
+}
+_api_remove() {
+    local email="$1"
+    local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
+    /usr/local/bin/xray api removeuser -server="127.0.0.1:${p}" \
+        -inboundTag="inbound-turbonet" -email="$email" >/dev/null 2>&1
+}
+_api_add() {
+    local email="$1" id="$2"
+    local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
+    local uj; uj=$(jq -n --arg id "$id" --arg e "$email" '{"id":$id,"email":$e,"level":0}')
+    /usr/local/bin/xray api adduser -server="127.0.0.1:${p}" \
+        -inboundTag="inbound-turbonet" -user="$uj" >/dev/null 2>&1
+}
+_fallback_reload() {
+    local bak_restore="${1:-}"
+    if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
+       ! systemctl restart xray >/dev/null 2>&1; then
+        echo -e "${TXT_RED}❌ Falha ao recarregar Xray. Revertendo config...${RESET}"
+        mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+        _apply_config_perms
+        journalctl -u xray -n 15 --no-pager 2>/dev/null || true
+        echo -e "${TXT_YELLOW}Config revertido.${RESET}"
+        sleep 3; return 1
+    fi
+    if ! _wait_xray_active; then
+        echo -e "${TXT_RED}❌ Xray não ficou ativo. Revertendo...${RESET}"
+        mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+        _apply_config_perms
+        systemctl restart xray >/dev/null 2>&1 || true
+        sleep 2; return 1
+    fi
+    return 0
+}
 
-# CORREÇÃO: retry de até 5s para confirmar xray ativo.
-if ! _wait_xray_active; then
-    echo -e "${TXT_RED}❌ Xray não ficou ativo. Revertendo...${RESET}"
-    mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    # CORREÇÃO: rollback usa _apply_config_perms() — garante 640 + chown corretos.
-    _apply_config_perms
-    systemctl restart xray >/dev/null 2>&1 || true
-    sleep 2; exit 1
+# Hot reload: remove UUID real, adiciona com UUID falso (LOCKED_) via API.
+if _api_remove "$user_block" && _api_add "LOCKED_${user_block}" "$FAKE_UUID"; then
+    echo -e "${TXT_GREEN}Suspenso via API (sem restart).${RESET}"
+else
+    echo -e "${TXT_YELLOW}API indisponível — recarregando serviço...${RESET}"
+    _fallback_reload || exit 1
 fi
 
 echo ""
