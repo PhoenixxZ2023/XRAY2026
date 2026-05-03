@@ -101,8 +101,8 @@ if ! jq empty "$CONFIG_PATH" 2>/dev/null; then
     echo -e "${TXT_RED}❌ Config JSON inválido.${RESET}"
     sleep 2; exit 1
 fi
-if ! jq -e '.inbounds[]? | select(.tag=="inbound-dragoncore")' "$CONFIG_PATH" >/dev/null 2>&1; then
-    echo -e "${TXT_RED}❌ inbound-dragoncore não encontrado no config.${RESET}"
+if ! jq -e '.inbounds[]? | select(.tag=="inbound-turbonet")' "$CONFIG_PATH" >/dev/null 2>&1; then
+    echo -e "${TXT_RED}❌ inbound-turbonet não encontrado no config.${RESET}"
     sleep 2; exit 1
 fi
 
@@ -147,7 +147,7 @@ fi
 # Confirma existência antes de agir
 found_in_config=0
 if jq -e --arg id "$identifier" '
-    .inbounds[]? | select(.tag=="inbound-dragoncore")
+    .inbounds[]? | select(.tag=="inbound-turbonet")
     | .settings.clients[]?
     | select(.id == $id or .email == $id)
 ' "$CONFIG_PATH" >/dev/null 2>&1; then
@@ -172,7 +172,7 @@ if [ "$found_in_db" -eq 1 ] && [ -s "$USER_DB" ]; then
 fi
 if [ -z "$nick_real" ] && [ "$found_in_config" -eq 1 ]; then
     nick_real=$(jq -r --arg id "$identifier" '
-        .inbounds[]? | select(.tag=="inbound-dragoncore")
+        .inbounds[]? | select(.tag=="inbound-turbonet")
         | .settings.clients[]?
         | select(.id == $id or .email == $id)
         | .email // ""
@@ -192,10 +192,10 @@ cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
 _tmp_cfg=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")
 
 jq --arg id "$identifier" '
-  (.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+  (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
     (if type == "array" then . else [] end)
   |
-  (.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+  (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
     map(select(.id != $id and .email != $id))
 ' "$CONFIG_PATH" > "$_tmp_cfg"
 
@@ -204,34 +204,58 @@ if ! jq empty "$_tmp_cfg" 2>/dev/null; then
     sleep 2; exit 1
 fi
 
-before_count=$(jq '[.inbounds[]? | select(.tag=="inbound-dragoncore").settings.clients[]?] | length' "$CONFIG_PATH" 2>/dev/null || echo 0)
-after_count=$(jq  '[.inbounds[]? | select(.tag=="inbound-dragoncore").settings.clients[]?] | length' "$_tmp_cfg"    2>/dev/null || echo 0)
+before_count=$(jq '[.inbounds[]? | select(.tag=="inbound-turbonet").settings.clients[]?] | length' "$CONFIG_PATH" 2>/dev/null || echo 0)
+after_count=$(jq  '[.inbounds[]? | select(.tag=="inbound-turbonet").settings.clients[]?] | length' "$_tmp_cfg"    2>/dev/null || echo 0)
 
 mv -f "$_tmp_cfg" "$CONFIG_PATH"
 _tmp_cfg=""   # já movido — _cleanup não deve tentar remover
 # CORREÇÃO: _apply_config_perms() em vez de chmod 777.
 _apply_config_perms
 
-# --- RESTART COM ROLLBACK COMPLETO ---
-if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
-   ! systemctl restart xray >/dev/null 2>&1; then
-    echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}"
-    mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    # CORREÇÃO: rollback usa _apply_config_perms() — não volta para 777.
-    _apply_config_perms
-    journalctl -u xray -n 15 --no-pager 2>/dev/null || true
-    echo -e "${TXT_YELLOW}Config revertido. Usuário NÃO removido.${RESET}"
-    sleep 3; exit 1
-fi
+# --- HELPER: porta da API do Xray ---
+_xray_api_port() {
+    jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
+}
+_api_remove() {
+    local email="$1"
+    local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
+    /usr/local/bin/xray api removeuser -server="127.0.0.1:${p}" \
+        -inboundTag="inbound-turbonet" -email="$email" >/dev/null 2>&1
+}
+_api_add() {
+    local email="$1" id="$2"
+    local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
+    local uj; uj=$(jq -n --arg id "$id" --arg e "$email" '{"id":$id,"email":$e,"level":0}')
+    /usr/local/bin/xray api adduser -server="127.0.0.1:${p}" \
+        -inboundTag="inbound-turbonet" -user="$uj" >/dev/null 2>&1
+}
+_fallback_reload() {
+    local bak_restore="${1:-}"
+    if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
+       ! systemctl restart xray >/dev/null 2>&1; then
+        echo -e "${TXT_RED}❌ Falha ao recarregar Xray. Revertendo config...${RESET}"
+        mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+        _apply_config_perms
+        journalctl -u xray -n 15 --no-pager 2>/dev/null || true
+        echo -e "${TXT_YELLOW}Config revertido.${RESET}"
+        sleep 3; return 1
+    fi
+    if ! _wait_xray_active; then
+        echo -e "${TXT_RED}❌ Xray não ficou ativo. Revertendo...${RESET}"
+        mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+        _apply_config_perms
+        systemctl restart xray >/dev/null 2>&1 || true
+        sleep 2; return 1
+    fi
+    return 0
+}
 
-# CORREÇÃO: retry de até 5s para confirmar xray ativo.
-if ! _wait_xray_active; then
-    echo -e "${TXT_RED}❌ Xray não ficou ativo. Revertendo...${RESET}"
-    mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    # CORREÇÃO: rollback usa _apply_config_perms() — não volta para 777.
-    _apply_config_perms
-    systemctl restart xray >/dev/null 2>&1 || true
-    sleep 2; exit 1
+# Hot reload: remove via API (sem restart). Fallback: reload do serviço.
+if _api_remove "$identifier" 2>/dev/null; then
+    echo -e "${TXT_GREEN}Removido via API (sem restart).${RESET}"
+else
+    echo -e "${TXT_YELLOW}API indisponível — recarregando serviço...${RESET}"
+    _fallback_reload || exit 1
 fi
 
 # --- SÓ AGORA ATUALIZA O DB (após restart confirmado) ---
