@@ -320,6 +320,24 @@ func_generate_config() {
         vision)
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
                 '{network:"tcp",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.2"},tcpSettings:{header:{type:"none"}}}') ;;
+
+        httpupgrade)
+            # HTTPUpgrade — semelhante ao WS mas usa HTTP Upgrade header.
+            # Melhor compatibilidade com CDNs e proxies que inspecionam tráfego.
+            if [ "$use_tls" = "true" ]; then
+                stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
+                    '{network:"httpupgrade",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.2"},httpupgradeSettings:{path:"/",host:$dom}}')
+            else
+                stream_settings=$(jq -n --arg dom "$domain" \
+                    '{network:"httpupgrade",security:"none",httpupgradeSettings:{path:"/",host:$dom}}')
+            fi ;;
+
+        h2)
+            # HTTP/2 — requer TLS. Multiplexação nativa, boa performance.
+            # Ideal para redes que bloqueiam outros protocolos mas permitem HTTPS.
+            stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
+                '{network:"h2",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],alpn:["h2"],minVersion:"1.2"},httpSettings:{path:"/",host:[$dom]}}') ;;
+
         *)
             if [ "$use_tls" = "true" ]; then
                 stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
@@ -354,7 +372,7 @@ func_generate_config() {
         --argjson pol     "$policy" \
         --argjson rules   "$routing_rules" \
         --argjson clients "$clients_json" \
-        '{log:{loglevel:"warning"},stats:{},api:{services:["HandlerService","LoggerService","StatsService"],tag:"api"},policy:$pol,inbounds:[{tag:"api",port:($api|tonumber),protocol:"dokodemo-door",settings:{address:"127.0.0.1"},listen:"127.0.0.1"},{tag:"inbound-dragoncore",port:($port|tonumber),protocol:"vless",settings:{clients:$clients,decryption:"none",fallbacks:[]},streamSettings:$stream}],outbounds:[{protocol:"freedom",tag:"direct"},{protocol:"blackhole",tag:"blocked"},{protocol:"freedom",tag:"api"}],routing:{domainStrategy:"AsIs",rules:$rules}}' \
+        '{log:{loglevel:"warning"},stats:{},api:{services:["HandlerService","LoggerService","StatsService"],tag:"api"},policy:$pol,inbounds:[{tag:"api",port:($api|tonumber),protocol:"dokodemo-door",settings:{address:"127.0.0.1"},listen:"127.0.0.1"},{tag:"inbound-turbonet",port:($port|tonumber),protocol:"vless",settings:{clients:$clients,decryption:"none",fallbacks:[]},streamSettings:$stream}],outbounds:[{protocol:"freedom",tag:"direct"},{protocol:"blackhole",tag:"blocked"},{protocol:"freedom",tag:"api"}],routing:{domainStrategy:"AsIs",rules:$rules}}' \
         > "$tmp_config"
 
     if ! jq empty "$tmp_config" 2>/dev/null; then
@@ -412,11 +430,13 @@ func_generate_config() {
 
     local link=""
     case "$network" in
-        grpc)   link="vless://${uuid}@${domain}:${port}?security=${sec}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#VLESS-TURBONET XRAY" ;;
-        ws)     link="vless://${uuid}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#VLESS-TURBONET XRAY" ;;
-        xhttp)  link="vless://${uuid}@${domain}:${port}?mode=auto&path=%2F&security=${sec}&encryption=none&host=${domain}&type=xhttp&sni=${domain}#VLESS-TURBONET XRAY" ;;
-        vision) link="vless://${uuid}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#VLESS-TURBONET XRAY" ;;
-        *)      link="vless://${uuid}@${domain}:${port}?security=${sec}&encryption=none&type=tcp&sni=${domain}#VLESS-TURBONET XRAY" ;;
+        grpc)        link="vless://${uuid}@${domain}:${port}?security=${sec}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#VLESS-TURBONET" ;;
+        ws)          link="vless://${uuid}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#VLESS-TURBONET" ;;
+        xhttp)       link="vless://${uuid}@${domain}:${port}?mode=auto&path=%2F&security=${sec}&encryption=none&host=${domain}&type=xhttp&sni=${domain}#VLESS-TURBONET" ;;
+        vision)      link="vless://${uuid}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#VLESS-TURBONET" ;;
+        httpupgrade) link="vless://${uuid}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=httpupgrade&sni=${domain}#VLESS-TURBONET" ;;
+        h2)          link="vless://${uuid}@${domain}:${port}?path=%2F&security=tls&encryption=none&host=${domain}&type=h2&sni=${domain}#VLESS-TURBONET" ;;
+        *)           link="vless://${uuid}@${domain}:${port}?security=${sec}&encryption=none&type=tcp&sni=${domain}#VLESS-TURBONET" ;;
     esac
 
     echo -e "${TXT_YELLOW}LINK DE CONEXÃO:${RESET}"
@@ -525,30 +545,48 @@ func_wizard_install() {
     echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
 
     header_blue "PASSO 5/5 — PROTOCOLO"
-    echo " [1] WS     — Websocket"
-    echo " [2] GRPC   — gRPC"
-    echo " [3] XHTTP  — Otimizado (recomendado)"
-    echo " [4] TCP    — TCP simples"
-    echo " [5] VISION — XTLS Vision (exige TLS)"
-    read -rp "Opção [1-5]: " prot_opt
+    echo " [1] WS          — WebSocket"
+    echo " [2] GRPC        — gRPC"
+    echo " [3] XHTTP       — XHTTP Otimizado (recomendado)"
+    echo " [4] TCP         — TCP simples"
+    echo " [5] VISION      — XTLS Vision (exige TLS)"
+    echo " [6] HTTPUPGRADE — HTTP Upgrade (boa compatibilidade)"
+    echo " [7] H2          — HTTP/2 (exige TLS)"
+    read -rp "Opção [1-7]: " prot_opt
 
     local selected_net=""
     case "$prot_opt" in
-        1) selected_net="ws"     ;;
-        2) selected_net="grpc"   ;;
-        3) selected_net="xhttp"  ;;
-        4) selected_net="tcp"    ;;
-        5) selected_net="vision" ;;
+        1) selected_net="ws"          ;;
+        2) selected_net="grpc"        ;;
+        3) selected_net="xhttp"       ;;
+        4) selected_net="tcp"         ;;
+        5) selected_net="vision"      ;;
+        6) selected_net="httpupgrade" ;;
+        7) selected_net="h2"          ;;
         *) echo -e "${TXT_RED}❌ Opção inválida.${RESET}"; read -rp "Enter..."; return 1 ;;
     esac
 
     if [ "$selected_net" = "vision" ] && [ "$use_tls" = "false" ]; then
         echo -e "${TXT_RED}❌ Vision exige TLS.${RESET}"; read -rp "Enter..."; return 1
     fi
+    if [ "$selected_net" = "h2" ] && [ "$use_tls" = "false" ]; then
+        echo -e "${TXT_RED}❌ HTTP/2 exige TLS.${RESET}"; read -rp "Enter..."; return 1
+    fi
 
     header_blue "RESUMO DA CONFIGURAÇÃO"
+    local proto_desc=""
+    case "$selected_net" in
+        ws)          proto_desc="WebSocket" ;;
+        grpc)        proto_desc="gRPC" ;;
+        xhttp)       proto_desc="XHTTP (otimizado)" ;;
+        tcp)         proto_desc="TCP simples" ;;
+        vision)      proto_desc="XTLS Vision" ;;
+        httpupgrade) proto_desc="HTTP Upgrade" ;;
+        http/2)          proto_desc="HTTP/2" ;;
+        *)           proto_desc="${selected_net^^}" ;;
+    esac
     echo "========================================="
-    echo -e " ${TXT_CYAN}PROTOCOLO:${RESET}   ${selected_net^^}"
+    echo -e " ${TXT_CYAN}PROTOCOLO:${RESET}   ${proto_desc}"
     echo -e " ${TXT_CYAN}DOMÍNIO:${RESET}     ${domain_val}"
     echo -e " ${TXT_CYAN}PORTA:${RESET}       ${pub_port}"
     echo -e " ${TXT_CYAN}TLS:${RESET}         ${use_tls}"
