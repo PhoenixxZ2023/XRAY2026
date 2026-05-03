@@ -582,7 +582,7 @@ func_wizard_install() {
         tcp)         proto_desc="TCP simples" ;;
         vision)      proto_desc="XTLS Vision" ;;
         httpupgrade) proto_desc="HTTP Upgrade" ;;
-        http/2)          proto_desc="HTTP/2" ;;
+        h2)          proto_desc="HTTP/2" ;;
         *)           proto_desc="${selected_net^^}" ;;
     esac
     echo "========================================="
