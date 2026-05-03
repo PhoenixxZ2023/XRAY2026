@@ -162,8 +162,8 @@ if ! jq empty "$CONFIG_PATH" 2>/dev/null; then
     echo -e "${TXT_RED}❌ Config JSON inválido: $CONFIG_PATH${RESET}"
     sleep 2; exit 1
 fi
-if ! jq -e '.inbounds[]? | select(.tag=="inbound-dragoncore")' "$CONFIG_PATH" >/dev/null 2>&1; then
-    echo -e "${TXT_RED}❌ inbound-dragoncore não encontrado no config.${RESET}"
+if ! jq -e '.inbounds[]? | select(.tag=="inbound-turbonet")' "$CONFIG_PATH" >/dev/null 2>&1; then
+    echo -e "${TXT_RED}❌ inbound-turbonet não encontrado no config.${RESET}"
     sleep 2; exit 1
 fi
 
@@ -196,7 +196,7 @@ fi
 
 # Duplicidade no config.json
 if jq -e --arg nick "$nick" \
-    '.inbounds[]? | select(.tag=="inbound-dragoncore") | .settings.clients[]? | select(.email==$nick)' \
+    '.inbounds[]? | select(.tag=="inbound-turbonet") | .settings.clients[]? | select(.email==$nick)' \
     "$CONFIG_PATH" >/dev/null 2>&1; then
     echo -e "${TXT_RED}❌ Usuário '${nick}' já existe no config.json.${RESET}"
     sleep 2; exit 1
@@ -215,10 +215,10 @@ expiry="$(date -d "+${days} days" +%F)"
 _tmp_cfg=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")
 
 jq --arg uuid "$uuid" --arg nick "$nick" '
-  (.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+  (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
     (if type == "array" then . else [] end)
   |
-  (.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) +=
+  (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) +=
     [{"id": $uuid, "email": $nick, "level": 0}]
 ' "$CONFIG_PATH" > "$_tmp_cfg"
 
@@ -232,26 +232,37 @@ mv -f "$_tmp_cfg" "$CONFIG_PATH"
 _tmp_cfg=""   # já movido — _cleanup não deve tentar remover
 _apply_config_perms
 
-# --- RESTART COM VERIFICAÇÃO E ROLLBACK ---
-if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
-   ! systemctl restart xray >/dev/null 2>&1; then
-    echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}"
-    mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    # CORREÇÃO: rollback usa _apply_config_perms() — não volta para 777.
-    _apply_config_perms
-    echo -e "${TXT_YELLOW}Config revertido. Usuário NÃO criado.${RESET}"
-    journalctl -u xray -n 15 --no-pager 2>/dev/null || true
-    sleep 3; exit 1
-fi
+# --- HOT RELOAD VIA API (sem derrubar conexões ativas) ---
+_xray_api_port() {
+    jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
+}
+_hotreload_add() {
+    local api_port; api_port=$(_xray_api_port)
+    [ -z "${api_port:-}" ] && return 1
+    local user_json
+    user_json=$(jq -n --arg id "$uuid" --arg email "$nick" '{"id":$id,"email":$email,"level":0}')
+    /usr/local/bin/xray api adduser         -server="127.0.0.1:${api_port}"         -inboundTag="inbound-turbonet"         -user="$user_json" >/dev/null 2>&1
+}
 
-# CORREÇÃO: retry de até 5s para confirmar xray ativo.
-if ! _wait_xray_active; then
-    echo -e "${TXT_RED}❌ Xray não ficou ativo após restart. Revertendo...${RESET}"
-    mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    # CORREÇÃO: rollback usa _apply_config_perms() — não volta para 777.
-    _apply_config_perms
-    systemctl restart xray >/dev/null 2>&1 || true
-    sleep 2; exit 1
+if _hotreload_add; then
+    echo -e "${TXT_GREEN}Usuário aplicado via API (sem restart).${RESET}"
+else
+    echo -e "${TXT_YELLOW}API indisponível — recarregando serviço...${RESET}"
+    if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 &&        ! systemctl restart xray >/dev/null 2>&1; then
+        echo -e "${TXT_RED}❌ Falha ao recarregar Xray. Revertendo config...${RESET}"
+        mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+        _apply_config_perms
+        echo -e "${TXT_YELLOW}Config revertido. Usuário NÃO criado.${RESET}"
+        journalctl -u xray -n 15 --no-pager 2>/dev/null || true
+        sleep 3; exit 1
+    fi
+    if ! _wait_xray_active; then
+        echo -e "${TXT_RED}❌ Xray não ficou ativo. Revertendo...${RESET}"
+        mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+        _apply_config_perms
+        systemctl restart xray >/dev/null 2>&1 || true
+        sleep 2; exit 1
+    fi
 fi
 
 # --- GRAVA NO DB SOMENTE APÓS RESTART OK ---
