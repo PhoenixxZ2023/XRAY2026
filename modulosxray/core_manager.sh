@@ -159,6 +159,15 @@ generate_uuid() {
     fi
 }
 
+# Gera senha aleatória segura para Trojan (32 chars hex)
+generate_trojan_password() {
+    if command -v openssl &>/dev/null; then
+        openssl rand -hex 16
+    else
+        cat /dev/urandom | tr -dc 'a-f0-9' | head -c 32
+    fi
+}
+
 _verify_sha256() {
     local file="$1" sha_url="$2" label="$3"
     local expected
@@ -338,6 +347,11 @@ func_generate_config() {
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
                 '{network:"h2",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],alpn:["h2"],minVersion:"1.2"},httpSettings:{path:"/",host:[$dom]}}') ;;
 
+        trojan)
+            # Trojan sempre usa TLS — a segurança vem do disfarce como HTTPS
+            stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
+                '{network:"tcp",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.2"},tcpSettings:{header:{type:"none"}}}') ;;
+
         *)
             if [ "$use_tls" = "true" ]; then
                 stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
@@ -347,16 +361,25 @@ func_generate_config() {
             fi ;;
     esac
 
-    local uuid; uuid=$(generate_uuid)
-    if [ -z "$uuid" ]; then
-        echo -e "${TXT_RED}❌ Falha ao gerar UUID.${RESET}"; return 1
-    fi
-
-    local clients_json
-    if [ "$network" = "vision" ]; then
-        clients_json=$(jq -n --arg uuid "$uuid" '[{"id":$uuid,"level":0,"flow":"xtls-rprx-vision"}]')
+    # Trojan usa senha em vez de UUID
+    local credential=""
+    local clients_json=""
+    if [ "$network" = "trojan" ]; then
+        credential=$(generate_trojan_password)
+        if [ -z "$credential" ]; then
+            echo -e "${TXT_RED}❌ Falha ao gerar senha Trojan.${RESET}"; return 1
+        fi
+        clients_json=$(jq -n --arg pwd "$credential" '[{"password":$pwd,"level":0}]')
     else
-        clients_json=$(jq -n --arg uuid "$uuid" '[{"id":$uuid,"level":0}]')
+        credential=$(generate_uuid)
+        if [ -z "$credential" ]; then
+            echo -e "${TXT_RED}❌ Falha ao gerar UUID.${RESET}"; return 1
+        fi
+        if [ "$network" = "vision" ]; then
+            clients_json=$(jq -n --arg uuid "$credential" '[{"id":$uuid,"level":0,"flow":"xtls-rprx-vision"}]')
+        else
+            clients_json=$(jq -n --arg uuid "$credential" '[{"id":$uuid,"level":0}]')
+        fi
     fi
 
     if [ -f "$CONFIG_PATH" ]; then
@@ -365,14 +388,24 @@ func_generate_config() {
 
     local tmp_config; tmp_config=$(mktemp /tmp/xray_config_XXXXXX.json)
 
+    # Trojan usa protocol:"trojan" e settings diferentes (sem decryption)
+    local inbound_protocol="vless"
+    local inbound_settings_key="vless"
+    local extra_settings='"decryption":"none","fallbacks":[]}'
+    if [ "$network" = "trojan" ]; then
+        inbound_protocol="trojan"
+        extra_settings='}'
+    fi
+
     jq -n \
-        --argjson stream  "$stream_settings" \
-        --arg     port    "$port" \
-        --arg     api     "$api_port" \
-        --argjson pol     "$policy" \
-        --argjson rules   "$routing_rules" \
-        --argjson clients "$clients_json" \
-        '{log:{loglevel:"warning"},stats:{},api:{services:["HandlerService","LoggerService","StatsService"],tag:"api"},policy:$pol,inbounds:[{tag:"api",port:($api|tonumber),protocol:"dokodemo-door",settings:{address:"127.0.0.1"},listen:"127.0.0.1"},{tag:"inbound-turbonet",port:($port|tonumber),protocol:"vless",settings:{clients:$clients,decryption:"none",fallbacks:[]},streamSettings:$stream}],outbounds:[{protocol:"freedom",tag:"direct"},{protocol:"blackhole",tag:"blocked"},{protocol:"freedom",tag:"api"}],routing:{domainStrategy:"AsIs",rules:$rules}}' \
+        --argjson stream   "$stream_settings" \
+        --arg     port     "$port" \
+        --arg     api      "$api_port" \
+        --argjson pol      "$policy" \
+        --argjson rules    "$routing_rules" \
+        --argjson clients  "$clients_json" \
+        --arg     proto    "$inbound_protocol" \
+        '{log:{loglevel:"warning"},stats:{},api:{services:["HandlerService","LoggerService","StatsService"],tag:"api"},policy:$pol,inbounds:[{tag:"api",port:($api|tonumber),protocol:"dokodemo-door",settings:{address:"127.0.0.1"},listen:"127.0.0.1"},{tag:"inbound-turbonet",port:($port|tonumber),protocol:$proto,settings:(if $proto=="trojan" then {clients:$clients} else {clients:$clients,decryption:"none",fallbacks:[]} end),streamSettings:$stream}],outbounds:[{protocol:"freedom",tag:"direct"},{protocol:"blackhole",tag:"blocked"},{protocol:"freedom",tag:"api"}],routing:{domainStrategy:"AsIs",rules:$rules}}' \
         > "$tmp_config"
 
     if ! jq empty "$tmp_config" 2>/dev/null; then
@@ -430,13 +463,14 @@ func_generate_config() {
 
     local link=""
     case "$network" in
-        grpc)        link="vless://${uuid}@${domain}:${port}?security=${sec}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#VLESS-TURBONET" ;;
-        ws)          link="vless://${uuid}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#VLESS-TURBONET" ;;
-        xhttp)       link="vless://${uuid}@${domain}:${port}?mode=auto&path=%2F&security=${sec}&encryption=none&host=${domain}&type=xhttp&sni=${domain}#VLESS-TURBONET" ;;
-        vision)      link="vless://${uuid}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#VLESS-TURBONET" ;;
-        httpupgrade) link="vless://${uuid}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=httpupgrade&sni=${domain}#VLESS-TURBONET" ;;
-        h2)          link="vless://${uuid}@${domain}:${port}?path=%2F&security=tls&encryption=none&host=${domain}&type=h2&sni=${domain}#VLESS-TURBONET" ;;
-        *)           link="vless://${uuid}@${domain}:${port}?security=${sec}&encryption=none&type=tcp&sni=${domain}#VLESS-TURBONET" ;;
+        grpc)        link="vless://${credential}@${domain}:${port}?security=${sec}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#VLESS-TURBONET" ;;
+        ws)          link="vless://${credential}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#VLESS-TURBONET" ;;
+        xhttp)       link="vless://${credential}@${domain}:${port}?mode=auto&path=%2F&security=${sec}&encryption=none&host=${domain}&type=xhttp&sni=${domain}#VLESS-TURBONET" ;;
+        vision)      link="vless://${credential}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#VLESS-TURBONET" ;;
+        httpupgrade) link="vless://${credential}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=httpupgrade&sni=${domain}#VLESS-TURBONET" ;;
+        h2)          link="vless://${credential}@${domain}:${port}?path=%2F&security=tls&encryption=none&host=${domain}&type=h2&sni=${domain}#VLESS-TURBONET" ;;
+        trojan)      link="trojan://${credential}@${domain}:${port}?security=tls&sni=${domain}&type=tcp#TROJAN-TURBONET" ;;
+        *)           link="vless://${credential}@${domain}:${port}?security=${sec}&encryption=none&type=tcp&sni=${domain}#VLESS-TURBONET" ;;
     esac
 
     echo -e "${TXT_YELLOW}LINK DE CONEXÃO:${RESET}"
@@ -451,7 +485,7 @@ PROTOCOLO=${network^^}
 DOMINIO=${domain}
 PORTA=${port}
 TLS=${use_tls}
-UUID=${uuid}
+CREDENCIAL=${credential}
 LINK=${link}
 EOF
     # CORREÇÃO: 600 root:root — contém UUID e link de conexão completo.
@@ -552,7 +586,8 @@ func_wizard_install() {
     echo " [5] VISION      — XTLS Vision (exige TLS)"
     echo " [6] HTTPUPGRADE — HTTP Upgrade (boa compatibilidade)"
     echo " [7] H2          — HTTP/2 (exige TLS)"
-    read -rp "Opção [1-7]: " prot_opt
+    echo " [8] TROJAN      — Trojan (disfarça como HTTPS, exige TLS)"
+    read -rp "Opção [1-8]: " prot_opt
 
     local selected_net=""
     case "$prot_opt" in
@@ -563,6 +598,7 @@ func_wizard_install() {
         5) selected_net="vision"      ;;
         6) selected_net="httpupgrade" ;;
         7) selected_net="h2"          ;;
+        8) selected_net="trojan"      ;;
         *) echo -e "${TXT_RED}❌ Opção inválida.${RESET}"; read -rp "Enter..."; return 1 ;;
     esac
 
@@ -571,6 +607,9 @@ func_wizard_install() {
     fi
     if [ "$selected_net" = "h2" ] && [ "$use_tls" = "false" ]; then
         echo -e "${TXT_RED}❌ HTTP/2 exige TLS.${RESET}"; read -rp "Enter..."; return 1
+    fi
+    if [ "$selected_net" = "trojan" ] && [ "$use_tls" = "false" ]; then
+        echo -e "${TXT_RED}❌ Trojan exige TLS para funcionar corretamente.${RESET}"; read -rp "Enter..."; return 1
     fi
 
     header_blue "RESUMO DA CONFIGURAÇÃO"
@@ -583,6 +622,7 @@ func_wizard_install() {
         vision)      proto_desc="XTLS Vision" ;;
         httpupgrade) proto_desc="HTTP Upgrade" ;;
         h2)          proto_desc="HTTP/2" ;;
+        trojan)      proto_desc="Trojan (TLS obrigatório)" ;;
         *)           proto_desc="${selected_net^^}" ;;
     esac
     echo "========================================="
