@@ -268,6 +268,22 @@ if [ "$found_in_db" -eq 1 ] && [ -s "$USER_DB" ]; then
     chmod 600 "$USER_DB"
 fi
 
+# ==========================================
+# LIMPEZA DO LIMITADOR INSERIDA AQUI:
+# ==========================================
+limit_id="${nick_real:-$identifier}"
+if [ -n "$limit_id" ]; then
+    for db in "/opt/XrayTools/limits.db" "/opt/XrayTools/usage.db" "/opt/XrayTools/session.db"; do
+        if [ -f "$db" ]; then
+            tmp_db=$(mktemp "${db}.tmp.XXXXXX")
+            awk -F'|' -v id="$limit_id" '$1!=id {print $0}' "$db" > "$tmp_db"
+            mv -f "$tmp_db" "$db"
+            chmod 0600 "$db"
+        fi
+    done
+fi
+# ==========================================
+
 # CORREÇÃO: flag booleana rastreia se o arquivo existia antes da remoção.
 # Evita exibir "apagado" para arquivo que nunca existiu.
 file_removed=0
