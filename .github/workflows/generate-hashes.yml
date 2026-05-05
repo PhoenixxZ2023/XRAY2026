@@ -1,0 +1,55 @@
+name: Gerar SHA256 dos Módulos
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'modulosxray/**.sh'
+      - 'modulosxray/**.py'
+      - 'installxray.sh'
+      - 'menuxray.sh'
+
+jobs:
+  generate-hashes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Gerar SHA256 de todos os módulos
+        run: |
+          echo "=== Gerando hashes ==="
+
+          # Módulos em modulosxray/
+          for f in modulosxray/*.sh modulosxray/*.py; do
+            [ -f "$f" ] || continue
+            sha256sum "$f" | awk '{print $1}' > "${f}.sha256"
+            echo "✓ $(basename $f).sha256 = $(cat ${f}.sha256)"
+          done
+
+          # Arquivos raiz
+          for f in installxray.sh menuxray.sh; do
+            [ -f "$f" ] || continue
+            sha256sum "$f" | awk '{print $1}' > "${f}.sha256"
+            echo "✓ ${f}.sha256 = $(cat ${f}.sha256)"
+          done
+
+      - name: Commitar hashes atualizados
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Só commita se houver mudanças
+          if git diff --quiet; then
+            echo "Nenhuma mudança nos hashes — nada a commitar."
+          else
+            git add modulosxray/*.sha256 *.sha256 2>/dev/null || true
+            git commit -m "chore: atualiza SHA256 dos módulos [skip ci]"
+            git push
+            echo "✅ Hashes atualizados e commitados."
+          fi
