@@ -1,13 +1,30 @@
-# ⚡ TURBONET XRAY Manager | V1.0 (Modular)
+# ⚡ TURBONET XRAY Manager | V1.0
 
-![Version](https://img.shields.io/badge/Version-7.7.1-blue?style=for-the-badge&labelColor=black)
+![Version](https://img.shields.io/badge/Version-1.0-blue?style=for-the-badge&labelColor=black)
 ![Bash](https://img.shields.io/badge/Language-Bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white)
 ![Python](https://img.shields.io/badge/Bot-Python3-yellow?style=for-the-badge&logo=python&logoColor=white)
 ![Xray](https://img.shields.io/badge/Core-Xray-purple?style=for-the-badge)
-![Security](https://img.shields.io/badge/Security-UUID_Scramble-red?style=for-the-badge)
+![Security](https://img.shields.io/badge/Security-SHA256-red?style=for-the-badge)
+![License](https://img.shields.io/badge/License-Free-green?style=for-the-badge)
 
-> **Gerenciador Xray híbrido (Bash + Python)** com arquitetura modular, cache local e foco em estabilidade e segurança.
-> Ideal para quem administra múltiplos usuários VLESS e precisa de painel local + bot Telegram.
+> **Gerenciador Xray híbrido (Bash + Python)** com arquitetura modular, hot reload via API, bot Telegram, API pública de consulta e suporte a 8 protocolos.
+> Ideal para quem administra múltiplos usuários VLESS/Trojan e precisa de painel local + bot Telegram sem derrubar conexões ativas.
+
+---
+
+## 🚀 Instalação Rápida
+
+Execute como **root** na sua VPS:
+
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/PhoenixxZ2023/XRAY2026/main/installxray.sh)
+```
+
+Após instalar, acesse o painel a qualquer momento com:
+
+```bash
+xray-menu
+```
 
 ---
 
@@ -18,52 +35,124 @@
 - O `menuxray.sh` baixa os módulos **sob demanda** e mantém cache em `/usr/local/bin`.
 - Mesmo se o GitHub ficar fora do ar, o painel segue funcionando com os módulos já cacheados.
 - Suporte a `REPO_REF` para fixar versão por branch, tag ou commit hash.
+- **Verificação SHA256** automática em cada download — módulo corrompido ou adulterado é rejeitado.
 
-### 🛡️ Bloqueio Seguro (Scramble)
+### ⚡ Hot Reload — Sem Derrubar Conexões
+- Adicionar, remover, bloquear e desbloquear usuários via **API do Xray em tempo real**.
+- Nenhum cliente conectado é derrubado durante operações de gerenciamento.
+- Fallback automático para reload do serviço se a API não estiver disponível.
+- Funciona tanto pelo terminal quanto pelo bot Telegram.
+
+### 🌐 Protocolos Suportados (8 opções)
+
+| Protocolo | TLS | Sem TLS | Descrição |
+|-----------|-----|---------|-----------|
+| XHTTP | ✅ | ✅ | Otimizado — recomendado |
+| WebSocket (WS) | ✅ | ✅ | Ampla compatibilidade |
+| gRPC | ✅ | ✅ | Alta performance |
+| TCP | ✅ | ✅ | Simples e direto |
+| VISION (XTLS) | ✅ | ❌ | Máxima performance com TLS |
+| HTTPUpgrade | ✅ | ✅ | Boa compatibilidade com CDNs |
+| HTTP/2 | ✅ | ❌ | Multiplexação nativa |
+| Trojan | ✅ | ❌ | Disfarça como HTTPS — bypass DPI |
+
+### 🛡️ Bloqueio Seguro (UUID Scramble)
 - Bloquear **não deleta** o usuário — mantém histórico no `users.db`.
-- Troca UUID por falso e aplica prefixo `LOCKED_` no email (fácil de reverter).
+- Troca UUID por falso e aplica prefixo `LOCKED_` — fácil de reverter.
 - Desbloqueio restaura o UUID original do banco de dados.
 
+### 🔍 API Pública `/check`
+- Endpoint HTTP para consulta de status de usuário sem acesso SSH.
+- Ideal para revendedores e aplicativos VPN verificarem clientes.
+- Respostas em JSON com nome, UUID, expiração, status e dias restantes.
+
+```bash
+GET /check?user=NOME      → status por nome
+GET /check?uuid=UUID      → status por UUID
+GET /check/status         → status geral do servidor
+GET /health               → healthcheck
+```
+
+Exemplo de resposta:
+```json
+{"name":"joao","uuid":"xxxx","expiry":"2026-06-01","status":"active","days_left":30}
+```
+
 ### 🔒 Segurança
-- Validação de integridade SHA256 nos downloads de módulos.
-- Validação de domínio RFC 1123 antes de emitir certificados.
-- `config.json` com permissão **`0640 root:nogroup`** — Xray (`nobody`) lê, outros não têm acesso.
-- `privkey.pem` com permissão **`0640 root:nogroup`** — chave privada TLS nunca legível por outros processos.
-- `renew_cert.sh` com permissão **`0700 root:root`** — script de renovação não modificável por processos não-root.
-- Wrappers setuid do bot com permissão **`4750 root:botxray`** — apenas o grupo `botxray` executa como root.
-- Backup do config antes de qualquer modificação, com rollback automático em falha.
-- `REPO_BASE` e `PINNED_REF` validados com regex antes de uso em URLs.
-- UUID gerado com fallback (`uuidgen` → `/proc/sys/kernel/random/uuid` → `/dev/urandom`).
-- Validação de shebang BOM-safe (suporte a UTF-8 BOM de editores Windows/macOS) em todos os downloads.
-- Validação de IPs reservados/privados em `validate_domain_or_ip()` — loopback, RFC1918 e multicast rejeitados.
+- Verificação **SHA256** em todos os downloads — gerada automaticamente via GitHub Actions a cada push.
+- Validação de domínio RFC 1123 e rejeição de IPs privados/reservados.
+- `config.json` com permissão `0660 root:nogroup` — Xray lê, bot escreve, outros sem acesso.
+- `privkey.pem` com permissão `0640 root:nogroup` — chave privada TLS nunca legível por outros.
+- `renew_cert.sh` com `0700 root:root` — não modificável por processos não-root.
+- Wrappers setuid com `4750 root:botxray` — apenas o grupo `botxray` executa como root.
+- Escrita atômica via `tmpfile + os.replace()` em todos os arquivos críticos.
+- Lock file com detecção de idade — remove locks antigos automaticamente.
 
-### 🤖 Bot Telegram (Seguro)
-- Bot roda em **venv** isolado (não afeta o Python do sistema).
-- Bot roda como usuário **não-root** (`botxray`).
-- Token e Admin ID armazenados em `EnvironmentFile` (`/opt/XrayTools/.bot_env`) — nunca hardcoded no código.
-- Escrita atômica no `config.json` e `users.db` via `tmpfile + os.replace()` — sem corrupção em falha parcial.
-- `save_config()` aplica `chmod 0640` — config não fica legível por outros usuários após operações do bot.
-- `restart_xray()` retorna status e informa falha ao operador via Telegram.
-- Backup pelo bot gera arquivo **SHA256** e envia junto ao admin.
-- Nicks normalizados para minúsculas em todas as operações — consistente com os scripts Shell.
+### 🤖 Bot Telegram (Seguro e Funcional)
+- Bot roda como usuário dedicado **não-root** (`botxray`) com venv isolado.
+- Token e Admin ID em `EnvironmentFile` — nunca hardcoded.
+- `SupplementaryGroups=nogroup` no systemd — acesso correto ao config.json.
+- `PrivateTmp=true` — /tmp isolado por segurança.
+- Todas as operações via **API do Xray** — sem restart, sem derrubar clientes.
+- Backup pelo bot gera SHA256 e envia junto ao admin.
 
-### 📦 Backup Compacto (inclui SSL)
-- Backup inclui apenas o essencial:
-  - Bancos de dados: `users.db`, `limits.db`, `usage.db`, `session.db`
-  - Configuração: `/usr/local/etc/xray/`
-  - Certificados: `/opt/TurbonetCoreSSL/`
-- Arquivo SHA256 gerado ao lado do backup para verificação de integridade.
-- Extração com `--no-overwrite-dir --no-same-permissions` — tar não sobrescreve permissões existentes.
-- Permissões explícitas aplicadas após restore (640/600/750 nos arquivos corretos).
+### 📦 Backup Compacto com Integridade
+- Inclui: `users.db`, configs do Xray e certificados SSL.
+- SHA256 gerado automaticamente ao lado de cada backup.
+- Snapshot antes do restore — rollback disponível se falhar.
 - Rotação automática — mantém apenas os 5 backups mais recentes.
-- **Não inclui:** venv Python, scripts, backups anteriores.
+
+### 📊 Limitador de Consumo por GB
+- Controle de tráfego individual por usuário via API do Xray.
+- Lock exclusivo com `flock` — evita race condition entre cron e UI.
+- Bloqueio automático ao atingir o limite — sem restart do serviço.
 
 ### 📡 Monitor Online (API-only)
-- Monitor usa a **API do Xray** — sem mexer em loglevel, sem restart.
-- Delta real por ciclo (down+up separados desde a inicialização) — coluna "DELTA CICLO" exibe tráfego do intervalo, não total acumulado.
-- Flag de saúde do Xray persistida entre ciclos — aviso não desaparece entre verificações.
-- Janela deslizante de atividade (padrão 15s).
-- Timeout por chamada à API para evitar travamentos.
+- Usa a API do Xray — sem alterar loglevel, sem restart.
+- Delta real de tráfego por ciclo de polling.
+- Janela deslizante de atividade configurável (padrão 15s).
+
+### 🚀 Otimização TCP (BBR)
+- Ativa/desativa BBR com detecção automática de kernel compatível.
+- Persiste entre reinicializações via `/etc/sysctl.d/`.
+
+---
+
+## 📋 Menu Principal
+
+```
+[01] CRIAR USUÁRIO
+[02] REMOVER USUÁRIO
+[03] LISTAR USUÁRIOS
+[04] INSTALAR/CONFIGURAR XRAY
+[05] LIMPAR EXPIRADOS
+[06] DESINSTALAR XRAY
+[07] LIMITADOR CONSUMO (GB)
+[08] BOT TELEGRAM
+[09] BACKUP / RESTORE
+[10] BLOQUEAR USUÁRIOS
+[11] DESBLOQUEAR USUÁRIOS
+[12] MONITOR ONLINE
+[13] ATIVAR BBR (OTIMIZAÇÃO TCP)
+[14] API /CHECK (CONSULTA DE USUÁRIOS)
+[99] ATUALIZAR MÓDULOS (FORÇA DOWNLOAD)
+[00] SAIR
+```
+
+---
+
+## 🤖 Bot Telegram — Funcionalidades
+
+| Função | Descrição |
+|--------|-----------|
+| `/start` ou `/menu` | Abre o painel |
+| 👤 CRIAR | Cria usuário — exibe Nome, UUID e data de expiração |
+| 🗑️ REMOVER | Remove usuário do sistema |
+| ⛔ SUSPENDER | Bloqueia sem deletar (scramble UUID) |
+| ✅ REATIVAR | Restaura UUID original e reativa |
+| 📋 LISTAR (TXT) | Envia arquivo `.txt` com todos os usuários |
+| 📥 BACKUP | Gera backup compacto + SHA256 e envia via Telegram |
+| ❌ SAIR | Fecha o painel |
 
 ---
 
@@ -71,11 +160,12 @@
 
 | Arquivo / Diretório | Permissão | Dono |
 |---|---|---|
-| `config.json` | `0640` | `root:nogroup` |
-| `preset.json` | `0640` | `root:nogroup` |
+| `/usr/local/etc/xray/` | `0770` | `root:nogroup` |
+| `config.json` | `0660` | `root:nogroup` |
+| `preset.json` | `0660` | `root:nogroup` |
 | `connection_info.txt` | `0600` | `root:root` |
 | `users/*.txt` | `0600` | `root:root` |
-| `users.db` | `0600` | `root:root` ou `botxray:botxray` |
+| `users.db` | `0600` | `root:root` |
 | `limits.db / usage.db / session.db` | `0600` | `botxray:botxray` |
 | `.bot_env` | `0640` | `root:botxray` |
 | `botxray.py` | `0640` | `root:botxray` |
@@ -100,136 +190,58 @@
 
 ---
 
-## 🛠️ Instalação Rápida
-
-Execute como **root** na sua VPS:
-
-```bash
-wget -qO installxray.sh https://raw.githubusercontent.com/PhoenixxZ2023/XRAY2026/main/installxray.sh
-chmod +x installxray.sh
-./installxray.sh
-```
-
-Ou em uma linha:
-
-```bash
-bash <(wget -qO- https://raw.githubusercontent.com/PhoenixxZ2023/XRAY2026/main/installxray.sh)
-```
-
-Após instalar, acesse o painel a qualquer momento com:
-
-```bash
-xray-menu
-```
-
----
-
 ## 📁 Estrutura do Projeto
 
 ```
 XRAY2026/
-├── installxray.sh          # Instalador do launcher
-├── menuxray.sh             # Menu principal (baixa módulos sob demanda)
-├── modulosxray/
-│   ├── core_manager.sh     # Wizard de instalação/configuração do Xray
-│   ├── certxray.sh         # Emissão de certificados TLS
-│   ├── add_user.sh         # Criar usuário
-│   ├── remover_user.sh     # Remover usuário
-│   ├── lista_users.sh      # Listar usuários com status
-│   ├── block_user.sh       # Bloquear usuário (scramble)
-│   ├── unblock_user.sh     # Desbloquear usuário
-│   ├── remover_expirados.sh# Limpar usuários vencidos
-│   ├── limiterxray.sh      # Controle de consumo por GB
-│   ├── onlinexray.sh       # Monitor de usuários online (API)
-│   ├── backup.sh           # Backup e restore
-│   ├── botxray.sh          # Instalador do bot Telegram
-│   ├── botxray.py          # Bot Telegram (Python)
-│   └── uninstall.sh        # Desinstalação completa
+├── installxray.sh              # Instalador do launcher
+├── menuxray.sh                 # Menu principal
+├── generate_hashes.sh          # Gerador de SHA256 local
+├── .github/
+│   └── workflows/
+│       └── generate-hashes.yml # GitHub Actions — SHA256 automático
+└── modulosxray/
+    ├── core_manager.sh         # Wizard de configuração do Xray (8 protocolos)
+    ├── certxray.sh             # Emissão de certificados TLS
+    ├── add_user.sh             # Criar usuário (hot reload)
+    ├── remover_user.sh         # Remover usuário (hot reload)
+    ├── lista_users.sh          # Listar usuários com status
+    ├── block_user.sh           # Bloquear usuário (hot reload)
+    ├── unblock_user.sh         # Desbloquear usuário (hot reload)
+    ├── remover_expirados.sh    # Limpar usuários vencidos
+    ├── limiterxray.sh          # Controle de consumo por GB
+    ├── onlinexray.sh           # Monitor online (API)
+    ├── backup.sh               # Backup e restore
+    ├── bbr.sh                  # Ativar/desativar BBR
+    ├── check_api.sh            # API pública /check
+    ├── botxray.sh              # Instalador do bot Telegram
+    ├── botxray.py              # Bot Telegram (Python)
+    ├── uninstall.sh            # Desinstalação completa
+    └── *.sha256                # Hashes de integridade (automáticos)
 ```
 
 ---
 
-## 🗂️ Arquivos de Dados
+## 📝 Changelog — V1.0
 
-| Arquivo | Descrição |
-|---------|-----------|
-| `/opt/XrayTools/users.db` | Banco de usuários (`nick\|uuid\|expiry`) |
-| `/opt/XrayTools/limits.db` | Limites de consumo por usuário |
-| `/opt/XrayTools/usage.db` | Consumo acumulado por usuário |
-| `/opt/XrayTools/.bot_env` | Token e Admin ID do bot (`0640 root:botxray`) |
-| `/opt/XrayTools/users/` | Arquivos individuais de usuário com link VLESS (`0600`) |
-| `/usr/local/etc/xray/config.json` | Configuração principal do Xray (`0640 root:nogroup`) |
-| `/usr/local/etc/xray/preset.json` | Metadados da instalação (protocolo, porta, domínio) |
-| `/opt/TurbonetCoreSSL/fullchain.pem` | Certificado TLS público (`0644`) |
-| `/opt/TurbonetCoreSSL/privkey.pem` | Chave privada TLS (`0640 root:nogroup`) |
-| `/opt/TurbonetCoreSSL/renew_cert.sh` | Script de renovação automática (`0700 root:root`) |
-| `/root/backups/` | Backups gerados pelo sistema |
-
----
-
-## 🌐 Protocolos Suportados
-
-| Protocolo | TLS | Sem TLS |
-|-----------|-----|---------|
-| XHTTP | ✅ | ✅ |
-| WebSocket (WS) | ✅ | ✅ |
-| gRPC | ✅ | ✅ |
-| TCP | ✅ | ✅ |
-| VISION (XTLS) | ✅ | ❌ (exige TLS) |
-
----
-
-## 🤖 Bot Telegram — Funcionalidades
-
-| Função | Descrição |
-|--------|-----------|
-| `/start` ou `/menu` | Abre o painel |
-| CRIAR | Cria usuário e gera link VLESS |
-| REMOVER | Remove usuário do sistema |
-| SUSPENDER | Bloqueia sem deletar (scramble UUID) |
-| REATIVAR | Restaura UUID original e reativa |
-| LISTAR | Envia arquivo `.txt` com todos os usuários |
-| BACKUP | Gera backup compacto + SHA256 e envia via Telegram |
-| SAIR | Fecha o painel |
-
----
-
-## 🔄 Atualizar Módulos
-
-No menu principal, selecione a opção `[99] ATUALIZAR MÓDULOS` para forçar o re-download de todos os módulos do repositório.
-
----
-
-## 📝 Notas de Versão — V1.0
+### Novas funcionalidades
+- **Hot reload via API** — operações sem restart do Xray
+- **8 protocolos** — HTTPUpgrade, HTTP/2 e Trojan adicionados
+- **API `/check`** — consulta de usuários via HTTP/JSON
+- **Módulo BBR** — otimização TCP com ativar/desativar
+- **SHA256 automático** — GitHub Actions gera hashes a cada push
 
 ### Segurança
-- **`chmod 777` eliminado em todos os módulos** — substituído por permissões mínimas necessárias (`640/600/700/750`).
-- **Chave privada TLS** (`privkey.pem`) agora com `0640 root:nogroup` — antes era `777`, legível por qualquer processo.
-- **`renew_cert.sh`** agora com `0700 root:root` — antes era `777`, qualquer processo podia substituí-lo por código malicioso executado como root via cron.
-- **Wrappers setuid** do bot com `4750 root:botxray` — antes era `4755`, qualquer usuário do sistema executava como root.
-- **Cron de renovação** com jitter aleatório — evita rate limiting no Let's Encrypt com múltiplos servidores.
+- `chmod 777` eliminado em todos os módulos
+- Permissões mínimas corretas em todos os arquivos sensíveis
+- Wrappers setuid restritos ao grupo `botxray`
+- Escrita atômica em todos os arquivos críticos
 
-### Atomicidade e integridade
-- **`save_config()` Python** agora usa `tmpfile + os.replace()` — config nunca corrompido em falha parcial.
-- **`users.db`** reescrito atomicamente em todos os módulos Shell e Python.
-- **DBs do limiter** (`usage.db`, `session.db`) promovidos atomicamente após o loop de verificação.
-- **`_TMP_FILES`** corretamente limpos após `mv -f` em `remover_expirados.sh`.
-
-### Consistência
-- **Nicks normalizados para minúsculas** em todos os módulos (`add_user`, `remover_user`, `block_user`, `unblock_user`, `lista_users`, `limiterxray`, `botxray.py`) — elimina dessincronização entre DB e config.json.
-- **`_wait_xray_active()`** com retry de 5s substituiu `sleep N + is-active` simples em todos os módulos.
-- **`bytes_human()` sem `bc`** em `limiterxray.sh` e `onlinexray.sh` — usa `awk`, disponível em qualquer Unix.
-- **`func_get_api_port()`** lê a porta da API dinamicamente do `config.json` em todos os módulos que consultam a API.
-
-### Bugs corrigidos
-- `remover_expirados.sh`: `_cleanup()` exibia `[ERRO]` em toda saída incluindo `exit 0`.
-- `uninstall.sh`: `ACTIVE_DOMAIN` lido após `rm -rf /opt/XrayTools` — sempre ficava vazio.
-- `lista_users.sh`: status `"unknown"` exibido como `ATIVO` (enganoso) — agora exibe `FORA DE SYNC`.
-- `onlinexray.sh`: coluna "DELTA CICLO" exibia total acumulado desde o início do Xray, não o delta do ciclo.
-- `limiterxray.sh`: `chmod 0600 root:root` no `config.json` impedia que o Xray (`nobody/nogroup`) lesse o arquivo após qualquer operação do limiter.
-- `botxray.py`: `restart_xray()` ignorava falha silenciosamente — bot reportava sucesso mesmo com Xray parado.
-- `core_manager.sh`: porta API hardcoded como `1080` com fallback quebrado que tentava `1080` duas vezes.
-- `certxray.sh`: domínio gravado em `$ACTIVE_DOMAIN_FILE` antes da validação — valor inválido podia ser persistido.
+### Correções
+- Bot: tmpfile no mesmo diretório do config (PrivateTmp fix)
+- Opção 99: download separado de execução — sem travamento
+- Lock file antigo removido automaticamente após 10 minutos
+- Domínios com hífen e ccSLDs aceitos corretamente
 
 ---
 
