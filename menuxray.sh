@@ -79,11 +79,11 @@ _refresh_status_cache() {
                 _CACHED_PORT=$(jq -r '.port // empty' "$PRESET_FILE" 2>/dev/null || echo "")
             fi
             if [ -z "$_CACHED_NET" ] && [ -f "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null; then
-                _CACHED_NET=$(jq -r '.inbounds[] | select(.tag=="inbound-dragoncore").streamSettings.network // empty' \
+                _CACHED_NET=$(jq -r '.inbounds[] | select(.tag=="inbound-turbonet").streamSettings.network // empty' \
                     "$CONFIG_PATH" 2>/dev/null || echo "")
             fi
             if [ -z "$_CACHED_PORT" ] && [ -f "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null; then
-                _CACHED_PORT=$(jq -r '.inbounds[] | select(.tag=="inbound-dragoncore").port // empty' \
+                _CACHED_PORT=$(jq -r '.inbounds[] | select(.tag=="inbound-turbonet").port // empty' \
                     "$CONFIG_PATH" 2>/dev/null || echo "")
             fi
         fi
