@@ -159,7 +159,7 @@ case "${opt:-0}" in
 
     umask 077
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    FILE="${BACKUP_DIR}/backup_dragoncore_${TIMESTAMP}.tar.gz"
+    FILE="${BACKUP_DIR}/backup_turbonet_${TIMESTAMP}.tar.gz"
     SHA_FILE="${FILE}.sha256"
 
     _TMPDIR_BKP=$(mktemp -d)
