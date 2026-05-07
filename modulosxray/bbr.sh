@@ -48,7 +48,7 @@ _disable_bbr() {
     echo -e "${TXT_YELLOW}Desativando BBR e restaurando padrão do sistema...${RESET}"
 
     # Remove arquivo de config dedicado do TURBONET XRAY
-    rm -f /etc/sysctl.d/99-bbr-dragoncore.conf
+    rm -f /etc/sysctl.d/99-bbr-turbonet.conf
 
     # Remove entradas do sysctl.conf se existirem
     if [ -f /etc/sysctl.conf ]; then
@@ -190,7 +190,7 @@ if [ -f /etc/sysctl.conf ]; then
 fi
 
 # Cria ou atualiza arquivo de configuração dedicado
-SYSCTL_FILE="/etc/sysctl.d/99-bbr-dragoncore.conf"
+SYSCTL_FILE="/etc/sysctl.d/99-bbr-turbonet.conf"
 cat > "$SYSCTL_FILE" << 'EOF'
 # TURBONET XRAY — BBR TCP Congestion Control
 # Ativado pelo módulo bbr.sh
