@@ -233,7 +233,7 @@ umask 077
 OUT_DIR="/root/backups"
 mkdir -p "$OUT_DIR"
 ts="$(date +%Y%m%d_%H%M%S)"
-OUT_FILE="${OUT_DIR}/backup_dragoncore_bot_${ts}.tar.gz"
+OUT_FILE="${OUT_DIR}/backup_turbonet_bot_${ts}.tar.gz"
 [ -d /opt/XrayTools      ] || { echo "ERR: /opt/XrayTools ausente"; exit 2; }
 [ -d /usr/local/etc/xray ] || { echo "ERR: /usr/local/etc/xray ausente"; exit 2; }
 tmpdir="$(mktemp -d)"
