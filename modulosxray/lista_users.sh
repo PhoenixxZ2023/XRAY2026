@@ -67,7 +67,7 @@ _build_status_map() {
     if ! jq empty "$CONFIG_PATH" 2>/dev/null; then echo '{}'; return; fi
     jq -c '
         [ .inbounds[]?
-          | select(.tag=="inbound-dragoncore")
+          | select(.tag=="inbound-turbonet")
           | .settings.clients[]?
           | select(.email?)
           | { key: .email,
