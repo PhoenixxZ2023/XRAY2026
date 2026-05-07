@@ -73,14 +73,14 @@ API_PORT="$(jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONF" 
 
 # --- LISTA DE USUÁRIOS ATIVOS (sem LOCKED_) ---
 mapfile -t USERS < <(jq -r '
-    .inbounds[]? | select(.tag=="inbound-dragoncore")
+    .inbounds[]? | select(.tag=="inbound-turbonet")
     | .settings.clients[]?
     | select(.email? and (.email | startswith("LOCKED_") | not))
     | .email
 ' "$CONF" 2>/dev/null | awk 'NF')
 
 if [ ${#USERS[@]} -eq 0 ]; then
-    echo -e "${RED}Nenhum usuário ativo no inbound-dragoncore.${RESET}"; exit 0
+    echo -e "${RED}Nenhum usuário ativo no inbound-turbonet.${RESET}"; exit 0
 fi
 
 # --- CONSULTA À API COM TIMEOUT ---
