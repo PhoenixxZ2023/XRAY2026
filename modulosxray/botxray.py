@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 # FUNÇÕES DE SISTEMA
 # =============================================================
 
-def reload_xray_user(action: str, nick: str, user_uuid: str, inbound_tag: str = "inbound-dragoncore") -> bool:
+def reload_xray_user(action: str, nick: str, user_uuid: str, inbound_tag: str = "inbound-turbonet") -> bool:
     """
     Adiciona ou remove usuário via API do Xray em tempo real — sem restart.
     Não derruba conexões de outros clientes.
@@ -189,7 +189,7 @@ def get_ip() -> str:
 
 def generate_link(client_uuid: str, client_email: str) -> str:
     """
-    CORREÇÃO: sem fallback para inbounds[0] — se inbound-dragoncore não existir,
+    CORREÇÃO: sem fallback para inbounds[0] — se inbound-turbonet não existir,
     retorna erro explícito em vez de gerar link para a porta da API interna.
     """
     try:
@@ -198,11 +198,11 @@ def generate_link(client_uuid: str, client_email: str) -> str:
             return "❌ Erro ao ler config."
 
         inbound = next(
-            (i for i in data.get("inbounds", []) if i.get("tag") == "inbound-dragoncore"),
+            (i for i in data.get("inbounds", []) if i.get("tag") == "inbound-turbonet"),
             None,
         )
         if not inbound:
-            return "❌ inbound-dragoncore não encontrado no config."
+            return "❌ inbound-turbonet não encontrado no config."
 
         port     = inbound["port"]
         stream   = inbound["streamSettings"]
@@ -294,11 +294,11 @@ def core_create_user(nick: str, days: str) -> tuple[bool, str]:
         return False, "❌ Erro ao ler config.json"
 
     inbound = next(
-        (i for i in data.get("inbounds", []) if i.get("tag") == "inbound-dragoncore"),
+        (i for i in data.get("inbounds", []) if i.get("tag") == "inbound-turbonet"),
         None,
     )
     if not inbound:
-        return False, "❌ inbound-dragoncore não encontrado."
+        return False, "❌ inbound-turbonet não encontrado."
 
     inbound["settings"]["clients"].append(
         {"id": user_uuid, "email": nick, "level": 0}
@@ -327,7 +327,7 @@ def core_delete_user(nick: str) -> str:
 
     if data:
         for inbound in data.get("inbounds", []):
-            if inbound.get("tag") == "inbound-dragoncore":
+            if inbound.get("tag") == "inbound-turbonet":
                 clients     = inbound["settings"]["clients"]
                 new_clients = [
                     c for c in clients
@@ -369,7 +369,7 @@ def core_block_user(nick: str) -> str:
 
     found = False
     for inbound in data.get("inbounds", []):
-        if inbound.get("tag") == "inbound-dragoncore":
+        if inbound.get("tag") == "inbound-turbonet":
             for client in inbound["settings"]["clients"]:
                 if client.get("email") == f"LOCKED_{nick}":
                     return "⚠️ Usuário já está bloqueado."
@@ -413,7 +413,7 @@ def core_unblock_user(nick: str) -> str:
 
     found = False
     for inbound in data.get("inbounds", []):
-        if inbound.get("tag") == "inbound-dragoncore":
+        if inbound.get("tag") == "inbound-turbonet":
             for client in inbound["settings"]["clients"]:
                 if client.get("email") == f"LOCKED_{nick}":
                     client["email"] = nick
@@ -441,7 +441,7 @@ def core_list_users_text() -> str:
     locked_users = set()
     if data:
         for inbound in data.get("inbounds", []):
-            if inbound.get("tag") == "inbound-dragoncore":
+            if inbound.get("tag") == "inbound-turbonet":
                 for c in inbound["settings"]["clients"]:
                     email = c.get("email", "")
                     if email.startswith("LOCKED_"):
