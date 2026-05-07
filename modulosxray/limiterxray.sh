@@ -136,14 +136,14 @@ func_get_api_port() {
 is_user_locked() {
     local nick="$1"
     jq -e --arg lock "LOCKED_${nick}" '
-        any(.inbounds[]? | select(.tag=="inbound-dragoncore").settings.clients[]?; .email == $lock)
+        any(.inbounds[]? | select(.tag=="inbound-turbonet").settings.clients[]?; .email == $lock)
     ' "$CONFIG_PATH" >/dev/null 2>&1
 }
 
 user_exists_in_config() {
     local nick="$1"
     jq -e --arg email "$nick" '
-        any(.inbounds[]? | select(.tag=="inbound-dragoncore").settings.clients[]?; .email == $email)
+        any(.inbounds[]? | select(.tag=="inbound-turbonet").settings.clients[]?; .email == $email)
     ' "$CONFIG_PATH" >/dev/null 2>&1
 }
 
@@ -290,10 +290,10 @@ func_set_limit() {
         if [ -n "${real_uuid:-}" ]; then
             acquire_lock
             safe_config_write \
-                '(.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+                '(.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
                   (if type=="array" then . else [] end)
                 |
-                (.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+                (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
                   map(if .email == $locked then .email = $nick | .id = $uuid else . end)' \
                 --arg nick "$nick" --arg locked "LOCKED_$nick" --arg uuid "$real_uuid"
             apply_config_change_and_reload && echo -e "${TXT_GREEN}✅ Usuário desbloqueado!${RESET}"
@@ -381,10 +381,10 @@ func_remove_limit() {
         if [ -n "${real_uuid:-}" ]; then
             acquire_lock
             safe_config_write \
-                '(.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+                '(.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
                   (if type=="array" then . else [] end)
                 |
-                (.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+                (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
                   map(if .email == $locked then .email = $nick | .id = $uuid else . end)' \
                 --arg nick "$nick" --arg locked "LOCKED_$nick" --arg uuid "$real_uuid"
             apply_config_change_and_reload
@@ -481,10 +481,10 @@ func_check_and_block() {
                     --arg nick   "$nick" \
                     --arg locked "LOCKED_$nick" \
                     --arg fake   "$fake_uuid" \
-                    '(.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+                    '(.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
                       (if type=="array" then . else [] end)
                     |
-                    (.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+                    (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
                       map(if .email == $nick then .email = $locked | .id = $fake else . end)' \
                     "$CONFIG_PATH" > "$tmp_block" 2>>"$LOG_FILE" \
                     && jq empty "$tmp_block" 2>/dev/null; then
