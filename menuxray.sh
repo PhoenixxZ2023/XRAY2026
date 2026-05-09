@@ -341,6 +341,7 @@ menu_display() {
     echo -e "${TXT_CYAN}[12] MONITOR ONLINE${RESET}"
     echo -e "${TXT_CYAN}[13] ATIVAR BBR (OTIMIZAÇÃO TCP)${RESET}"
     echo -e "${TXT_CYAN}[14] API /CHECK (CONSULTA DE USUÁRIOS)${RESET}"
+    echo -e "${TXT_CYAN}[15] CDN / RELAY VERCEL (OCULTAR IP)${RESET}"
     echo -e "${TXT_YELLOW}[99] ATUALIZAR MÓDULOS (FORÇA DOWNLOAD)${RESET}"
     echo -e "${TXT_CYAN}[00] SAIR${RESET}"
     echo "-----------------------------------------"
@@ -367,6 +368,7 @@ menu_display() {
         12)   run_module "onlinexray.sh"        "Monitor" ;;
         13)   run_module "bbr.sh"               "Ativar BBR" ;;
         14)   run_module "check_api.sh"         "API Check" ;;
+        15)   run_module "vercel_relay.sh"      "CDN Relay Vercel" ;;
         99)
             # Usa download_module() — baixa e valida SEM executar.
             # run_module() sempre executa o script após download, travando em módulos
@@ -382,7 +384,7 @@ menu_display() {
                 add_user.sh remover_user.sh lista_users.sh core_manager.sh
                 remover_expirados.sh uninstall.sh limiterxray.sh botxray.sh
                 backup.sh block_user.sh unblock_user.sh onlinexray.sh
-                certxray.sh bbr.sh check_api.sh
+                certxray.sh bbr.sh check_api.sh vercel_relay.sh
             )
 
             local ok=0 fail=0
