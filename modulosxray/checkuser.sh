@@ -360,20 +360,49 @@ test_server() {
 show_config_link() {
     local port
     port=$(cat "$PORT_FILE" 2>/dev/null || echo "6000")
-    
+
+    # Detectar IP ou dominio automaticamente
+    local server_addr=""
+
+    # 1) Tenta pegar do preset.json (dominio configurado)
+    if [ -f "$PRESET_FILE" ] && command -v jq &>/dev/null; then
+        local domain
+        domain=$(jq -r '.domain // empty' "$PRESET_FILE" 2>/dev/null)
+        if [ -n "$domain" ]; then
+            server_addr="$domain"
+        fi
+    fi
+
+    # 2) Tenta pegar do active_domain
+    if [ -z "$server_addr" ] && [ -f "$ACTIVE_DOMAIN_FILE" ]; then
+        local active_domain
+        active_domain=$(cat "$ACTIVE_DOMAIN_FILE" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$active_domain" ]; then
+            server_addr="$active_domain"
+        fi
+    fi
+
+    # 3) Fallback: IP publico
+    if [ -z "$server_addr" ]; then
+        server_addr=$(curl -fsSL --max-time 5 "https://icanhazip.com" 2>/dev/null | tr -d '[:space:]' || echo "")
+        if [ -z "$server_addr" ]; then
+            server_addr="SEU_IP"
+        fi
+    fi
+
     echo ""
     echo -e "${TXT_CYAN}========================================${RESET}"
     echo -e "${TXT_YELLOW}LINK DE CONFIGURACAO PARA APPS${RESET}"
     echo -e "${TXT_CYAN}========================================${RESET}"
     echo ""
-    echo -e "URL da API: ${TXT_GREEN}http://SEU_IP:${port}/checkuserxray${RESET}"
+    echo -e "URL da API: ${TXT_GREEN}http://${server_addr}:${port}/checkuserxray${RESET}"
     echo ""
     echo -e "${TXT_YELLOW}Parametros:${RESET}"
     echo "  user = nome do usuario"
     echo "  pass = senha do usuario"
     echo ""
     echo -e "${TXT_YELLOW}Exemplo:${RESET}"
-    echo "  http://SEU_IP:${port}/checkuserxray?user=joao&pass=senha123"
+    echo "  http://${server_addr}:${port}/checkuserxray?user=joao&pass=senha123"
     echo ""
     echo -e "${TXT_CYAN}========================================${RESET}"
 }
