@@ -1,6 +1,6 @@
 #!/bin/bash
-# checkuser.sh - TURBONET XRAY V1.0
-# CheckUser API para Xray — compatível com Conecta4G, DTunnel e outros apps
+# checkuser.sh - TURBONET XRAY V1.1
+# CheckUser API para Xray - compativel com Conecta4G, DTunnel e outros apps
 #
 # Formato do users.db:
 #   nick|uuid|expiry|password|conn_limit
@@ -12,16 +12,16 @@
 # Resposta:
 #   {"username":"joao","count_connections":1,"expiration_date":"01/06/2026","expiration_days":30,"limit_connections":2}
 #
-# Opções de limite de conexões:
-#   0 = ilimitado (padrão)
-#   1 = apenas 1 conexão
-#   2 = até 2 conexões, etc.
+# Opcoes de limite de conexoes:
+#   0 = ilimitado (padrao)
+#   1 = apenas 1 conexao
+#   2 = ate 2 conexoes, etc.
 #
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO"; sleep 2' ERR
 
 # ================================================================
-# CONFIGURAÇÕES
+# CONFIGURACOES
 # ================================================================
 USER_DB="/opt/XrayTools/users.db"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
@@ -31,8 +31,7 @@ PID_FILE="/tmp/checkuser_xray.pid"
 PORT_FILE="/tmp/checkuser_xray.port"
 LOG_FILE="/tmp/checkuser_xray.log"
 
-# Configuração de limite de conexões
-XRAY_API_PORT=""
+XRAY_API_PORT="1080"
 XRAY_BIN="/usr/local/bin/xray"
 TIMEOUT_API=5
 
@@ -44,144 +43,94 @@ TITLE_BAR='\033[1;47;34m'
 RESET='\033[0m'
 
 # ================================================================
-# DETECÇÃO DE PORTA API
+# DETECCAO DE PORTA API
 # ================================================================
 detect_api_port() {
-    if [ -f "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null; then
-        XRAY_API_PORT=$(jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1)
-    fi
-    [ -z "$XRAY_API_PORT" ] && XRAY_API_PORT="1080"
-}
-
-# ================================================================
-# FUNÇÕES DE CONSULTA
-# ================================================================
-
-# Busca usuário no DB
-get_user_from_db() {
-    local nick="$1"
-    grep "^${nick}|" "$USER_DB" 2>/dev/null | head -1
-}
-
-# Obtém conexões ativas via API do Xray
-get_active_connections() {
-    local nick="$1"
-    detect_api_port
-
-    if [ ! -f "$CONFIG_PATH" ] || ! jq empty "$CONFIG_PATH" 2>/dev/null; then
-        echo "0"
-        return
-    fi
-
-    local down up
-    down=$(timeout "$TIMEOUT_API" "$XRAY_BIN" api stats \
-        -server="127.0.0.1:$XRAY_API_PORT" \
-        -name "user>>>${nick}>>>traffic>>>downlink" 2>/dev/null \
-        | awk '/value/ {print $2; exit}' || echo "0")
-
-    up=$(timeout "$TIMEOUT_API" "$XRAY_BIN" api stats \
-        -server="127.0.0.1:$XRAY_API_PORT" \
-        -name "user>>>${nick}>>>traffic>>>uplink" 2>/dev/null \
-        | awk '/value/ {print $2; exit}' || echo "0")
-
-    # Se houver tráfego recente (últimos 60s), considera conectado
-    local total=$(( down + up ))
-    if [ "$total" -gt 0 ]; then
-        echo "1"  # Conexão ativa
-    else
-        echo "0"
-    fi
-}
-
-# Valida usuário e senha (retorna 0 se válido)
-validate_credentials() {
-    local nick="$1" pass="$2"
-    local line
-
-    line=$(get_user_from_db "$nick")
-    [ -z "$line" ] && return 1
-
-    local stored_pass
-    stored_pass=$(echo "$line" | cut -d'|' -f4)
-
-    # Timing-safe comparison
-    if [ "${#pass}" -eq "${#stored_pass}" ]; then
-        if [ "$pass" = "$stored_pass" ]; then
+    if [ -f "$CONFIG_PATH" ] && command -v jq &>/dev/null; then
+        local detected
+        detected=$(jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1)
+        if [ -n "$detected" ] && [[ "$detected" =~ ^[0-9]+$ ]]; then
+            XRAY_API_PORT="$detected"
             return 0
         fi
+    fi
+    XRAY_API_PORT="1080"
+    return 0
+}
+
+# ================================================================
+# VERIFICACOES INICIAIS
+# ================================================================
+check_dependencies() {
+    local missing=()
+    
+    if ! command -v python3 &>/dev/null; then
+        missing+=("python3")
+    fi
+    
+    if ! command -v jq &>/dev/null; then
+        missing+=("jq")
+    fi
+    
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo -e "${TXT_RED}Dependencias faltando: ${missing[*]}${RESET}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# ================================================================
+# FUNCOES DE STATUS
+# ================================================================
+is_running() {
+    if [ -f "$PID_FILE" ]; then
+        local pid; pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        rm -f "$PID_FILE"
     fi
     return 1
 }
 
-# Verifica se usuário está vencido
-is_expired() {
-    local expiry="$1"
-    local exp_ts now_ts
-    exp_ts=$(date -d "$expiry" +%s 2>/dev/null) || return 0
-    now_ts=$(date +%s)
-    [ "$exp_ts" -lt "$now_ts" ]
-}
-
-# Calcula dias restantes
-days_left() {
-    local expiry="$1"
-    local exp_ts now_ts
-    exp_ts=$(date -d "$expiry" +%s 2>/dev/null) || { echo "0"; return; }
-    now_ts=$(date +%s)
-    echo $(( (exp_ts - now_ts) / 86400 ))
-}
-
-# Formata data para DD/MM/YYYY
-format_date() {
-    local date="$1"
-    local year month day
-    year=$(echo "$date" | cut -d'-' -f1)
-    month=$(echo "$date" | cut -d'-' -f2)
-    day=$(echo "$date" | cut -d'-' -f3)
-    printf "%02d/%02d/%04d" "$day" "$month" "$year"
-}
-
-# Gera JSON de resposta
-generate_json_response() {
-    local nick="$1" conn_count="$2" expiry="$3" days="$4" limit="$5"
-
-    local exp_fmt
-    exp_fmt=$(format_date "$expiry")
-
-    # Se vencido, days_left retorna negativo
-    if [ "$days" -lt 0 ]; then
-        days=0
+get_status() {
+    if is_running; then
+        local pid port
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        port=$(cat "$PORT_FILE" 2>/dev/null || echo "6000")
+        echo -e "${TXT_GREEN}ATIVO${RESET} (PID: $pid, Porta: $port)"
+    else
+        echo -e "${TXT_RED}INATIVO${RESET}"
     fi
-
-    # Se limite for 0, significa ilimitado
-    # count_connections mostra conexões atuais
-
-    cat << EOF
-{"username":"${nick}","count_connections":${conn_count},"expiration_date":"${exp_fmt}","expiration_days":${days},"limit_connections":${limit}}
-EOF
-}
-
-# Gera JSON de erro
-generate_error() {
-    local msg="$1"
-    echo "{\"error\":\"${msg}\"}"
 }
 
 # ================================================================
-# SERVIDOR HTTP (Python)
+# SERVIDOR HTTP (Python inline)
 # ================================================================
 start_server() {
     local port="$1"
-
-    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-        echo -e "${TXT_RED}❌ Porta ${port} já está em uso.${RESET}"
+    
+    if is_running; then
+        echo -e "${TXT_RED}Ja existe um servidor CheckUser rodando.${RESET}"
         return 1
     fi
-
+    
+    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        echo -e "${TXT_RED}Porta ${port} ja esta em uso.${RESET}"
+        return 1
+    fi
+    
     detect_api_port
+    
+    if [ ! -f "$USER_DB" ]; then
+        echo -e "${TXT_RED}Arquivo users.db nao encontrado: $USER_DB${RESET}"
+        return 1
+    fi
+    
     echo -e "${TXT_YELLOW}Iniciando CheckUser na porta ${port}...${RESET}"
-
-    python3 - "$port" "$USER_DB" "$CONFIG_PATH" "$XRAY_API_PORT" "$XRAY_BIN" << 'PYSERVER' &
+    
+    python3 - "$port" "$USER_DB" "$CONFIG_PATH" "$XRAY_API_PORT" "$XRAY_BIN" << 'PYEOF' &
 import sys, json, os, subprocess, time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -198,85 +147,80 @@ def load_users():
     if os.path.exists(USER_DB):
         with open(USER_DB) as f:
             for line in f:
-                parts = line.strip().split('|')
-                if len(parts) >= 5:
-                    users[parts[0].lower()] = {
-                        'uuid': parts[1],
-                        'expiry': parts[2],
-                        'password': parts[3],
-                        'conn_limit': int(parts[4]) if parts[4].isdigit() else 0
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split('|')
+                if len(parts) >= 3:
+                    nick = parts[0].lower().strip()
+                    users[nick] = {
+                        'uuid': parts[1].strip() if len(parts) > 1 else '',
+                        'expiry': parts[2].strip() if len(parts) > 2 else '',
+                        'password': parts[3].strip() if len(parts) > 3 else '',
+                        'conn_limit': int(parts[4]) if len(parts) > 4 and parts[4].strip().isdigit() else 0
                     }
     return users
 
 def get_active_connections(nick):
     try:
+        down = 0
+        up = 0
+        
         down_result = subprocess.run(
             [XRAY_BIN, 'api', 'stats',
              '-server', f'127.0.0.1:{API_PORT}',
              '-name', f'user>>>{nick}>>>traffic>>>downlink'],
             capture_output=True, timeout=5
         )
-        down = 0
+        
         for line in down_result.stdout.decode().split('\n'):
-            if 'value' in line:
-                parts = line.split()
-                for i, p in enumerate(parts):
-                    if p == 'value' and i + 1 < len(parts):
-                        down = int(parts[i + 1])
-                        break
-                break
-
+            parts = line.split()
+            for i, p in enumerate(parts):
+                if p == 'value' and i + 1 < len(parts):
+                    down = int(parts[i + 1])
+                    break
+        
         up_result = subprocess.run(
             [XRAY_BIN, 'api', 'stats',
              '-server', f'127.0.0.1:{API_PORT}',
              '-name', f'user>>>{nick}>>>traffic>>>uplink'],
             capture_output=True, timeout=5
         )
-        up = 0
+        
         for line in up_result.stdout.decode().split('\n'):
-            if 'value' in line:
-                parts = line.split()
-                for i, p in enumerate(parts):
-                    if p == 'value' and i + 1 < len(parts):
-                        up = int(parts[i + 1])
-                        break
-                break
-
+            parts = line.split()
+            for i, p in enumerate(parts):
+                if p == 'value' and i + 1 < len(parts):
+                    up = int(parts[i + 1])
+                    break
+        
         return 1 if (down + up) > 0 else 0
-    except:
+    except Exception:
         return 0
 
 def is_expired(expiry):
     try:
         exp = datetime.strptime(expiry, '%Y-%m-%d')
         return exp < datetime.now()
-    except:
+    except Exception:
         return False
 
 def days_left(expiry):
     try:
         exp = datetime.strptime(expiry, '%Y-%m-%d')
         return max(0, (exp - datetime.now()).days)
-    except:
+    except Exception:
         return 0
 
 def format_date(date_str):
     try:
         d = datetime.strptime(date_str, '%Y-%m-%d')
         return d.strftime('%d/%m/%Y')
-    except:
+    except Exception:
         return date_str
 
-def validate_password(provided, stored):
-    return len(provided) == len(stored) and provided == stored
-
-def check_conn_limit(nick, limit, current_conns):
-    if limit == 0:
-        return True  # Ilimitado
-    return current_conns < limit
-
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
+    def log_message(self, format, *args):
         pass
 
     def send_json(self, code, data):
@@ -290,260 +234,234 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        qs = parse_qs(parsed.query)
-        path = parsed.path.rstrip('/')
-
-        # Endpoint principal: /checkuserxray
-        if path in ('/checkuserxray', '/checkuser', '/check'):
-            if 'user' not in qs or 'pass' not in qs:
+        
+        if parsed.path == '/health':
+            self.send_json(200, {'status': 'ok'})
+            return
+        
+        if parsed.path == '/status':
+            users = load_users()
+            self.send_json(200, {
+                'status': 'running',
+                'users_count': len(users)
+            })
+            return
+        
+        if parsed.path == '/checkuserxray':
+            params = parse_qs(parsed.query)
+            user = params.get('user', [''])[0].lower()
+            password = params.get('pass', [''])[0]
+            
+            if not user or not password:
                 self.send_json(400, {'error': 'user and pass required'})
                 return
-
-            nick = qs['user'][0].lower().strip()
-            password = qs['pass'][0]
-
+            
             users = load_users()
-
-            if nick not in users:
-                self.send_json(404, {'error': 'user_not_found'})
+            
+            if user not in users:
+                self.send_json(401, {'error': 'user not found'})
                 return
-
-            user = users[nick]
-
-            # Valida senha
-            if not validate_password(password, user['password']):
-                self.send_json(401, {'error': 'invalid_password'})
+            
+            user_data = users[user]
+            
+            if user_data['password'] and user_data['password'] != password:
+                self.send_json(401, {'error': 'invalid password'})
                 return
-
-            # Verifica se vencido
-            if is_expired(user['expiry']):
+            
+            if is_expired(user_data['expiry']):
+                self.send_json(403, {'error': 'subscription expired'})
+                return
+            
+            count_connections = get_active_connections(user)
+            limit = user_data['conn_limit']
+            
+            if limit > 0 and count_connections >= limit:
                 self.send_json(403, {
-                    'username': nick,
-                    'count_connections': 0,
-                    'expiration_date': format_date(user['expiry']),
-                    'expiration_days': 0,
-                    'limit_connections': user['conn_limit'],
-                    'error': 'subscription_expired'
+                    'error': 'connection limit reached',
+                    'count_connections': count_connections,
+                    'limit_connections': limit
                 })
                 return
-
-            # Conta conexões ativas
-            active = get_active_connections(nick)
-
-            # Verifica limite de conexões
-            if not check_conn_limit(nick, user['conn_limit'], active):
-                self.send_json(403, {
-                    'username': nick,
-                    'count_connections': active,
-                    'expiration_date': format_date(user['expiry']),
-                    'expiration_days': days_left(user['expiry']),
-                    'limit_connections': user['conn_limit'],
-                    'error': 'connection_limit_reached'
-                })
-                return
-
-            # Sucesso!
+            
             self.send_json(200, {
-                'username': nick,
-                'count_connections': active,
-                'expiration_date': format_date(user['expiry']),
-                'expiration_days': days_left(user['expiry']),
-                'limit_connections': user['conn_limit']
+                'username': user,
+                'uuid': user_data['uuid'],
+                'count_connections': count_connections,
+                'expiration_date': format_date(user_data['expiry']),
+                'expiration_days': days_left(user_data['expiry']),
+                'limit_connections': limit,
+                'valid': True
             })
             return
+        
+        self.send_json(404, {'error': 'endpoint not found'})
 
-        # Health check
-        if path == '/health':
-            self.send_json(200, {
-                'status': 'ok',
-                'service': 'TURBONET CheckUser Xray V1.0'
-            })
-            return
+try:
+    server = HTTPServer(('0.0.0.0', PORT), Handler)
+    print(f'Server started on port {PORT}')
+    server.serve_forever()
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr)
+    sys.exit(1)
+PYEOF
 
-        # Status geral
-        if path in ('/status', '/info'):
-            users = load_users()
-            active_users = sum(1 for u in users.values() if not is_expired(u['expiry']))
-            self.send_json(200, {
-                'total_users': len(users),
-                'active_users': active_users,
-                'port': PORT
-            })
-            return
-
-        self.send_json(404, {
-            'error': 'not_found',
-            'endpoints': [
-                '/checkuserxray?user=NAME&pass=PASS',
-                '/health',
-                '/status'
-            ]
-        })
-
-HTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
-PYSERVER
-
-    local server_pid=$!
-    sleep 2
-
-    if kill -0 "$server_pid" 2>/dev/null; then
-        echo "$server_pid" > "$PID_FILE"
-        echo "$port" > "$PORT_FILE"
-        echo -e "${TXT_GREEN}✅ CheckUser iniciado! PID: ${server_pid}${RESET}"
-        echo ""
-        echo -e " ${TXT_CYAN}Endpoints:${RESET}"
-        local pub_ip
-        pub_ip=$(curl -4fsSL --max-time 5 https://icanhazip.com 2>/dev/null || echo "SEU_IP")
-        echo -e "   ${TXT_YELLOW}GET${RESET} http://${pub_ip}:${port}/checkuserxray?user=NOME&pass=SENHA"
-        echo -e "   ${TXT_YELLOW}GET${RESET} http://${pub_ip}:${port}/health"
-        echo ""
-        echo -e " ${TXT_YELLOW}No app VPN (Conecta4G/DTunnel):${RESET}"
-        echo -e "   URL: http://${pub_ip}:${port}/checkuserxray"
-        echo -e "   User: seu_usuario"
-        echo -e "   Pass: sua_senha"
-        echo ""
-        echo -e " ${TXT_RED}⚠ Abra a porta ${port} no firewall!${RESET}"
-        echo -e "   ufw allow ${port}/tcp"
+    local pid=$!
+    echo "$pid" > "$PID_FILE"
+    echo "$port" > "$PORT_FILE"
+    
+    sleep 1
+    
+    if kill -0 "$pid" 2>/dev/null; then
+        echo -e "${TXT_GREEN}CheckUser iniciado com sucesso!${RESET}"
+        return 0
     else
-        echo -e "${TXT_RED}❌ Falha ao iniciar.${RESET}"
+        echo -e "${TXT_RED}Falha ao iniciar CheckUser.${RESET}"
         rm -f "$PID_FILE" "$PORT_FILE"
         return 1
     fi
 }
 
-# Para servidor
 stop_server() {
-    if [ ! -f "$PID_FILE" ]; then
-        echo -e "${TXT_YELLOW}Servidor não está rodando.${RESET}"
+    if ! is_running; then
+        echo -e "${TXT_YELLOW}CheckUser nao esta rodando.${RESET}"
         return 0
     fi
-
+    
     local pid; pid=$(cat "$PID_FILE")
+    kill "$pid" 2>/dev/null
+    sleep 1
+    
     if kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null
-        sleep 1
-        echo -e "${TXT_GREEN}✅ Servidor parado.${RESET}"
+        kill -9 "$pid" 2>/dev/null
     fi
+    
     rm -f "$PID_FILE" "$PORT_FILE"
+    echo -e "${TXT_GREEN}CheckUser parado.${RESET}"
 }
 
-# Status
-check_status() {
-    if [ ! -f "$PID_FILE" ]; then
-        echo -e " ${TXT_RED}INATIVO${RESET}"
-        return
-    fi
-
-    local pid; pid=$(cat "$PID_FILE")
-    local port=""; [ -f "$PORT_FILE" ] && port=$(cat "$PORT_FILE")
-
-    if kill -0 "$pid" 2>/dev/null; then
-        echo -e " ${TXT_GREEN}ATIVO${RESET} — PID ${pid}, porta ${port}"
-    else
-        echo -e " ${TXT_RED}PROCESSO MORTO${RESET}"
-        rm -f "$PID_FILE" "$PORT_FILE"
-    fi
-}
-
-# Testar
 test_server() {
-    if [ ! -f "$PORT_FILE" ]; then
-        echo -e "${TXT_RED}Servidor não está rodando.${RESET}"
-        return
+    local port
+    port=$(cat "$PORT_FILE" 2>/dev/null || echo "6000")
+    
+    echo -e "${TXT_CYAN}Testando CheckUser em http://localhost:${port}...${RESET}"
+    
+    local health
+    health=$(curl -sf "http://localhost:${port}/health" 2>/dev/null)
+    
+    if [ -n "$health" ]; then
+        echo -e "${TXT_GREEN}Health check: OK${RESET}"
+        echo "Resposta: $health"
+    else
+        echo -e "${TXT_RED}Health check: FALHOU${RESET}"
+        return 1
     fi
+}
 
-    local port; port=$(cat "$PORT_FILE")
-
-    echo -e "${TXT_CYAN}Testando CheckUser na porta ${port}...${RESET}"
+show_config_link() {
+    local port
+    port=$(cat "$PORT_FILE" 2>/dev/null || echo "6000")
+    
     echo ""
-
-    echo -e "${TXT_YELLOW}[GET /health]${RESET}"
-    curl -s "http://127.0.0.1:${port}/health" | python3 -m json.tool 2>/dev/null || echo "Erro"
+    echo -e "${TXT_CYAN}========================================${RESET}"
+    echo -e "${TXT_YELLOW}LINK DE CONFIGURACAO PARA APPS${RESET}"
+    echo -e "${TXT_CYAN}========================================${RESET}"
     echo ""
-
-    echo -e "${TXT_YELLOW}[GET /status]${RESET}"
-    curl -s "http://127.0.0.1:${port}/status" | python3 -m json.tool 2>/dev/null || echo "Erro"
+    echo -e "URL da API: ${TXT_GREEN}http://SEU_IP:${port}/checkuserxray${RESET}"
     echo ""
+    echo -e "${TXT_YELLOW}Parametros:${RESET}"
+    echo "  user = nome do usuario"
+    echo "  pass = senha do usuario"
+    echo ""
+    echo -e "${TXT_YELLOW}Exemplo:${RESET}"
+    echo "  http://SEU_IP:${port}/checkuserxray?user=joao&pass=senha123"
+    echo ""
+    echo -e "${TXT_CYAN}========================================${RESET}"
+}
 
-    # Testa com primeiro usuário do DB
-    if [ -s "$USER_DB" ]; then
-        local first_line; first_line=$(head -1 "$USER_DB")
-        local test_user test_pass
-        test_user=$(echo "$first_line" | cut -d'|' -f1)
-        test_pass=$(echo "$first_line" | cut -d'|' -f4)
-
-        echo -e "${TXT_YELLOW}[GET /checkuserxray?user=${test_user}&pass=***]${RESET}"
-        curl -s "http://127.0.0.1:${port}/checkuserxray?user=${test_user}&pass=${test_pass}" | python3 -m json.tool 2>/dev/null || echo "Erro"
-        echo ""
+check_firewall() {
+    local port
+    port=$(cat "$PORT_FILE" 2>/dev/null || echo "6000")
+    
+    echo -e "${TXT_CYAN}Verificando firewall...${RESET}"
+    
+    if command -v ufw &>/dev/null; then
+        if ufw status | grep -q "${port}/tcp"; then
+            echo -e "${TXT_GREEN}Porta ${port} ja liberada no UFW${RESET}"
+        else
+            echo -e "${TXT_YELLOW}Porta ${port} pode nao estar liberada no UFW${RESET}"
+            echo "Execute: ufw allow ${port}/tcp"
+        fi
+    fi
+    
+    if command -v iptables &>/dev/null; then
+        if iptables -L -n 2>/dev/null | grep -q "${port}"; then
+            echo -e "${TXT_GREEN}Porta ${port} encontrada no iptables${RESET}"
+        fi
     fi
 }
 
 # ================================================================
-# MENU
+# MENU PRINCIPAL
+# ================================================================
+menu_checkuser() {
+    while true; do
+        clear
+        echo -e "${TITLE_BAR}   CHECKUSER XRAY - TURBONET   ${RESET}"
+        echo ""
+        echo -e " Status: $(get_status)"
+        echo ""
+        echo "-----------------------------------------"
+        echo -e "${TXT_CYAN}[1]${RESET} Iniciar (porta padrao: 6000)"
+        echo -e "${TXT_CYAN}[2]${RESET} Iniciar em porta personalizada"
+        echo -e "${TXT_CYAN}[3]${RESET} Parar servidor"
+        echo -e "${TXT_CYAN}[4]${RESET} Testar"
+        echo -e "${TXT_CYAN}[5]${RESET} Verificar firewall"
+        echo -e "${TXT_CYAN}[6]${RESET} Gerar link de configuracao (para apps)"
+        echo -e "${TXT_CYAN}[0]${RESET} Voltar"
+        echo "-----------------------------------------"
+        read -rp "Opcao: " opt
+        
+        case "$opt" in
+            1) start_server 6000 ;;
+            2)
+                read -rp "Digite a porta: " custom_port
+                if [[ "$custom_port" =~ ^[0-9]+$ ]]; then
+                    start_server "$custom_port"
+                else
+                    echo -e "${TXT_RED}Porta invalida${RESET}"
+                fi
+                ;;
+            3) stop_server ;;
+            4) test_server ;;
+            5) check_firewall ;;
+            6) show_config_link ;;
+            0) return 0 ;;
+            *) echo -e "${TXT_RED}Opcao invalida${RESET}" ;;
+        esac
+        
+        [ "$opt" != "0" ] && read -rp "Enter para continuar..." _
+    done
+}
+
+# ================================================================
+# VERIFICACOES E EXECUCAO
 # ================================================================
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    echo -e "${TXT_RED}❌ Execute como root!${RESET}"
+    echo -e "${TXT_RED}Execute como root!${RESET}"
     exit 1
 fi
 
-while true; do
-    clear
-    echo -e "${TITLE_BAR} CHECKUSER XRAY — TURBONET ${RESET}"
-    echo ""
-    echo -e " Status:$(check_status)"
-    echo ""
-    echo -e "${TXT_GREEN}[1] Iniciar (porta padrão: ${CHECKUSER_PORT})${RESET}"
-    echo -e "${TXT_GREEN}[2] Iniciar em porta personalizada${RESET}"
-    echo -e "${TXT_RED}[3] Parar servidor${RESET}"
-    echo -e "${TXT_CYAN}[4] Testar${RESET}"
-    echo -e "${TXT_CYAN}[5] Verificar firewall${RESET}"
-    echo -e "${TXT_YELLOW}[6] Gerar link de configuração (para apps)${RESET}"
-    echo -e "${TXT_CYAN}[0] Voltar${RESET}"
-    echo "-----------------------------------------"
-    read -rp "Opção: " opt
+if ! check_dependencies; then
+    echo -e "${TXT_RED}Instale as dependencias e tente novamente.${RESET}"
+    exit 1
+fi
 
-    case "$opt" in
-        1) start_server "$CHECKUSER_PORT"; read -rp "Enter..." ;;
-        2)
-            read -rp "Porta (1024-65535): " custom_port
-            if [[ "$custom_port" =~ ^[0-9]+$ ]] && [ "$custom_port" -ge 1024 ] && [ "$custom_port" -le 65535 ]; then
-                start_server "$custom_port"
-            else
-                echo -e "${TXT_RED}Porta inválida.${RESET}"
-            fi
-            read -rp "Enter..."
-        ;;
-        3) stop_server; read -rp "Enter..." ;;
-        4) test_server; read -rp "Enter..." ;;
-        5)
-            echo ""
-            echo -e "${TXT_CYAN}Verificando firewall...${RESET}"
-            if command -v ufw &>/dev/null; then
-                echo "Regras ativas:"
-                ufw status numbered 2>/dev/null | head -10
-            fi
-            echo ""
-            echo -e "${TXT_YELLOW}Para abrir porta ${CHECKUSER_PORT}:${RESET}"
-            echo "  ufw allow ${CHECKUSER_PORT}/tcp"
-            read -rp "Enter..."
-        ;;
-        6)
-            echo ""
-            if [ -f "$PORT_FILE" ]; then
-                local port; port=$(cat "$PORT_FILE")
-                local pub_ip; pub_ip=$(curl -4fsSL --max-time 5 https://icanhazip.com 2>/dev/null || echo "SEU_IP")
-                echo -e "${TXT_CYAN}Link para configurar no app:${RESET}"
-                echo ""
-                echo -e "   ${TXT_YELLOW}http://${pub_ip}:${port}/checkuserxray${RESET}"
-                echo ""
-                echo "No Conecta4G/DTunnel:"
-                echo "  URL: http://${pub_ip}:${port}/checkuserxray"
-            else
-                echo -e "${TXT_RED}Inicie o servidor primeiro!${RESET}"
-            fi
-            read -rp "Enter..."
-        ;;
-        0) exit 0 ;;
-        *) echo -e "${TXT_RED}Inválido.${RESET}"; sleep 1 ;;
-    esac
-done
+if [ ! -f "$CONFIG_PATH" ]; then
+    echo -e "${TXT_RED}Config do Xray nao encontrado: $CONFIG_PATH${RESET}"
+fi
+
+if [ ! -f "$XRAY_BIN" ]; then
+    echo -e "${TXT_RED}Xray nao encontrado: $XRAY_BIN${RESET}"
+fi
+
+menu_checkuser
