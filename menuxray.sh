@@ -23,7 +23,8 @@ REPO_OWNER="PhoenixxZ2023"
 REPO_NAME="XRAY2026"
 
 _validate_ref() {
-    local ref="\$1"
+    local ref="$1"
+    # Aceita: letras, números, ., _, /, - e $ (para expansão de shell)
     if [[ ! "$ref" =~ ^[a-zA-Z0-9._/$-]{1,128}$ ]]; then
         echo -e "\033[1;31m❌ PINNED_REF inválido: '${ref}'\033[0m"
         exit 1
@@ -170,13 +171,13 @@ init_system() {
 
 # --- VERIFICAÇÃO DE INTEGRIDADE DO MÓDULO ---
 _verify_module_hash() {
-    local file="\$1"
-    local module_name="\$2"
+    local file="$1"
+    local module_name="$2"
     local sha256_url="${MODULES_URL}/${module_name}.sha256"
     local expected
 
     expected=$(curl -fLsS --max-time 10 --connect-timeout 5 \
-        "$sha256_url" 2>/dev/null | awk '{print \$1}')
+        "$sha256_url" 2>/dev/null | awk '{print $1}')
 
     if [ -z "$expected" ]; then
         echo -e "${TXT_YELLOW}⚠  Hash não encontrado para ${module_name}.${RESET}" >&2
@@ -184,7 +185,7 @@ _verify_module_hash() {
     fi
 
     local actual
-    actual=$(sha256sum "$file" | awk '{print \$1}')
+    actual=$(sha256sum "$file" | awk '{print $1}')
 
     if [ "$expected" != "$actual" ]; then
         echo -e "${TXT_RED}❌ Falha de integridade em ${module_name}!${RESET}" >&2
@@ -196,8 +197,8 @@ _verify_module_hash() {
 
 # --- EXECUÇÃO DE MÓDULO ---
 run_module() {
-    local script_name="\$1"
-    local description="\$2"
+    local script_name="$1"
+    local description="$2"
     local local_path="${LOCAL_BIN}/${script_name}"
 
     if [ "${FORCE_UPDATE:-0}" = "1" ] || [ ! -s "$local_path" ]; then
@@ -248,7 +249,7 @@ run_module() {
 
 # --- DOWNLOAD SEM EXECUTAR ---
 download_module() {
-    local script_name="\$1"
+    local script_name="$1"
     local local_path="${LOCAL_BIN}/${script_name}"
     local tmp_path
 
@@ -289,7 +290,7 @@ download_module() {
 
 # --- CONFIRMAÇÃO PARA AÇÕES DESTRUTIVAS ---
 _confirm_destructive() {
-    local msg="\$1"
+    local msg="$1"
     echo -e "${TXT_YELLOW}⚠  ${msg}${RESET}"
     read -rp "Confirmar? [s/N]: " confirm
     case "$confirm" in
@@ -349,7 +350,7 @@ menu_display() {
     echo -e "${TXT_CYAN}[13] ATIVAR BBR (OTIMIZAÇÃO TCP)${RESET}"
     echo -e "${TXT_CYAN}[14] API /CHECK (CONSULTA)${RESET}"
     echo -e "${TXT_CYAN}[15] CDN / RELAY VERCEL${RESET}"
-    echo -e "${TXT_YELLOW}[16] CHECKUSER (APPS VPN)${RESET}"
+    echo -e "${TXT_YELLOW}[16] CHECKUSER (APPS VPN)${RESET}"         # NOVO
     echo -e "${TXT_YELLOW}[99] ATUALIZAR MÓDULOS${RESET}"
     echo -e "${TXT_CYAN}[00] SAIR${RESET}"
     echo "-----------------------------------------"
@@ -377,7 +378,7 @@ menu_display() {
         13)   run_module "bbr.sh"                "Ativar BBR" ;;
         14)   run_module "check_api.sh"          "API Check" ;;
         15)   run_module "vercel_relay.sh"        "CDN Relay" ;;
-        16)   run_module "checkuser.sh"           "CheckUser API" ;;
+        16)   run_module "checkuser.sh"           "CheckUser API" ;;  # NOVO
         99)
             clear
             echo -e "${TXT_YELLOW}================================================${RESET}"
