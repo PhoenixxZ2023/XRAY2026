@@ -32,7 +32,7 @@ REPO_NAME="XRAY2026"
 # Validação de REPO_REF — evita injeção de paths ou URLs via variável de ambiente
 _validate_ref() {
     local ref="$1"
-    if [[ ! "$ref" =~ ^[a-zA-Z0-9._/-]{1,128}$ ]]; then
+    if [[ ! "$ref" =~ ^[a-zA-Z0-9._/$-]{1,128}$ ]]; then
         echo -e "${VERMELHO}❌ REPO_REF inválido: '${ref}'. Use branch, tag ou commit hash válido.${RESET}"
         exit 1
     fi
