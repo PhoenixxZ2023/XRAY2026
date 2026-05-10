@@ -86,7 +86,7 @@ head -c 32 /dev/urandom | xxd -p
 # Guarde em /opt/XrayTools/.api_key
 ```
 
-### 📱 CheckUser API — Suporte para Apps VPN (Conecta4G, DTunnel)
+### 📱 CheckUser API — Suporte para Apps VPN 
 - API dedicada para apps VPN que usam autenticação por **usuário/senha**.
 - Mapeia user+password para UUID internamente.
 - Retorna: nome, conexões ativas, data de expiração, dias restantes, limite de conexões.
