@@ -25,7 +25,7 @@ REPO_NAME="XRAY2026"
 _validate_ref() {
     local ref="$1"
     # Aceita: letras, números, ., _, /, - e $ (para expansão de shell)
-    if [[ ! "$ref" =~ ^[a-zA-Z0-9._/$-]{1,128}$ ]]; then
+    if [[ ! "$ref" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
         echo -e "\033[1;31m❌ PINNED_REF inválido: '${ref}'\033[0m"
         exit 1
     fi
