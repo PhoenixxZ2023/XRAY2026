@@ -1,13 +1,13 @@
-# ⚡ TURBONET XRAY Manager | V1.0
+# ⚡ TURBONET XRAY Manager | V1.1
 
-![Version](https://img.shields.io/badge/Version-1.0-blue?style=for-the-badge&labelColor=black)
+![Version](https://img.shields.io/badge/Version-1.1-blue?style=for-the-badge&labelColor=black)
 ![Bash](https://img.shields.io/badge/Language-Bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white)
 ![Python](https://img.shields.io/badge/Bot-Python3-yellow?style=for-the-badge&logo=python&logoColor=white)
 ![Xray](https://img.shields.io/badge/Core-Xray-purple?style=for-the-badge)
 ![Security](https://img.shields.io/badge/Security-SHA256-red?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-Free-green?style=for-the-badge)
 
-> **Gerenciador Xray híbrido (Bash + Python)** com arquitetura modular, hot reload via API, bot Telegram, API pública de consulta e suporte a 8 protocolos.
+> **Gerenciador Xray híbrido (Bash + Python)** com arquitetura modular, hot reload via API, bot Telegram, API pública de consulta, autenticação por API-Key e suporte a CheckUser para apps VPN (Conecta4G, DTunnel).
 > Ideal para quem administra múltiplos usuários VLESS/Trojan e precisa de painel local + bot Telegram sem derrubar conexões ativas.
 
 ---
@@ -34,7 +34,7 @@ xray-menu
 - O `installxray.sh` instala apenas o **launcher** e dependências essenciais.
 - O `menuxray.sh` baixa os módulos **sob demanda** e mantém cache em `/usr/local/bin`.
 - Mesmo se o GitHub ficar fora do ar, o painel segue funcionando com os módulos já cacheados.
-- Suporte a `REPO_REF` para fixar versão por branch, tag ou commit hash.
+- Suporte a `PINNED_REF` para fixar versão por branch, tag ou commit hash.
 - **Verificação SHA256** automática em cada download — módulo corrompido ou adulterado é rejeitado.
 
 ### ⚡ Hot Reload — Sem Derrubar Conexões
@@ -61,25 +61,63 @@ xray-menu
 - Troca UUID por falso e aplica prefixo `LOCKED_` — fácil de reverter.
 - Desbloqueio restaura o UUID original do banco de dados.
 
-### 🔍 API Pública `/check`
+### 🔍 API `/check` com Autenticação
 - Endpoint HTTP para consulta de status de usuário sem acesso SSH.
+- **Autenticação por API-Key** (X-API-Key header) para proteger dados sensíveis.
+- Rate limiting: 60 requisições por minuto por IP.
 - Ideal para revendedores e aplicativos VPN verificarem clientes.
 - Respostas em JSON com nome, UUID, expiração, status e dias restantes.
 
 ```bash
-GET /check?user=NOME      → status por nome
-GET /check?uuid=UUID      → status por UUID
-GET /check/status         → status geral do servidor
-GET /health               → healthcheck
+# Endpoints da API
+GET /health                    → healthcheck (público)
+GET /check?user=NOME           → status por nome
+GET /check?uuid=UUID           → status por UUID
+GET /check/status              → status geral do servidor
+GET /check/connections         → conexões ativas por usuário
+
+# Autenticação
+Header: X-API-Key: <sua_api_key>
 ```
 
-Exemplo de resposta:
+**Gerar API Key:**
+```bash
+head -c 32 /dev/urandom | xxd -p
+# Guarde em /opt/XrayTools/.api_key
+```
+
+### 📱 CheckUser API — Suporte para Apps VPN (Conecta4G, DTunnel)
+- API dedicada para apps VPN que usam autenticação por **usuário/senha**.
+- Mapeia user+password para UUID internamente.
+- Retorna: nome, conexões ativas, data de expiração, dias restantes, limite de conexões.
+- Perfeito para revendedores que usam apps de terceiros.
+
+```bash
+# Endpoint CheckUser
+GET /checkuserxray?user=NICK&pass=SENHA
+
+# Resposta
+{
+  "username": "usuario1",
+  "count_connections": 1,
+  "expiration_date": "01/06/2026",
+  "expiration_days": 30,
+  "limit_connections": 2
+}
+```
+
+**Para apps VPN (apps.config):**
 ```json
-{"name":"joao","uuid":"xxxx","expiry":"2026-06-01","status":"active","days_left":30}
+{
+  "server": "https://seu-dominio.com",
+  "path": "/checkuserxray"
+}
 ```
 
-### 🔒 Segurança
+### 🔐 Segurança
 - Verificação **SHA256** em todos os downloads — gerada automaticamente via GitHub Actions a cada push.
+- **Autenticação API-Key** para endpoints sensíveis (X-API-Key header).
+- **Rate limiting** por IP para prevenir ataques de força bruta.
 - Validação de domínio RFC 1123 e rejeição de IPs privados/reservados.
 - `config.json` com permissão `0660 root:nogroup` — Xray lê, bot escreve, outros sem acesso.
 - `privkey.pem` com permissão `0640 root:nogroup` — chave privada TLS nunca legível por outros.
@@ -87,6 +125,7 @@ Exemplo de resposta:
 - Wrappers setuid com `4750 root:botxray` — apenas o grupo `botxray` executa como root.
 - Escrita atômica via `tmpfile + os.replace()` em todos os arquivos críticos.
 - Lock file com detecção de idade — remove locks antigos automaticamente.
+- **Sanitização de entrada** em todos os módulos — proteção contra injeção.
 
 ### 🤖 Bot Telegram (Seguro e Funcional)
 - Bot roda como usuário dedicado **não-root** (`botxray`) com venv isolado.
@@ -116,6 +155,11 @@ Exemplo de resposta:
 - Ativa/desativa BBR com detecção automática de kernel compatível.
 - Persiste entre reinicializações via `/etc/sysctl.d/`.
 
+### 👥 Sistema de Usuários com Senha e Limite de Conexões
+- Cada usuário pode ter **senha** além do UUID.
+- **Limite de conexões simultâneas** por usuário (0 = ilimitado).
+- Migração automática de usuários existentes para novo formato.
+
 ---
 
 ## 📋 Menu Principal
@@ -135,6 +179,8 @@ Exemplo de resposta:
 [12] MONITOR ONLINE
 [13] ATIVAR BBR (OTIMIZAÇÃO TCP)
 [14] API /CHECK (CONSULTA DE USUÁRIOS)
+[15] CDN / RELAY VERCEL
+[16] CHECKUSER (APPS VPN)          ← NOVO!
 [99] ATUALIZAR MÓDULOS (FORÇA DOWNLOAD)
 [00] SAIR
 ```
@@ -167,6 +213,7 @@ Exemplo de resposta:
 | `users/*.txt` | `0600` | `root:root` |
 | `users.db` | `0600` | `root:root` |
 | `limits.db / usage.db / session.db` | `0600` | `botxray:botxray` |
+| `.api_key` | `0600` | `root:root` |
 | `.bot_env` | `0640` | `root:botxray` |
 | `botxray.py` | `0640` | `root:botxray` |
 | `TurbonetCoreSSL/` | `0750` | `root:nogroup` |
@@ -197,23 +244,26 @@ XRAY2026/
 ├── installxray.sh              # Instalador do launcher
 ├── menuxray.sh                 # Menu principal
 ├── generate_hashes.sh          # Gerador de SHA256 local
+├── migrate_users.sh            # Migração de users.db para novo formato
 ├── .github/
 │   └── workflows/
 │       └── generate-hashes.yml # GitHub Actions — SHA256 automático
 └── modulosxray/
     ├── core_manager.sh         # Wizard de configuração do Xray (8 protocolos)
     ├── certxray.sh             # Emissão de certificados TLS
-    ├── add_user.sh             # Criar usuário (hot reload)
+    ├── add_user.sh             # Criar usuário (senha + limite) - V1.1
     ├── remover_user.sh         # Remover usuário (hot reload)
     ├── lista_users.sh          # Listar usuários com status
     ├── block_user.sh           # Bloquear usuário (hot reload)
     ├── unblock_user.sh         # Desbloquear usuário (hot reload)
     ├── remover_expirados.sh    # Limpar usuários vencidos
-    ├── limiterxray.sh          # Controle de consumo por GB
+    ├── limiterxray.sh          # Controle de consumo por GB (V1.2)
     ├── onlinexray.sh           # Monitor online (API)
     ├── backup.sh               # Backup e restore
     ├── bbr.sh                  # Ativar/desativar BBR
-    ├── check_api.sh            # API pública /check
+    ├── check_api.sh            # API /check com autenticação (V1.1)
+    ├── checkuser.sh            # CheckUser API para apps VPN
+    ├── sanitize.sh             # Módulo de sanitização de entrada
     ├── botxray.sh              # Instalador do bot Telegram
     ├── botxray.py              # Bot Telegram (Python)
     ├── uninstall.sh            # Desinstalação completa
@@ -222,26 +272,27 @@ XRAY2026/
 
 ---
 
-## 📝 Changelog — V1.0
+## 📝 Changelog — V1.1
 
-### Novas funcionalidades
-- **Hot reload via API** — operações sem restart do Xray
-- **8 protocolos** — HTTPUpgrade, HTTP/2 e Trojan adicionados
-- **API `/check`** — consulta de usuários via HTTP/JSON
-- **Módulo BBR** — otimização TCP com ativar/desativar
-- **SHA256 automático** — GitHub Actions gera hashes a cada push
+### Novas Funcionalidades
+- **CheckUser API** — suporte para apps VPN (Conecta4G, DTunnel)
+- **Autenticação API-Key** — proteção com X-API-Key header
+- **Rate Limiting** — 60 req/min por IP para prevenir ataques
+- **Senha por usuário** — autenticação adicional além do UUID
+- **Limite de conexões** — controle de dispositivos simultâneos
+- **Módulo sanitize.sh** — sanitização de entrada em todos os módulos
+- **Migração users.db** — script para converter usuários existentes
 
-### Segurança
-- `chmod 777` eliminado em todos os módulos
-- Permissões mínimas corretas em todos os arquivos sensíveis
-- Wrappers setuid restritos ao grupo `botxray`
-- Escrita atômica em todos os arquivos críticos
+### Melhorias de Segurança
+- Autenticação em endpoints `/check`
+- Rate limiting por IP
+- Sanitização de entrada (proteção contra injeção)
+- Validação de campos em todos os módulos
 
 ### Correções
-- Bot: tmpfile no mesmo diretório do config (PrivateTmp fix)
-- Opção 99: download separado de execução — sem travamento
-- Lock file antigo removido automaticamente após 10 minutos
-- Domínios com hífen e ccSLDs aceitos corretamente
+- Portas sincronizadas entre módulos (API Xray: 1080)
+- Cache de status melhorado no menu
+- Verificação de integridade SHA256 mais robusta
 
 ---
 
