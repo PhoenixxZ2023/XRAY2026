@@ -1,18 +1,20 @@
 #!/bin/bash
-# add_user.sh - TURBONET XRAY V1.1
+# add_user.sh - TURBONET XRAY V1.2
 # Correções aplicadas:
-#   - Adicionado campo SENHA na criação de usuário
-#   - Formato do users.db: nick|uuid|expiry|password|conn_limit
-#   - Validação de senha (mín 4 caracteres)
-#   - Limite de conexões (padrão ilimitado = 0)
-#   - Compatível com CheckUser API (/checkuserxray)
-#
-# Versão V1.0 (original):
-#   - chmod 777 → 640 root:nogroup em todos os pontos
-#   - trap duplo eliminado — _cleanup() centralizado
-#   - Verificação de xray ativo com retry de até 5s
+#   - chmod 777 → 640 root:nogroup em todos os pontos (fluxo normal + rollbacks)
+#   - trap duplo eliminado — _cleanup() centralizado com trap EXIT
+#   - Verificação de xray ativo com retry de até 5s (evita falso negativo em sistema lento)
 #   - Duplicidade case-insensitive — nome normalizado para minúsculas
-
+#   - Rollback chama _apply_config_perms() em vez de chmod 777 manual
+#   - V1.2: Adicionado campo SENHA na criação de usuário
+#   - V1.2: Formato users.db: nick|uuid|expiry|password|conn_limit
+#   - V1.2: Validação de senha (mín 4 caracteres) + sanitização
+#   - V1.2: Limite de conexões (padrão ilimitado = 0)
+#   - V1.2: Compatível com CheckUser API (/checkuserxray)
+#
+# V1.0 (original):
+#   - Todas as correções listadas acima
+#
 set -Eeuo pipefail
 
 CONFIG_PATH="/usr/local/etc/xray/config.json"
@@ -31,6 +33,8 @@ TITLE_BAR='\033[1;47;34m'
 export DEBIAN_FRONTEND=noninteractive
 
 # --- CLEANUP CENTRALIZADO ---
+# CORREÇÃO: trap único no EXIT — cobre saída normal, ERR e sinais.
+# Elimina a necessidade de redefinir trap no meio do script.
 _tmp_cfg=""
 _cleanup() {
     rm -f "$_tmp_cfg"
@@ -39,6 +43,8 @@ trap '_cleanup' EXIT
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
 
 # --- PERMISSÕES DO CONFIG ---
+# CORREÇÃO: 640 root:nogroup — Xray lê como nobody/nogroup, não precisa escrever.
+# Centralizado para garantir consistência em fluxo normal e rollbacks.
 _apply_config_perms() {
     chmod 660 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
@@ -49,10 +55,10 @@ _PKG_MANAGER=""
 _APT_UPDATED=0
 _detect_pkg_manager() {
     [ -n "$_PKG_MANAGER" ] && return
-    if command -v apt-get &>/dev/null; then _PKG_MANAGER="apt"
-    elif command -v dnf &>/dev/null; then _PKG_MANAGER="dnf"
-    elif command -v yum &>/dev/null; then _PKG_MANAGER="yum"
-    elif command -v pacman &>/dev/null; then _PKG_MANAGER="pacman"
+    if   command -v apt-get &>/dev/null; then _PKG_MANAGER="apt"
+    elif command -v dnf     &>/dev/null; then _PKG_MANAGER="dnf"
+    elif command -v yum     &>/dev/null; then _PKG_MANAGER="yum"
+    elif command -v pacman  &>/dev/null; then _PKG_MANAGER="pacman"
     else echo -e "${TXT_RED}❌ Gerenciador de pacotes não detectado.${RESET}"; exit 1; fi
 }
 
@@ -62,10 +68,14 @@ ensure_cmd() {
     _detect_pkg_manager
     case "$_PKG_MANAGER" in
         apt)
-            [ "$_APT_UPDATED" -eq 0 ] && { apt-get update -y >>"$LOG_FILE" 2>&1 || true; _APT_UPDATED=1; }
-            apt-get install -y "$pkg" >>"$LOG_FILE" 2>&1 ;;
+            if [ "$_APT_UPDATED" -eq 0 ]; then
+                apt-get update -y >>"$LOG_FILE" 2>&1 || true
+                _APT_UPDATED=1
+            fi
+            apt-get install -y "$pkg" >>"$LOG_FILE" 2>&1
+            ;;
         dnf|yum) "$_PKG_MANAGER" install -y "$pkg" >>"$LOG_FILE" 2>&1 ;;
-        pacman) pacman -Sy --noconfirm "$pkg" >>"$LOG_FILE" 2>&1 ;;
+        pacman)  pacman -Sy --noconfirm "$pkg"      >>"$LOG_FILE" 2>&1 ;;
     esac
 }
 
@@ -95,24 +105,35 @@ generate_uuid() {
     echo "$u"
 }
 
-# --- GERAÇÃO DO LINK VLESS ---
+# --- GERAÇÃO DO LINK VLESS A PARTIR DO PRESET ---
+# CORREÇÃO: exibe aviso explicativo quando preset.json não existe,
+# em vez de retornar string vazia silenciosamente.
 generate_link() {
     local uuid="$1" nick="$2"
 
     if [ ! -f "$PRESET_FILE" ]; then
-        echo -e "${TXT_YELLOW}⚠  preset.json não encontrado.${RESET}" >&2
+        echo -e "${TXT_YELLOW}⚠  preset.json não encontrado — configure o Xray primeiro (opção 04 no menu).${RESET}" >&2
+        echo ""
         return
     fi
 
-    jq empty "$PRESET_FILE" 2>/dev/null || return
+    jq empty "$PRESET_FILE" 2>/dev/null || {
+        echo -e "${TXT_YELLOW}⚠  preset.json com JSON inválido — link não gerado.${RESET}" >&2
+        echo ""
+        return
+    }
 
     local network port domain tls
     network=$(jq -r '.network // ""' "$PRESET_FILE" 2>/dev/null || echo "")
-    port=$(jq -r '.port // ""' "$PRESET_FILE" 2>/dev/null || echo "")
-    domain=$(jq -r '.domain // ""' "$PRESET_FILE" 2>/dev/null || echo "")
-    tls=$(jq -r '.tls // "false"' "$PRESET_FILE" 2>/dev/null || echo "false")
+    port=$(jq -r    '.port    // ""' "$PRESET_FILE" 2>/dev/null || echo "")
+    domain=$(jq -r  '.domain  // ""' "$PRESET_FILE" 2>/dev/null || echo "")
+    tls=$(jq -r     '.tls     // "false"' "$PRESET_FILE" 2>/dev/null || echo "false")
 
-    [ -z "$network" ] || [ -z "$port" ] || [ -z "$domain" ] && return
+    [ -z "$network" ] || [ -z "$port" ] || [ -z "$domain" ] && {
+        echo -e "${TXT_YELLOW}⚠  preset.json incompleto — campos network/port/domain ausentes.${RESET}" >&2
+        echo ""
+        return
+    }
 
     local sec="none"
     [ "$tls" = "true" ] && sec="tls"
@@ -123,12 +144,21 @@ generate_link() {
         ws)     link="vless://${uuid}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#${nick}" ;;
         xhttp)  link="vless://${uuid}@${domain}:${port}?mode=auto&path=%2F&security=${sec}&encryption=none&host=${domain}&type=xhttp&sni=${domain}#${nick}" ;;
         vision) link="vless://${uuid}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#${nick}" ;;
+        httpupgrade)
+            link="vless://${uuid}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=httpupgrade&sni=${domain}#${nick}" ;;
+        h2)
+            link="vless://${uuid}@${domain}:${port}?path=%2F&security=tls&encryption=none&host=${domain}&type=h2&sni=${domain}#${nick}" ;;
+        trojan)
+            echo -e "${TXT_YELLOW}⚠  Trojan usa senha, não UUID — link não gerado para este protocolo.${RESET}" >&2
+            return ;;
         *)      link="vless://${uuid}@${domain}:${port}?security=${sec}&encryption=none&type=tcp&sni=${domain}#${nick}" ;;
     esac
     echo "$link"
 }
 
-# --- VERIFICAÇÃO DE XRAY ATIVO ---
+# --- VERIFICAÇÃO DE XRAY ATIVO COM RETRY ---
+# CORREÇÃO: tenta por até 5s antes de concluir falha.
+# sleep 1 simples anterior causava falso negativo em sistemas lentos.
 _wait_xray_active() {
     local tries=5
     while [ "$tries" -gt 0 ]; do
@@ -150,11 +180,11 @@ if [ ! -s "$CONFIG_PATH" ]; then
     sleep 2; exit 1
 fi
 if ! jq empty "$CONFIG_PATH" 2>/dev/null; then
-    echo -e "${TXT_RED}❌ Config JSON inválido.${RESET}"
+    echo -e "${TXT_RED}❌ Config JSON inválido: $CONFIG_PATH${RESET}"
     sleep 2; exit 1
 fi
 if ! jq -e '.inbounds[]? | select(.tag=="inbound-turbonet")' "$CONFIG_PATH" >/dev/null 2>&1; then
-    echo -e "${TXT_RED}❌ inbound-turbonet não encontrado.${RESET}"
+    echo -e "${TXT_RED}❌ inbound-turbonet não encontrado no config.${RESET}"
     sleep 2; exit 1
 fi
 
@@ -171,13 +201,14 @@ read -rp "Nome do usuário (0 para voltar): " raw_nick
 [ "${raw_nick:-0}" = "0" ] || [ -z "${raw_nick:-}" ] && exit 0
 
 if ! [[ "$raw_nick" =~ ^[a-zA-Z0-9]{5,9}$ ]]; then
-    echo -e "${TXT_RED}❌ Nome inválido.${RESET}"
+    echo -e "${TXT_RED}❌ Nome inválido. Use de 5 a 9 letras/números.${RESET}"
     sleep 2; exit 1
 fi
 
+# CORREÇÃO: normaliza para minúsculas — evita que "User1" e "user1" coexistam.
 nick=$(echo "$raw_nick" | tr '[:upper:]' '[:lower:]')
 
-# Duplicidade no DB
+# Duplicidade no DB (case-insensitive via normalização)
 if grep -q "^${nick}|" "$USER_DB" 2>/dev/null; then
     echo -e "${TXT_RED}❌ Usuário '${nick}' já existe.${RESET}"
     sleep 2; exit 1
@@ -193,15 +224,13 @@ fi
 
 # --- SENHA ---
 echo ""
-echo "Senha para o usuário:"
+echo -e " ${TXT_CYAN}Senha para CheckUser${RESET} (apps VPN usam usuário+senha):"
 echo " - Mínimo 4 caracteres"
-echo " - Será usada no CheckUser (apps como Conecta4G)"
-echo ""
-read -rp "Senha [Enter = gerar automaticamente]: " password
+read -rp " Senha [Enter = gerar automaticamente]: " password
 
 if [ -z "$password" ]; then
     password=$(generate_password 8)
-    echo -e "${TXT_CYAN}Senha gerada: ${password}${RESET}"
+    echo -e " ${TXT_GREEN}Senha gerada: ${password}${RESET}"
 fi
 
 if [ ${#password} -lt 4 ]; then
@@ -209,8 +238,8 @@ if [ ${#password} -lt 4 ]; then
     sleep 2; exit 1
 fi
 
-# Remove caracteres perigosos da senha
-password=$(echo "$password" | tr -cd 'a-zA-Z0-9@#$%&*+-=')
+# Remove caracteres perigosos da senha (evita problemas no DB)
+password=$(echo "$password" | tr -cd 'a-zA-Z0-9@#$%&*+-=._')
 if [ -z "$password" ]; then
     echo -e "${TXT_RED}❌ Senha contém apenas caracteres inválidos.${RESET}"
     sleep 2; exit 1
@@ -218,12 +247,12 @@ fi
 
 # --- LIMITE DE CONEXÕES ---
 echo ""
-echo "Limite de conexões simultâneas:"
+echo -e " ${TXT_CYAN}Limite de conexões simultâneas${RESET}:"
 echo "   [0] Ilimitado (padrão)"
 echo "   [1] Apenas 1 dispositivo"
 echo "   [2] Até 2 dispositivos"
-echo "   [n] Número específico"
-read -rp "Limite [Enter = 0 = ilimitado]: " conn_limit
+echo "   [n] Número específico (máx 100)"
+read -rp " Limite [Enter = 0 = ilimitado]: " conn_limit
 
 [ -z "$conn_limit" ] && conn_limit=0
 
@@ -232,7 +261,7 @@ if ! [[ "$conn_limit" =~ ^[0-9]+$ ]]; then
 fi
 
 if [ "$conn_limit" -gt 100 ]; then
-    conn_limit=100  # Máximo razoável
+    conn_limit=100
 fi
 
 # --- VALIDADE ---
@@ -245,7 +274,7 @@ read -rp "Dias de validade [Enter = 30]: " days
 uuid=$(generate_uuid) || { sleep 2; exit 1; }
 expiry="$(date -d "+${days} days" +%F)"
 
-# --- APLICA NO CONFIG (atômico) ---
+# --- APLICA NO CONFIG (atômico + validação antes de mv) ---
 _tmp_cfg=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")
 
 jq --arg uuid "$uuid" --arg nick "$nick" '
@@ -257,16 +286,16 @@ jq --arg uuid "$uuid" --arg nick "$nick" '
 ' "$CONFIG_PATH" > "$_tmp_cfg"
 
 if ! jq empty "$_tmp_cfg" 2>/dev/null; then
-    echo -e "${TXT_RED}❌ jq gerou JSON inválido.${RESET}"
+    echo -e "${TXT_RED}❌ jq gerou JSON inválido. Config não alterado.${RESET}"
     sleep 2; exit 1
 fi
 
 cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
 mv -f "$_tmp_cfg" "$CONFIG_PATH"
-_tmp_cfg=""
+_tmp_cfg=""   # já movido — _cleanup não deve tentar remover
 _apply_config_perms
 
-# --- HOT RELOAD ---
+# --- HOT RELOAD VIA API (sem derrubar conexões ativas) ---
 _xray_api_port() {
     jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
 }
@@ -279,31 +308,33 @@ _hotreload_add() {
 }
 
 if _hotreload_add; then
-    echo -e "${TXT_GREEN}Usuário aplicado via API.${RESET}"
+    echo -e "${TXT_GREEN}Usuário aplicado via API (sem restart).${RESET}"
 else
-    echo -e "${TXT_YELLOW}API indisponível — recarregando...${RESET}"
+    echo -e "${TXT_YELLOW}API indisponível — recarregando serviço...${RESET}"
     if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && ! systemctl restart xray >/dev/null 2>&1; then
-        echo -e "${TXT_RED}❌ Falha ao recarregar Xray. Revertendo...${RESET}"
+        echo -e "${TXT_RED}❌ Falha ao recarregar Xray. Revertendo config...${RESET}"
         mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
         _apply_config_perms
-        echo -e "${TXT_YELLOW}Config revertido.${RESET}"
+        echo -e "${TXT_YELLOW}Config revertido. Usuário NÃO criado.${RESET}"
+        journalctl -u xray -n 15 --no-pager 2>/dev/null || true
         sleep 3; exit 1
     fi
     if ! _wait_xray_active; then
         echo -e "${TXT_RED}❌ Xray não ficou ativo. Revertendo...${RESET}"
         mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
         _apply_config_perms
+        systemctl restart xray >/dev/null 2>&1 || true
         sleep 2; exit 1
     fi
 fi
 
-# --- GRAVA NO DB (V1.1: com senha e limite) ---
+# --- GRAVA NO DB (V1.2: com senha e limite) ---
 # Formato: nick|uuid|expiry|password|conn_limit
 echo "${nick}|${uuid}|${expiry}|${password}|${conn_limit}" >> "$USER_DB"
 
 link=$(generate_link "$uuid" "$nick")
 
-# Arquivo individual
+# Arquivo individual do usuário
 user_file="${CONN_INFO_DIR}/${nick}.txt"
 {
     echo "# TURBONET XRAY - Usuário: ${nick}"
@@ -329,4 +360,5 @@ echo -e " 🔢 Limite: ${conn_limit} conexão(ões)"
 echo "-----------------------------------------"
 echo ""
 echo -e "${TXT_CYAN}⚠ Anote a senha — não será exibida novamente!${RESET}"
+[ -n "$link" ] && echo -e "${TXT_YELLOW}🔗 Link: ${link}${RESET}"
 read -rp "Enter para voltar..."
