@@ -1,5 +1,5 @@
 #!/bin/bash
-# menuxray.sh - TURBONET XRAY V1.1
+# menuxray.sh - TURBONET XRAY MANAGER V1.1
 # Correções aplicadas:
 #   - Aritmética de cache segura com set -e (substituído ((...)) por [...])
 #   - Validação de shebang robusta com suporte a BOM UTF-8
@@ -9,9 +9,6 @@
 #   - LOG_FILE com rotação de 512KB ao iniciar
 #   - NOVO: Opção [16] CHECKUSER para apps VPN (Conecta4G, DTunnel)
 #   - NOVO: Status do CheckUser no header
-#
-# V1.0 (original):
-#   - Todas as correções listadas acima
 set -Eeuo pipefail
 
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
@@ -23,10 +20,13 @@ REPO_OWNER="PhoenixxZ2023"
 REPO_NAME="XRAY2026"
 
 _validate_ref() {
-    local ref="$1"
-    # Aceita: letras, números, ., _, /, - e $ (para expansão de shell)
+    local ref="${1:-}"
     if [[ ! "$ref" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
-        echo -e "\033[1;31m❌ PINNED_REF inválido: '${ref}'\033[0m"
+        echo -e "\033[1;31m❌ PINNED_REF invalido: '${ref}'\033[0m"
+        exit 1
+    fi
+    if [ ${#ref} -gt 128 ]; then
+        echo -e "\033[1;31m❌ PINNED_REF muito longo (max 128)\033[0m"
         exit 1
     fi
 }
@@ -94,7 +94,7 @@ _refresh_status_cache() {
                     "$CONFIG_PATH" 2>/dev/null || echo "")
             fi
             if [ -z "$_CACHED_PORT" ] && [ -f "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null; then
-                _CACHED_PORT=$(jq -r '.inbounds[] | select(.tag=="inbound-turbonet").port // empty' \
+                _CACHED_PORT=$(jq -r '.inbounds[] | select(.tag=="inbound-turbonet").port// empty' \
                     "$CONFIG_PATH" 2>/dev/null || echo "")
             fi
         fi
@@ -139,7 +139,7 @@ ensure_deps() {
         return 0
     fi
 
-    echo -e "${TXT_YELLOW}Instalando dependências: ${missing[*]}...${RESET}"
+    echo -e "${TXT_YELLOW}Instalando dependencias: ${missing[*]}...${RESET}"
     case "$pkgmgr" in
         apt)
             apt-get update -y >>"$LOG_FILE" 2>&1
@@ -152,7 +152,7 @@ ensure_deps() {
             pacman -Sy --noconfirm "${missing[@]}" >>"$LOG_FILE" 2>&1
             ;;
         *)
-            echo -e "${TXT_RED}❌ Gerenciador de pacotes não detectado.${RESET}"
+            echo -e "${TXT_RED}❌ Gerenciador de pacotes nao detectado.${RESET}"
             exit 1
             ;;
     esac
@@ -180,7 +180,7 @@ _verify_module_hash() {
         "$sha256_url" 2>/dev/null | awk '{print $1}')
 
     if [ -z "$expected" ]; then
-        echo -e "${TXT_YELLOW}⚠  Hash não encontrado para ${module_name}.${RESET}" >&2
+        echo -e "${TXT_YELLOW}⚠  Hash nao encontrado para ${module_name}.${RESET}" >&2
         return 0
     fi
 
@@ -202,7 +202,7 @@ run_module() {
     local local_path="${LOCAL_BIN}/${script_name}"
 
     if [ "${FORCE_UPDATE:-0}" = "1" ] || [ ! -s "$local_path" ]; then
-        echo -e "${TXT_YELLOW}Baixando módulo: ${description}...${RESET}"
+        echo -e "${TXT_YELLOW}Baixando modulo: ${description}...${RESET}"
         local tmp_path
         tmp_path=$(mktemp /tmp/xray_module_XXXXXX)
 
@@ -227,14 +227,14 @@ run_module() {
         fi
 
         if ! LC_ALL=C head -n 1 "$tmp_path" | grep -qP '^(\xEF\xBB\xBF)?#!.*(bash|env\s)'; then
-            echo -e "${TXT_RED}❌ Script inválido: ${script_name}.${RESET}"
+            echo -e "${TXT_RED}❌ Script invalido: ${script_name}.${RESET}"
             rm -f "$tmp_path"
             sleep 2
             return 1
         fi
 
         if ! _verify_module_hash "$tmp_path" "$script_name"; then
-            echo -e "${TXT_RED}❌ Módulo ${script_name} rejeitado.${RESET}"
+            echo -e "${TXT_RED}❌ Modulo ${script_name} rejeitado.${RESET}"
             rm -f "$tmp_path"
             sleep 2
             return 1
@@ -329,40 +329,40 @@ menu_display() {
 
     echo "-----------------------------------------"
     echo -e " ${TXT_CYAN}STATUS XRAY:${RESET}      $status_txt"
-    echo -e " ${TXT_CYAN}USUÁRIOS:${RESET}         ${_CACHED_USERS}"
+    echo -e " ${TXT_CYAN}USUARIOS:${RESET}         ${_CACHED_USERS}"
     [ -n "$protocol_line" ] && echo -e "$protocol_line"
     echo -e " ${TXT_CYAN}BOT TELEGRAM:${RESET}     $bot_status"
     echo -e " ${TXT_CYAN}CHECKUSER API:${RESET}    $checkuser_status"
     echo "-----------------------------------------"
     echo ""
-    echo -e "${TXT_CYAN}[01] CRIAR USUÁRIO${RESET}"
-    echo -e "${TXT_CYAN}[02] REMOVER USUÁRIO${RESET}"
-    echo -e "${TXT_CYAN}[03] LISTAR USUÁRIOS${RESET}"
+    echo -e "${TXT_CYAN}[01] CRIAR USUARIO${RESET}"
+    echo -e "${TXT_CYAN}[02] REMOVER USUARIO${RESET}"
+    echo -e "${TXT_CYAN}[03] LISTAR USUARIOS${RESET}"
     echo -e "${TXT_CYAN}[04] INSTALAR/CONFIGURAR XRAY${RESET}"
     echo -e "${TXT_CYAN}[05] LIMPAR EXPIRADOS${RESET}"
     echo -e "${TXT_RED}[06] DESINSTALAR XRAY${RESET}"
     echo -e "${TXT_CYAN}[07] LIMITADOR CONSUMO (GB)${RESET}"
     echo -e "${TXT_CYAN}[08] BOT TELEGRAM${RESET}"
     echo -e "${TXT_CYAN}[09] BACKUP / RESTORE${RESET}"
-    echo -e "${TXT_CYAN}[10] BLOQUEAR USUÁRIOS${RESET}"
-    echo -e "${TXT_CYAN}[11] DESBLOQUEAR USUÁRIOS${RESET}"
+    echo -e "${TXT_CYAN}[10] BLOQUEAR USUARIOS${RESET}"
+    echo -e "${TXT_CYAN}[11] DESBLOQUEAR USUARIOS${RESET}"
     echo -e "${TXT_CYAN}[12] MONITOR ONLINE${RESET}"
-    echo -e "${TXT_CYAN}[13] ATIVAR BBR (OTIMIZAÇÃO TCP)${RESET}"
+    echo -e "${TXT_CYAN}[13] ATIVAR BBR (OTIMIZACAO TCP)${RESET}"
     echo -e "${TXT_CYAN}[14] API /CHECK (CONSULTA)${RESET}"
     echo -e "${TXT_CYAN}[15] CDN / RELAY VERCEL${RESET}"
-    echo -e "${TXT_YELLOW}[16] CHECKUSER (APPS VPN)${RESET}"         # NOVO
-    echo -e "${TXT_YELLOW}[99] ATUALIZAR MÓDULOS${RESET}"
+    echo -e "${TXT_YELLOW}[16] CHECKUSER (APPS VPN)${RESET}"
+    echo -e "${TXT_YELLOW}[99] ATUALIZAR MODULOS${RESET}"
     echo -e "${TXT_CYAN}[00] SAIR${RESET}"
     echo "-----------------------------------------"
-    read -rp "Opção: " choice
+    read -rp "Opcao: " choice
 
     case "$choice" in
-        1|01) run_module "add_user.sh"          "Criar Usuário" ;;
-        2|02) run_module "remover_user.sh"       "Remover Usuário" ;;
-        3|03) run_module "lista_users.sh"        "Listar Usuários" ;;
+        1|01) run_module "add_user.sh"          "Criar Usuario" ;;
+        2|02) run_module "remover_user.sh"       "Remover Usuario" ;;
+        3|03) run_module "lista_users.sh"        "Listar Usuarios" ;;
         4|04) run_module "core_manager.sh"       "Gerenciador Xray" ;;
         5|05)
-            _confirm_destructive "Remover todos os usuários expirados?" \
+            _confirm_destructive "Remover todos os usuarios expirados?" \
                 && run_module "remover_expirados.sh" "Limpeza"
             ;;
         6|06)
@@ -378,11 +378,11 @@ menu_display() {
         13)   run_module "bbr.sh"                "Ativar BBR" ;;
         14)   run_module "check_api.sh"          "API Check" ;;
         15)   run_module "vercel_relay.sh"        "CDN Relay" ;;
-        16)   run_module "checkuser.sh"           "CheckUser API" ;;  # NOVO
+        16)   run_module "checkuser.sh"           "CheckUser API" ;;
         99)
             clear
             echo -e "${TXT_YELLOW}================================================${RESET}"
-            echo -e "${TXT_YELLOW}   ATUALIZANDO TODOS OS MÓDULOS               ${RESET}"
+            echo -e "${TXT_YELLOW}   ATUALIZANDO TODOS OS MODULOS               ${RESET}"
             echo -e "${TXT_YELLOW}================================================${RESET}"
             echo ""
             _STATUS_CACHE_TIME=0
@@ -406,7 +406,7 @@ menu_display() {
 
             echo ""
             echo -e "${TXT_GREEN}================================================${RESET}"
-            echo -e "Concluído: ${ok} OK  ${TXT_RED}${fail} falharam${RESET}"
+            echo -e "Concluido: ${ok} OK  ${TXT_RED}${fail} falharam${RESET}"
             echo -e "${TXT_GREEN}================================================${RESET}"
             sleep 3
             ;;
@@ -415,7 +415,7 @@ menu_display() {
             exit 0
             ;;
         *)
-            echo -e "${TXT_RED}Opção inválida: '${choice}'${RESET}"
+            echo -e "${TXT_RED}Opcao invalida: '${choice}'${RESET}"
             sleep 1
             ;;
     esac
