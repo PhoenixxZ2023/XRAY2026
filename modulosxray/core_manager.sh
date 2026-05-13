@@ -28,11 +28,8 @@ CRT_FILE="$SSL_DIR/fullchain.pem"
 XRAY_USER="nobody"
 XRAY_GROUP="nogroup"
 
-# Porta API configurável via variável de ambiente.
-# Padrão 1080 — porta padrão do projeto TURBONET XRAY.
-API_PORT="${XRAY_API_PORT:-1080}"
-# V1.1: Limite máximo para busca de porta livre (evita loop infinito)
-API_PORT_MAX="${XRAY_API_PORT_MAX:-9999}"
+# Porta API fixa 1080
+API_PORT="1080"
 
 _validate_repo_base() {
     local url="$1"
@@ -208,18 +205,9 @@ port_in_use() {
     return 1
 }
 
-# V1.1: Usa API_PORT_MAX configurável
+# API porta fixa 1080
 _find_free_api_port() {
-    local port="${1:-$API_PORT}"
-    local max_port="${API_PORT_MAX:-9999}"
-    while port_in_use "$port"; do
-        port=$((port + 1))
-        if [ "$port" -gt "$max_port" ]; then
-            echo -e "${TXT_RED}❌ Nenhuma porta livre encontrada para a API (${1:-$API_PORT}-${max_port}).${RESET}" >&2
-            return 1
-        fi
-    done
-    echo "$port"
+    echo "1080"
 }
 
 func_install_official_core() {
@@ -311,7 +299,7 @@ func_generate_config() {
             # Ajuste baseado no diagnóstico: pacotes menores, conexões curtas
             if [ "$use_tls" = "true" ]; then
                 stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
-                    '{network:"xhttp",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],alpn:["http/1.1"],minVersion:"1.2"},xhttpSettings:{path:"/",scMaxBufferedPosts:5,scMaxEachPostBytes:40960,scStreamUpServerSecs:"5-15",xPaddingBytes:""}}')
+                    '{network:"xhttp",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],alpn:["http/1.1"],minVersion:"1.3"},xhttpSettings:{path:"/",scMaxBufferedPosts:5,scMaxEachPostBytes:40960,scStreamUpServerSecs:"5-15",xPaddingBytes:""}}')
             else
                 stream_settings=$(jq -n \
                     '{network:"xhttp",security:"none",xhttpSettings:{path:"/",scMaxBufferedPosts:5,scMaxEachPostBytes:40960,scStreamUpServerSecs:"5-15",xPaddingBytes:""}}')
@@ -321,7 +309,7 @@ func_generate_config() {
             # Headers realistas e path personalizado para evitar DPI
             if [ "$use_tls" = "true" ]; then
                 stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
-                    '{network:"ws",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],alpn:["http/1.1"],minVersion:"1.2"},wsSettings:{acceptProxyProtocol:false,path:"/",header:{host:$dom,Connection:"keep-alive", pragma:"no-cache"}}}')
+                    '{network:"ws",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],alpn:["http/1.1"],minVersion:"1.3"},wsSettings:{acceptProxyProtocol:false,path:"/",header:{host:$dom,Connection:"keep-alive", pragma:"no-cache"}}}')
             else
                 stream_settings=$(jq -n --arg dom "$domain" \
                     '{network:"ws",security:"none",wsSettings:{acceptProxyProtocol:false,path:"/",header:{host:$dom,Connection:"keep-alive", pragma:"no-cache"}}}')
@@ -329,31 +317,31 @@ func_generate_config() {
         grpc)
             if [ "$use_tls" = "true" ]; then
                 stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
-                    '{network:"grpc",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.2"},grpcSettings:{serviceName:"gRPC"}}')
+                    '{network:"grpc",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.3"},grpcSettings:{serviceName:"gRPC"}}')
             else
                 stream_settings=$(jq -n '{network:"grpc",security:"none",grpcSettings:{serviceName:"gRPC"}}')
             fi ;;
         vision)
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
-                '{network:"tcp",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.2"},tcpSettings:{header:{type:"none"}}}') ;;
+                '{network:"tcp",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.3"},tcpSettings:{header:{type:"none"}}}') ;;
         httpupgrade)
             if [ "$use_tls" = "true" ]; then
                 stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
-                    '{network:"httpupgrade",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.2"},httpupgradeSettings:{path:"/",host:$dom}}')
+                    '{network:"httpupgrade",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.3"},httpupgradeSettings:{path:"/",host:$dom}}')
             else
                 stream_settings=$(jq -n --arg dom "$domain" \
                     '{network:"httpupgrade",security:"none",httpupgradeSettings:{path:"/",host:$dom}}')
             fi ;;
         h2)
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
-                '{network:"h2",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],alpn:["h2"],minVersion:"1.2"},httpSettings:{path:"/",host:[$dom]}}') ;;
+                '{network:"h2",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],alpn:["h2"],minVersion:"1.3"},httpSettings:{path:"/",host:[$dom]}}') ;;
         trojan)
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
-                '{network:"tcp",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.2"},tcpSettings:{header:{type:"none"}}}') ;;
+                '{network:"tcp",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.3"},tcpSettings:{header:{type:"none"}}}') ;;
         *)
             if [ "$use_tls" = "true" ]; then
                 stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
-                    '{network:"tcp",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.2"}}')
+                    '{network:"tcp",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.3"}}')
             else
                 stream_settings=$(jq -n '{network:"tcp",security:"none"}')
             fi ;;
