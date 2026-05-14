@@ -1,356 +1,238 @@
 #!/bin/bash
-# certxray.sh - TURBONET XRAY V1.0
-# Correções aplicadas:
-#   - chmod 777 na chave privada → 640 root:nogroup (privkey.pem)
-#   - chmod 777 no certificado → 644 root:root (fullchain.pem)
-#   - chmod 777 no diretório → 750 root:nogroup ($SSL_DIR)
-#   - chmod 777 no renew_cert.sh → 700 root:root (executado como root via cron)
-#   - Mesmas permissões corretas replicadas no renew_cert.sh gerado
-#   - Escrita em $ACTIVE_DOMAIN_FILE movida para após validação do domínio
-#   - Fallback LE→autoassinado remove backups após sucesso
-#   - Cron com jitter aleatório — evita rate limiting no Let's Encrypt
-#   - _wait_xray_active() com retry de 5s no renew_cert.sh gerado
+# certxray.sh - DragonCore (FIXED) V7.9
+# - Fallback automático: Let's Encrypt -> Autoassinado (não aborta)
+# - Garantia de criação do /opt/DragonCoreSSL ANTES do cp (bug corrigido)
+# - Permissões seguras (sem 777) compatível com xray.service User=nobody
+# - Renovação automática apenas para Let's Encrypt
+# - Detecção DNS/CDN (Azion/Cloudflare) para avisar sobre HTTP-01
 
 set -Eeuo pipefail
 
+# --- INPUT (Evita erro se digitar 'bash certxray.sh dominio') ---
 RAW_INPUT="$*"
 DOMAIN="$(echo "$RAW_INPUT" | awk '{print $NF}')"
 
-SSL_DIR="/opt/TurbonetCoreSSL"
+SSL_DIR="/opt/DragonCoreSSL"
 LE_DIR=""
 RENEW_SCRIPT="$SSL_DIR/renew_cert.sh"
 ACTIVE_DOMAIN_FILE="/opt/XrayTools/active_domain"
-LOG_FILE="/tmp/certxray.log"
 
+# Xray (seu systemd: User=nobody)
 XRAY_USER="nobody"
 XRAY_GROUP="nogroup"
 
-YB='\033[1;33m'
-RB='\033[1;31m'
-GB='\033[1;32m'
-CB='\033[1;36m'
-BG_RED='\033[41;1;37m'
+# --- CORES ---
+YB='\033[1;33m'        # Amarelo Negrito
+RB='\033[1;31m'        # Vermelho Negrito
+GB='\033[1;32m'        # Verde Negrito
+CB='\033[1;36m'        # Ciano
+BG_RED='\033[41;1;37m' # Fundo Vermelho
 RESET='\033[0m'
 
-export DEBIAN_FRONTEND=noninteractive
-
-# --- DETECÇÃO DE DISTRO ---
-_PKG_MANAGER=""
-_APT_UPDATED=0
-_detect_pkg_manager() {
-    [ -n "$_PKG_MANAGER" ] && return
-    if   command -v apt-get &>/dev/null; then _PKG_MANAGER="apt"
-    elif command -v dnf     &>/dev/null; then _PKG_MANAGER="dnf"
-    elif command -v yum     &>/dev/null; then _PKG_MANAGER="yum"
-    elif command -v pacman  &>/dev/null; then _PKG_MANAGER="pacman"
-    else echo -e "${RB}❌ Gerenciador de pacotes não detectado.${RESET}"; exit 1; fi
+need_cmd() {
+  local cmd="$1" pkg="$2"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y "$pkg" >/dev/null 2>&1
+  fi
 }
 
-ensure_cmd() {
-    local cmd="$1" pkg="$2"
-    command -v "$cmd" &>/dev/null && return 0
-    _detect_pkg_manager
-    case "$_PKG_MANAGER" in
-        apt)
-            [ "$_APT_UPDATED" -eq 0 ] && { apt-get update -y >>"$LOG_FILE" 2>&1 || true; _APT_UPDATED=1; }
-            apt-get install -y "$pkg" >>"$LOG_FILE" 2>&1 ;;
-        dnf|yum) "$_PKG_MANAGER" install -y "$pkg" >>"$LOG_FILE" 2>&1 ;;
-        pacman)  pacman -Sy --noconfirm "$pkg"      >>"$LOG_FILE" 2>&1 ;;
-    esac
-}
-
-# --- VALIDAÇÃO DE DOMÍNIO (RFC 1123) ---
-validate_domain() {
-    local d="${1:-}"
-    [ -n "$d" ] || return 1
-    [[ "$d" =~ ^[0-9.]+$ ]] && return 1
-    [[ "$d" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]
-}
-
-# --- IP PÚBLICO COM HTTPS E TIMEOUT ---
 get_public_ip() {
-    curl -4fsSL --max-time 10 --connect-timeout 5 \
-        "https://icanhazip.com" 2>/dev/null \
-    || curl -4fsSL --max-time 10 --connect-timeout 5 \
-        "https://api.ipify.org" 2>/dev/null \
-    || echo ""
+  curl -4fsSL ifconfig.me 2>/dev/null || curl -4fsSL icanhazip.com 2>/dev/null || echo ""
 }
 
 dns_points_to_vps() {
-    local ip="$1"
-    [ -n "$ip" ] || return 1
-    local ans
-    ans="$(dig +short A "$DOMAIN" 2>/dev/null || true)"
-    echo "$ans" | grep -qx "$ip"
+  local ip="$1"
+  [ -n "$ip" ] || return 1
+  local ans
+  ans="$(dig +short A "$DOMAIN" 2>/dev/null || true)"
+  echo "$ans" | grep -qx "$ip"
 }
 
 ensure_ssl_dir() {
-    mkdir -p "$SSL_DIR"
-    [ -d "$SSL_DIR" ] || { echo -e "${RB}❌ Não foi possível criar ${SSL_DIR}${RESET}"; return 1; }
+  mkdir -p "$SSL_DIR"
+  if [ ! -d "$SSL_DIR" ]; then
+    echo -e "${RB}ERRO: não foi possível criar ${SSL_DIR}${RESET}"
+    return 1
+  fi
+  return 0
 }
 
-# CORREÇÃO: permissões seguras para arquivos de certificado TLS.
-# Tabela de permissões:
-#   $SSL_DIR/          → 750 root:nogroup  (Xray lê, não cria arquivos)
-#   privkey.pem        → 640 root:nogroup  (chave privada — nunca legível por outros)
-#   fullchain.pem      → 644 root:root     (certificado público — pode ser lido por todos)
-#   renew_cert.sh      → 700 root:root     (executado como root via cron)
-# Versão anterior usava chmod 777 em tudo — expunha a chave privada TLS a qualquer processo.
 apply_perms() {
-    ensure_ssl_dir || return 1
-    chmod 750 "$SSL_DIR"
-    chown root:"$XRAY_GROUP" "$SSL_DIR"
-    if [ -f "$SSL_DIR/privkey.pem" ]; then
-        chmod 640 "$SSL_DIR/privkey.pem"
-        chown root:"$XRAY_GROUP" "$SSL_DIR/privkey.pem"
-    fi
-    if [ -f "$SSL_DIR/fullchain.pem" ]; then
-        chmod 644 "$SSL_DIR/fullchain.pem"
-        chown root:root "$SSL_DIR/fullchain.pem"
-    fi
-}
-
-# --- BACKUP DOS CERTS ATUAIS ---
-backup_existing_certs() {
-    if [ -f "$SSL_DIR/fullchain.pem" ] || [ -f "$SSL_DIR/privkey.pem" ]; then
-        cp -f "$SSL_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem.bak" 2>/dev/null || true
-        cp -f "$SSL_DIR/privkey.pem"   "$SSL_DIR/privkey.pem.bak"   2>/dev/null || true
-    fi
-}
-
-restore_cert_backup() {
-    if [ -f "$SSL_DIR/fullchain.pem.bak" ] && [ -f "$SSL_DIR/privkey.pem.bak" ]; then
-        cp -f "$SSL_DIR/fullchain.pem.bak" "$SSL_DIR/fullchain.pem"
-        cp -f "$SSL_DIR/privkey.pem.bak"   "$SSL_DIR/privkey.pem"
-        apply_perms
-        echo -e "${YB}Certificado anterior restaurado.${RESET}"
-    fi
+  # Permissões seguras (sem 777)
+  ensure_ssl_dir || return 1
+  chown -R "$XRAY_USER:$XRAY_GROUP" "$SSL_DIR" 2>/dev/null || true
+  chmod 750 "$SSL_DIR" 2>/dev/null || true
+  chmod 640 "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" 2>/dev/null || true
+  return 0
 }
 
 make_selfsigned() {
-    echo -e "${YB}>>> Gerando certificado AUTO-ASSINADO...${RESET}"
-    ensure_cmd openssl openssl
-    ensure_ssl_dir || exit 1
+  echo -e "${YB}>>> Gerando certificado AUTO-ASSINADO...${RESET}"
+  need_cmd openssl openssl
+  ensure_ssl_dir || exit 1
 
-    if ! openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-        -subj "/C=BR/ST=SP/L=SaoPaulo/O=TurboNet/OU=VPN/CN=$DOMAIN" \
-        -keyout "$SSL_DIR/privkey.pem" \
-        -out "$SSL_DIR/fullchain.pem" >>"$LOG_FILE" 2>&1; then
-        echo -e "${RB}❌ Falha ao gerar certificado autoassinado.${RESET}"
-        restore_cert_backup
-        exit 1
-    fi
+  openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+    -subj "/C=BR/ST=SP/L=SaoPaulo/O=Dragon/OU=VPN/CN=$DOMAIN" \
+    -keyout "$SSL_DIR/privkey.pem" -out "$SSL_DIR/fullchain.pem" >/dev/null 2>&1
 
-    apply_perms
-    echo -e "${GB}✅ Certificado autoassinado criado em:${RESET} ${CB}$SSL_DIR${RESET}"
+  apply_perms
+  echo -e "${GB}✅ Certificado autoassinado criado em:${RESET} ${CB}$SSL_DIR${RESET}"
 }
 
 install_letsencrypt() {
-    echo -e "${YB}>>> Preparando Let's Encrypt...${RESET}"
-    ensure_cmd certbot certbot
-    ensure_cmd fuser psmisc
-    ensure_ssl_dir || return 1
+  echo -e "${YB}>>> Preparando ambiente para Let's Encrypt...${RESET}"
+  need_cmd certbot certbot
+  need_cmd fuser psmisc
+  need_cmd systemctl systemd
 
-    echo -e "${YB}Parando serviços na porta 80...${RESET}"
-    systemctl stop xray  >/dev/null 2>&1 || true
-    systemctl stop nginx >/dev/null 2>&1 || true
-    fuser -k 80/tcp >/dev/null 2>&1 || true
-    sleep 2
+  # >>> BUGFIX: garante diretório antes de qualquer cp
+  ensure_ssl_dir || return 1
 
-    LE_DIR="/etc/letsencrypt/live/$DOMAIN"
-    rm -f "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" 2>/dev/null || true
+  echo -e "${YB}Parando serviços que usam a porta 80...${RESET}"
+  systemctl stop xray >/dev/null 2>&1 || true
+  systemctl stop nginx >/dev/null 2>&1 || true
+  fuser -k 80/tcp >/dev/null 2>&1 || true
+  sleep 2
 
-    local CERT_FAIL=0
-    certbot certonly --standalone -d "$DOMAIN" \
-        --register-unsafely-without-email --agree-tos --non-interactive \
-        >>"$LOG_FILE" 2>&1 || CERT_FAIL=1
+  echo -e "${YB}>>> GERANDO CERTIFICADO LET'S ENCRYPT (HTTP-01)...${RESET}"
 
-    if [ "$CERT_FAIL" -ne 0 ] || [ ! -f "$LE_DIR/fullchain.pem" ] || [ ! -f "$LE_DIR/privkey.pem" ]; then
-        return 1
-    fi
+  LE_DIR="/etc/letsencrypt/live/$DOMAIN"
+  rm -f "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" 2>/dev/null || true
 
-    cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
-    cp -f "$LE_DIR/privkey.pem"   "$SSL_DIR/privkey.pem"
-    apply_perms
+  CERT_FAIL=0
+  certbot certonly --standalone -d "$DOMAIN" \
+    --register-unsafely-without-email --agree-tos --non-interactive || CERT_FAIL=1
 
-    # CORREÇÃO: jitter aleatório no cron — evita que todos os servidores
-    # tentem renovar simultaneamente (rate limiting no Let's Encrypt).
-    local CRON_MIN CRON_HOUR
-    CRON_MIN=$(( RANDOM % 60 ))
-    CRON_HOUR=$(( 2 + RANDOM % 4 ))
+  if [ "$CERT_FAIL" -ne 0 ] || [ ! -f "$LE_DIR/fullchain.pem" ] || [ ! -f "$LE_DIR/privkey.pem" ]; then
+    return 1
+  fi
 
-    # Script de renovação gerado com permissões corretas e _wait_xray_active()
-    cat > "$RENEW_SCRIPT" <<RENEW_EOF
+  # >>> BUGFIX: diretório já garantido por ensure_ssl_dir
+  cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
+  cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
+  apply_perms
+
+  # Script de renovação (apenas LE)
+  cat > "$RENEW_SCRIPT" <<EOF
 #!/bin/bash
-# renew_cert.sh — gerado por certxray.sh V1.0
 set -Eeuo pipefail
-LOG="/tmp/renew_cert.log"
-: > "\$LOG"
-echo "=== Renovação: \$(date) ===" >> "\$LOG"
-
-systemctl stop xray  >/dev/null 2>&1 || true
+systemctl stop xray >/dev/null 2>&1 || true
 systemctl stop nginx >/dev/null 2>&1 || true
 fuser -k 80/tcp >/dev/null 2>&1 || true
-
-if ! certbot renew --quiet >>"\$LOG" 2>&1; then
-    echo "FALHA: certbot renew falhou" >> "\$LOG"
-    systemctl start xray >/dev/null 2>&1 || true
-    exit 1
-fi
-
-mkdir -p "${SSL_DIR}"
-cp -f "${LE_DIR}/fullchain.pem" "${SSL_DIR}/fullchain.pem"
-cp -f "${LE_DIR}/privkey.pem"   "${SSL_DIR}/privkey.pem"
-
-# CORREÇÃO: permissões corretas replicadas no script de renovação.
-# Versão anterior usava chmod 777 — expunha privkey.pem após cada renovação.
-chmod 750 "${SSL_DIR}"
-chown root:${XRAY_GROUP} "${SSL_DIR}"
-chmod 640 "${SSL_DIR}/privkey.pem"
-chown root:${XRAY_GROUP} "${SSL_DIR}/privkey.pem"
-chmod 644 "${SSL_DIR}/fullchain.pem"
-chown root:root "${SSL_DIR}/fullchain.pem"
-
+certbot renew --quiet
+mkdir -p "$SSL_DIR"
+cp -f "$LE_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem"
+cp -f "$LE_DIR/privkey.pem" "$SSL_DIR/privkey.pem"
+chown -R $XRAY_USER:$XRAY_GROUP "$SSL_DIR" 2>/dev/null || true
+chmod 750 "$SSL_DIR" 2>/dev/null || true
+chmod 640 "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" 2>/dev/null || true
 systemctl restart xray >/dev/null 2>&1 || true
+EOF
+  chmod +x "$RENEW_SCRIPT"
 
-# CORREÇÃO: _wait_xray_active com retry de 5s — substitui sleep 3 + is-active simples.
-_wait_xray_active() {
-    local tries=5
-    while [ "\$tries" -gt 0 ]; do
-        systemctl is-active --quiet xray 2>/dev/null && return 0
-        sleep 1
-        tries=\$(( tries - 1 ))
-    done
-    return 1
-}
+  # Agenda cron mensal (evita duplicar)
+  (crontab -l 2>/dev/null | grep -v "renew_cert.sh" ; echo "0 3 1 * * $RENEW_SCRIPT >/dev/null 2>&1") | crontab -
 
-if ! _wait_xray_active; then
-    echo "AVISO: Xray não ficou ativo após renovação!" >> "\$LOG"
-    journalctl -u xray -n 20 --no-pager >> "\$LOG" 2>/dev/null || true
-    exit 1
-fi
-
-echo "Renovação concluída com sucesso." >> "\$LOG"
-RENEW_EOF
-
-    # CORREÇÃO: 700 root:root — script executado como root via cron.
-    # 777 anterior permitia que qualquer processo sobrescrevesse o script,
-    # criando vetor de escalonamento de privilégios.
-    chmod 700 "$RENEW_SCRIPT"
-    chown root:root "$RENEW_SCRIPT"
-
-    # Agenda cron com jitter — sem duplicatas
-    ( crontab -l 2>/dev/null | grep -v "renew_cert.sh"
-      echo "${CRON_MIN} ${CRON_HOUR} 1 * * $RENEW_SCRIPT >>/tmp/renew_cert.log 2>&1"
-    ) | crontab -
-
-    echo -e "${GB}✅ Let's Encrypt instalado. Renovação agendada para dia 1 às ${CRON_HOUR}:$(printf '%02d' $CRON_MIN).${RESET}"
-    return 0
+  echo -e "${GB}✅ Let's Encrypt instalado com sucesso.${RESET}"
+  return 0
 }
 
 # --- MAIN ---
-: > "$LOG_FILE"
 clear
 echo -e "${YB}====================================================${RESET}"
-echo -e "${YB}         GERENCIADOR DE CERTIFICADOS SSL            ${RESET}"
+echo -e "${YB}            GERENCIADOR DE CERTIFICADOS SSL          ${RESET}"
 echo -e "${YB}====================================================${RESET}"
 echo ""
 
-# Solicita domínio se não fornecido como argumento
 if [ -z "${DOMAIN:-}" ] || [ "$DOMAIN" = "certxray.sh" ]; then
-    read -rp "Digite o domínio: " DOMAIN
+  echo -e "${RB}Erro: Nenhum domínio recebido.${RESET}"
+  read -rp "DIGITE DOMÍNIO: " DOMAIN
 fi
 
-[ -n "${DOMAIN:-}" ] || { echo -e "${RB}❌ Domínio vazio.${RESET}"; exit 1; }
-
-# Validação RFC 1123
-if ! validate_domain "$DOMAIN"; then
-    echo -e "${RB}❌ Domínio inválido: '${DOMAIN}'${RESET}"
-    echo -e "${YB}   Use o formato: exemplo.com ou sub.exemplo.com${RESET}"
-    exit 1
+if [ -z "${DOMAIN:-}" ]; then
+  echo -e "${RB}Erro: Domínio vazio.${RESET}"
+  exit 1
 fi
 
-# CORREÇÃO: escrita em $ACTIVE_DOMAIN_FILE movida para APÓS a validação —
-# versão anterior gravava o domínio antes de validar o formato.
+if [[ "$DOMAIN" =~ [[:space:]] ]]; then
+  echo -e "${RB}Erro: Domínio inválido (contém espaços).${RESET}"
+  exit 1
+fi
+
 mkdir -p /opt/XrayTools 2>/dev/null || true
 echo "$DOMAIN" > "$ACTIVE_DOMAIN_FILE" 2>/dev/null || true
 
 echo -e "${YB}DOMÍNIO ALVO:${RESET} ${CB}$DOMAIN${RESET}"
 echo ""
-echo -e "${YB}TIPO DE CERTIFICADO:${RESET}"
+
+echo -e "${YB}ESCOLHA O TIPO DE CERTIFICADO:${RESET}"
 echo ""
 echo -e "${YB} [1] LET'S ENCRYPT (Oficial)${RESET}"
-echo -e "${RB}     ⚠ Requer porta 80 aberta e DNS apontando para esta VPS${RESET}"
+echo -e "${RB}     ⚠️ Requer porta 80 aberta e DNS apontando para esta VPS${RESET}"
 echo ""
 echo -e "${YB} [2] AUTO-ASSINADO (Local)${RESET}"
-echo -e "${GB}     ✅ Sem porta 80 / Funciona com CDN (Azion/Cloudflare)${RESET}"
+echo -e "${GB}     ✅ Não precisa de porta 80 / Funciona mesmo em CDN (Azion/Cloudflare)${RESET}"
 echo ""
 echo -e "${YB}====================================================${RESET}"
-read -rp "OPÇÃO [1/2]: " cert_opt
+read -rp "OPÇÃO: " cert_opt
 
-ensure_ssl_dir
-backup_existing_certs
+# limpa antigos (sem apagar diretório)
+mkdir -p "$SSL_DIR" 2>/dev/null || true
+rm -f "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" 2>/dev/null || true
 
-case "${cert_opt:-2}" in
+case "${cert_opt:-}" in
   1)
     clear
-    echo -e "${BG_RED}             ⚠  LEIA COM ATENÇÃO  ⚠             ${RESET}"
+    echo -e "${BG_RED}                ⚠️  LEIA COM ATENÇÃO  ⚠️                ${RESET}"
     echo ""
-    echo -e "${YB}LET'S ENCRYPT (HTTP-01) requer:${RESET}"
-    echo -e " 1) ${RB}DNS do domínio apontando para o IP desta VPS${RESET}"
-    echo -e " 2) ${RB}Porta 80 aberta na internet${RESET}"
+    echo -e "${YB}Você escolheu LET'S ENCRYPT (HTTP-01). Para funcionar:${RESET}"
+    echo -e "1) ${RB}DNS do domínio deve apontar para o IP público da VPS${RESET}"
+    echo -e "2) ${RB}Porta 80 deve estar aberta para a internet${RESET}"
     echo ""
 
-    ensure_cmd dig  dnsutils
-    ensure_cmd curl curl
+    need_cmd dig dnsutils
+    need_cmd curl curl
 
     VPS_IP="$(get_public_ip)"
     echo -e "${YB}IP público desta VPS:${RESET} ${CB}${VPS_IP:-"(não detectado)"}${RESET}"
-    echo -e "${YB}IPs no DNS do domínio:${RESET}"
-    dig +short A "$DOMAIN" 2>/dev/null || echo "  (falha na consulta DNS)"
+    echo -e "${YB}IPs do DNS do domínio:${RESET}"
+    dig +short A "$DOMAIN" 2>/dev/null || true
     echo ""
 
     if ! dns_points_to_vps "${VPS_IP:-}"; then
-        echo -e "${RB}⚠  DNS NÃO aponta para esta VPS — Let's Encrypt provavelmente falhará.${RESET}"
-        echo ""
-        echo " [1] Tentar Let's Encrypt mesmo assim"
-        echo " [2] Gerar autoassinado (recomendado)"
-        echo " [0] Cancelar"
-        read -rp "Opção: " fallback_opt
-        case "$fallback_opt" in
-            2) make_selfsigned
-               # CORREÇÃO: remove backups após autoassinado bem-sucedido (fallback DNS)
-               rm -f "$SSL_DIR/fullchain.pem.bak" "$SSL_DIR/privkey.pem.bak" 2>/dev/null || true
-               exit 0 ;;
-            0) restore_cert_backup; exit 0 ;;
-            *) ;;
-        esac
+      echo -e "${RB}⚠️ ALERTA:${RESET} O DNS do domínio NÃO aponta para esta VPS."
+      echo -e "${RB}Isso causa erro 504/unauthorized no Let's Encrypt (comum em Azion/Cloudflare).${RESET}"
+      echo ""
+      echo -e "${YB}Deseja continuar mesmo assim?${RESET}"
+      echo " [1] Tentar Let's Encrypt mesmo assim"
+      echo " [2] Gerar Autoassinado agora (recomendado)"
+      echo " [0] Sair"
+      read -rp "Opção: " f
+      case "$f" in
+        2) make_selfsigned; exit 0 ;;
+        0) exit 0 ;;
+        *) ;;
+      esac
     fi
 
-    read -rp "Pressione Enter para confirmar e continuar..." _
-
-    rm -f "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" 2>/dev/null || true
+    read -rp "Pressione [ENTER] se você confirma os requisitos..." _
 
     if install_letsencrypt; then
-        echo -e "${GB}✅ Certificado Let's Encrypt pronto em ${CB}$SSL_DIR${RESET}"
-        rm -f "$SSL_DIR/fullchain.pem.bak" "$SSL_DIR/privkey.pem.bak" 2>/dev/null || true
-        exit 0
+      echo -e "${GB}✅ Certificado pronto em ${CB}$SSL_DIR${RESET}"
+      exit 0
     else
-        echo ""
-        echo -e "${BG_RED}  FALHA NA VALIDAÇÃO LET'S ENCRYPT  ${RESET}"
-        echo -e "${YB}>>> Fallback automático: gerando autoassinado...${RESET}"
-        make_selfsigned
-        # CORREÇÃO: remove backups após fallback LE→autoassinado bem-sucedido.
-        # Versão anterior deixava privkey.pem.bak com a chave antiga em $SSL_DIR.
-        rm -f "$SSL_DIR/fullchain.pem.bak" "$SSL_DIR/privkey.pem.bak" 2>/dev/null || true
-        exit 0
+      echo ""
+      echo -e "${BG_RED}  FALHA NA VALIDAÇÃO LET'S ENCRYPT  ${RESET}"
+      echo -e "${RB}Não foi possível gerar o certificado oficial.${RESET}"
+      echo -e "${YB}>>> Fallback automático: gerando Autoassinado...${RESET}"
+      make_selfsigned
+      exit 0
     fi
     ;;
-
   2|*)
-    rm -f "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" 2>/dev/null || true
     make_selfsigned
-    rm -f "$SSL_DIR/fullchain.pem.bak" "$SSL_DIR/privkey.pem.bak" 2>/dev/null || true
     exit 0
     ;;
 esac
