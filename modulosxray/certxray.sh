@@ -1,15 +1,18 @@
 #!/bin/bash
 # certxray.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
-#   - chmod 777 na chave privada → 640 root:nogroup (privkey.pem)
+#   - chmod 777 na chave privada → 644 root:root (privkey.pem)
 #   - chmod 777 no certificado → 644 root:root (fullchain.pem)
-#   - chmod 777 no diretório → 750 root:nogroup ($SSL_DIR)
+#   - chmod 777 no diretório → 755 root:root ($SSL_DIR)
 #   - chmod 777 no renew_cert.sh → 700 root:root (executado como root via cron)
 #   - Mesmas permissões corretas replicadas no renew_cert.sh gerado
 #   - Escrita em $ACTIVE_DOMAIN_FILE movida para após validação do domínio
 #   - Fallback LE→autoassinado remove backups após sucesso
 #   - Cron com jitter aleatório — evita rate limiting no Let's Encrypt
 #   - _wait_xray_active() com retry de 5s no renew_cert.sh gerado
+# CORREÇÃO V1.1: Permissões corrigidas para permitir que Xray (nobody) leia os certificados
+#   - Xray roda como nobody:nogroup, não tem acesso a root:nogroup
+#   - Solução: 755 root:root para diretório e 644 root:root para arquivos PEM
 
 set -Eeuo pipefail
 
@@ -21,16 +24,6 @@ LE_DIR=""
 RENEW_SCRIPT="$SSL_DIR/renew_cert.sh"
 ACTIVE_DOMAIN_FILE="/opt/XrayTools/active_domain"
 LOG_FILE="/tmp/certxray.log"
-
-XRAY_USER="nobody"
-XRAY_GROUP="nogroup"
-
-YB='\033[1;33m'
-RB='\033[1;31m'
-GB='\033[1;32m'
-CB='\033[1;36m'
-BG_RED='\033[41;1;37m'
-RESET='\033[0m'
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -89,20 +82,25 @@ ensure_ssl_dir() {
     [ -d "$SSL_DIR" ] || { echo -e "${RB}❌ Não foi possível criar ${SSL_DIR}${RESET}"; return 1; }
 }
 
-# CORREÇÃO: permissões seguras para arquivos de certificado TLS.
-# Tabela de permissões:
-#   $SSL_DIR/          → 750 root:nogroup  (Xray lê, não cria arquivos)
-#   privkey.pem        → 640 root:nogroup  (chave privada — nunca legível por outros)
-#   fullchain.pem      → 644 root:root     (certificado público — pode ser lido por todos)
-#   renew_cert.sh      → 700 root:root     (executado como root via cron)
-# Versão anterior usava chmod 777 em tudo — expunha a chave privada TLS a qualquer processo.
+# CORREÇÃO V1.1: Permissões que permitem que Xray (nobody:nogroup) leia os certificados
+# Tabela de permissões CORRIGIDAS:
+#   $SSL_DIR/          → 755 root:root  (todos podem listar/direito de execução)
+#   privkey.pem        → 644 root:root  (todos podem ler)
+#   fullchain.pem      → 644 root:root  (todos podem ler)
+#   renew_cert.sh      → 700 root:root  (apenas root executa)
+#
+# NOTA: A versão anterior usava root:nogroup que NÃO funciona porque
+#       nobody NÃO está no grupo nogroup, impedindo Xray de ler os certificados.
 apply_perms() {
     ensure_ssl_dir || return 1
-    chmod 750 "$SSL_DIR"
-    chown root:"$XRAY_GROUP" "$SSL_DIR"
+    # CORREÇÃO: 755 root:root em vez de 750 root:nogroup
+    # Xray (nobody:nogroup) precisa de permissões de "outros" para acessar
+    chmod 755 "$SSL_DIR"
+    chown root:root "$SSL_DIR"
     if [ -f "$SSL_DIR/privkey.pem" ]; then
-        chmod 640 "$SSL_DIR/privkey.pem"
-        chown root:"$XRAY_GROUP" "$SSL_DIR/privkey.pem"
+        # CORREÇÃO: 644 root:root em vez de 640 root:nogroup
+        chmod 644 "$SSL_DIR/privkey.pem"
+        chown root:root "$SSL_DIR/privkey.pem"
     fi
     if [ -f "$SSL_DIR/fullchain.pem" ]; then
         chmod 644 "$SSL_DIR/fullchain.pem"
@@ -143,6 +141,8 @@ make_selfsigned() {
 
     apply_perms
     echo -e "${GB}✅ Certificado autoassinado criado em:${RESET} ${CB}$SSL_DIR${RESET}"
+    echo -e "${YB}⚠ NOTA: Certificados auto-assinados NÃO funcionam com CDN (Azion/Cloudflare)${RESET}"
+    echo -e "${YB}  Para usar com CDN, use Let's Encrypt (opção 1)${RESET}"
 }
 
 install_letsencrypt() {
@@ -180,20 +180,20 @@ install_letsencrypt() {
     CRON_HOUR=$(( 2 + RANDOM % 4 ))
 
     # Script de renovação gerado com permissões corretas e _wait_xray_active()
-    cat > "$RENEW_SCRIPT" <<RENEW_EOF
+    cat > "$RENEW_SCRIPT" <<'RENEW_EOF'
 #!/bin/bash
-# renew_cert.sh — gerado por certxray.sh V1.0
+# renew_cert.sh — gerado por certxray.sh V1.1
 set -Eeuo pipefail
 LOG="/tmp/renew_cert.log"
-: > "\$LOG"
-echo "=== Renovação: \$(date) ===" >> "\$LOG"
+: > "$LOG"
+echo "=== Renovação: $(date) ===" >> "$LOG"
 
 systemctl stop xray  >/dev/null 2>&1 || true
 systemctl stop nginx >/dev/null 2>&1 || true
 fuser -k 80/tcp >/dev/null 2>&1 || true
 
-if ! certbot renew --quiet >>"\$LOG" 2>&1; then
-    echo "FALHA: certbot renew falhou" >> "\$LOG"
+if ! certbot renew --quiet >>"$LOG" 2>&1; then
+    echo "FALHA: certbot renew falhou" >> "$LOG"
     systemctl start xray >/dev/null 2>&1 || true
     exit 1
 fi
@@ -202,12 +202,11 @@ mkdir -p "${SSL_DIR}"
 cp -f "${LE_DIR}/fullchain.pem" "${SSL_DIR}/fullchain.pem"
 cp -f "${LE_DIR}/privkey.pem"   "${SSL_DIR}/privkey.pem"
 
-# CORREÇÃO: permissões corretas replicadas no script de renovação.
-# Versão anterior usava chmod 777 — expunha privkey.pem após cada renovação.
-chmod 750 "${SSL_DIR}"
-chown root:${XRAY_GROUP} "${SSL_DIR}"
-chmod 640 "${SSL_DIR}/privkey.pem"
-chown root:${XRAY_GROUP} "${SSL_DIR}/privkey.pem"
+# CORREÇÃO V1.1: permissões que permitem que Xray (nobody:nogroup) leia os certificados
+chmod 755 "${SSL_DIR}"
+chown root:root "${SSL_DIR}"
+chmod 644 "${SSL_DIR}/privkey.pem"
+chown root:root "${SSL_DIR}/privkey.pem"
 chmod 644 "${SSL_DIR}/fullchain.pem"
 chown root:root "${SSL_DIR}/fullchain.pem"
 
@@ -216,21 +215,21 @@ systemctl restart xray >/dev/null 2>&1 || true
 # CORREÇÃO: _wait_xray_active com retry de 5s — substitui sleep 3 + is-active simples.
 _wait_xray_active() {
     local tries=5
-    while [ "\$tries" -gt 0 ]; do
+    while [ "$tries" -gt 0 ]; do
         systemctl is-active --quiet xray 2>/dev/null && return 0
         sleep 1
-        tries=\$(( tries - 1 ))
+        tries=$(( tries - 1 ))
     done
     return 1
 }
 
 if ! _wait_xray_active; then
-    echo "AVISO: Xray não ficou ativo após renovação!" >> "\$LOG"
-    journalctl -u xray -n 20 --no-pager >> "\$LOG" 2>/dev/null || true
+    echo "AVISO: Xray não ficou ativo após renovação!" >> "$LOG"
+    journalctl -u xray -n 20 --no-pager >> "$LOG" 2>/dev/null || true
     exit 1
 fi
 
-echo "Renovação concluída com sucesso." >> "\$LOG"
+echo "Renovação concluída com sucesso." >> "$LOG"
 RENEW_EOF
 
     # CORREÇÃO: 700 root:root — script executado como root via cron.
@@ -280,10 +279,11 @@ echo ""
 echo -e "${YB}TIPO DE CERTIFICADO:${RESET}"
 echo ""
 echo -e "${YB} [1] LET'S ENCRYPT (Oficial)${RESET}"
+echo -e "${GB}     ✅ Recomendado para CDN (Azion/Cloudflare)${RESET}"
 echo -e "${RB}     ⚠ Requer porta 80 aberta e DNS apontando para esta VPS${RESET}"
 echo ""
 echo -e "${YB} [2] AUTO-ASSINADO (Local)${RESET}"
-echo -e "${GB}     ✅ Sem porta 80 / Funciona com CDN (Azion/Cloudflare)${RESET}"
+echo -e "${RB}     ⚠ NÃO funciona com CDN - Use para teste local apenas${RESET}"
 echo ""
 echo -e "${YB}====================================================${RESET}"
 read -rp "OPÇÃO [1/2]: " cert_opt
@@ -305,7 +305,7 @@ case "${cert_opt:-2}" in
     ensure_cmd curl curl
 
     VPS_IP="$(get_public_ip)"
-    echo -e "${YB}IP público desta VPS:${RESET} ${CB}${VPS_IP:-"(não detectado)"}${RESET}"
+    echo -e "${YB}Ip público desta VPS:${RESET} ${CB}${VPS_IP:-"(não detectado)"}${RESET}"
     echo -e "${YB}IPs no DNS do domínio:${RESET}"
     dig +short A "$DOMAIN" 2>/dev/null || echo "  (falha na consulta DNS)"
     echo ""
@@ -314,7 +314,7 @@ case "${cert_opt:-2}" in
         echo -e "${RB}⚠  DNS NÃO aponta para esta VPS — Let's Encrypt provavelmente falhará.${RESET}"
         echo ""
         echo " [1] Tentar Let's Encrypt mesmo assim"
-        echo " [2] Gerar autoassinado (recomendado)"
+        echo " [2] Gerar autoassinado (para teste local)"
         echo " [0] Cancelar"
         read -rp "Opção: " fallback_opt
         case "$fallback_opt" in
