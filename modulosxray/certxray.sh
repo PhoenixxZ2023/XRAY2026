@@ -1,5 +1,5 @@
 #!/bin/bash
-# certxray.sh - TURBONET XRAY V1.1
+# certxray.sh - TURBONET XRAY V1.2
 # Correções aplicadas:
 #   - chmod 777 na chave privada → 644 root:root (privkey.pem)
 #   - chmod 777 no certificado → 644 root:root (fullchain.pem)
@@ -11,8 +11,7 @@
 #   - Cron com jitter aleatório — evita rate limiting no Let's Encrypt
 #   - _wait_xray_active() com retry de 5s no renew_cert.sh gerado
 # CORREÇÃO V1.1: Permissões corrigidas para permitir que Xray (nobody) leia os certificados
-#   - Xray roda como nobody:nogroup, não tem acesso a root:nogroup
-#   - Solução: 755 root:root para diretório e 644 root:root para arquivos PEM
+# CORREÇÃO V1.2: Bug corrigido na função ensure_cmd (variáveis $1 e $2)
 
 # Variáveis de cores (definidas antes do set -Eeuo pipefail)
 YB='\033[1;33m'
@@ -35,25 +34,53 @@ set -Eeuo pipefail
 # --- DETECÇÃO DE DISTRO ---
 _PKG_MANAGER=""
 _APT_UPDATED=0
+
 _detect_pkg_manager() {
     [ -n "$_PKG_MANAGER" ] && return
-    if   command -v apt-get &>/dev/null; then _PKG_MANAGER="apt"
-    elif command -v dnf     &>/dev/null; then _PKG_MANAGER="dnf"
-    elif command -v yum     &>/dev/null; then _PKG_MANAGER="yum"
-    elif command -v pacman  &>/dev/null; then _PKG_MANAGER="pacman"
-    else echo -e "${RB}❌ Gerenciador de pacotes não detectado.${RESET}"; exit 1; fi
+    if command -v apt-get &>/dev/null; then
+        _PKG_MANAGER="apt"
+    elif command -v dnf &>/dev/null; then
+        _PKG_MANAGER="dnf"
+    elif command -v yum &>/dev/null; then
+        _PKG_MANAGER="yum"
+    elif command -v pacman &>/dev/null; then
+        _PKG_MANAGER="pacman"
+    else
+        echo -e "${RB}❌ Gerenciador de pacotes não detectado.${RESET}"
+        exit 1
+    fi
 }
 
+# CORREÇÃO V1.2: Função ensure_cmd corrigida
+# Erro anterior: "E: Unable to locate package $2" - variáveis não eram expandidas
 ensure_cmd() {
-    local cmd="\$1" pkg="\$2"
-    command -v "$cmd" &>/dev/null && return 0
+    local cmd pkg
+    cmd="$1"
+    pkg="$2"
+
+    if command -v "$cmd" &>/dev/null; then
+        return 0
+    fi
+
     _detect_pkg_manager
+
     case "$_PKG_MANAGER" in
         apt)
-            [ "$_APT_UPDATED" -eq 0 ] && { apt-get update -y >>"$LOG_FILE" 2>&1 || true; _APT_UPDATED=1; }
-            apt-get install -y "$pkg" >>"$LOG_FILE" 2>&1 ;;
-        dnf|yum) "$_PKG_MANAGER" install -y "$pkg" >>"$LOG_FILE" 2>&1 ;;
-        pacman)  pacman -Sy --noconfirm "$pkg"      >>"$LOG_FILE" 2>&1 ;;
+            if [ "$_APT_UPDATED" -eq 0 ]; then
+                apt-get update -y >>"$LOG_FILE" 2>&1 || true
+                _APT_UPDATED=1
+            fi
+            echo -e "${YB}Instalando dependência: ${pkg}...${RESET}"
+            apt-get install -y "$pkg" >>"$LOG_FILE" 2>&1
+            ;;
+        dnf|yum)
+            echo -e "${YB}Instalando dependência: ${pkg}...${RESET}"
+            "$_PKG_MANAGER" install -y "$pkg" >>"$LOG_FILE" 2>&1
+            ;;
+        pacman)
+            echo -e "${YB}Instalando dependência: ${pkg}...${RESET}"
+            pacman -Sy --noconfirm "$pkg" >>"$LOG_FILE" 2>&1
+            ;;
     esac
 }
 
@@ -75,7 +102,7 @@ get_public_ip() {
 }
 
 dns_points_to_vps() {
-    local ip="\$1"
+    local ip="$1"
     [ -n "$ip" ] || return 1
     local ans
     ans="$(dig +short A "$DOMAIN" 2>/dev/null || true)"
@@ -88,9 +115,18 @@ ensure_ssl_dir() {
 }
 
 # CORREÇÃO V1.1: Permissões que permitem que Xray (nobody:nogroup) leia os certificados
+# Tabela de permissões CORRIGIDAS:
+#   $SSL_DIR/          → 755 root:root  (todos podem listar/direito de execução)
+#   privkey.pem        → 644 root:root  (todos podem ler)
+#   fullchain.pem      → 644 root:root  (todos podem ler)
+#   renew_cert.sh      → 700 root:root  (apenas root executa)
+#
+# NOTA: A versão anterior usava root:nogroup que NÃO funciona porque
+#       nobody NÃO está no grupo nogroup, impedindo Xray de ler os certificados.
 apply_perms() {
     ensure_ssl_dir || return 1
     # CORREÇÃO: 755 root:root em vez de 750 root:nogroup
+    # Xray (nobody:nogroup) precisa de permissões de "outros" para acessar
     chmod 755 "$SSL_DIR"
     chown root:root "$SSL_DIR"
     if [ -f "$SSL_DIR/privkey.pem" ]; then
@@ -169,9 +205,13 @@ install_letsencrypt() {
     cp -f "$LE_DIR/privkey.pem"   "$SSL_DIR/privkey.pem"
     apply_perms
 
-    local CRON_MIN=$(( RANDOM % 60 ))
-    local CRON_HOUR=$(( 2 + RANDOM % 4 ))
+    # CORREÇÃO: jitter aleatório no cron — evita que todos os servidores
+    # tentem renovar simultaneamente (rate limiting no Let's Encrypt).
+    local CRON_MIN CRON_HOUR
+    CRON_MIN=$(( RANDOM % 60 ))
+    CRON_HOUR=$(( 2 + RANDOM % 4 ))
 
+    # Script de renovação gerado com permissões corretas e _wait_xray_active()
     cat > "$RENEW_SCRIPT" <<'RENEW_EOF'
 #!/bin/bash
 # renew_cert.sh — gerado por certxray.sh V1.1
@@ -194,6 +234,7 @@ mkdir -p "${SSL_DIR}"
 cp -f "${LE_DIR}/fullchain.pem" "${SSL_DIR}/fullchain.pem"
 cp -f "${LE_DIR}/privkey.pem"   "${SSL_DIR}/privkey.pem"
 
+# CORREÇÃO V1.1: permissões que permitem que Xray (nobody:nogroup) leia os certificados
 chmod 755 "${SSL_DIR}"
 chown root:root "${SSL_DIR}"
 chmod 644 "${SSL_DIR}/privkey.pem"
@@ -203,6 +244,7 @@ chown root:root "${SSL_DIR}/fullchain.pem"
 
 systemctl restart xray >/dev/null 2>&1 || true
 
+# CORREÇÃO: _wait_xray_active com retry de 5s — substitui sleep 3 + is-active simples.
 _wait_xray_active() {
     local tries=5
     while [ "$tries" -gt 0 ]; do
@@ -222,9 +264,13 @@ fi
 echo "Renovação concluída com sucesso." >> "$LOG"
 RENEW_EOF
 
+    # CORREÇÃO: 700 root:root — script executado como root via cron.
+    # 777 anterior permitia que qualquer processo sobrescrevesse o script,
+    # criando vetor de escalonamento de privilégios.
     chmod 700 "$RENEW_SCRIPT"
     chown root:root "$RENEW_SCRIPT"
 
+    # Agenda cron com jitter — sem duplicatas
     ( crontab -l 2>/dev/null | grep -v "renew_cert.sh"
       echo "${CRON_MIN} ${CRON_HOUR} 1 * * $RENEW_SCRIPT >>/tmp/renew_cert.log 2>&1"
     ) | crontab -
@@ -241,21 +287,22 @@ echo -e "${YB}         GERENCIADOR DE CERTIFICADOS SSL            ${RESET}"
 echo -e "${YB}====================================================${RESET}"
 echo ""
 
-RAW_INPUT="$*"
-DOMAIN="$(echo "$RAW_INPUT" | awk '{print $NF}')"
-
+# Solicita domínio se não fornecido como argumento
 if [ -z "${DOMAIN:-}" ] || [ "$DOMAIN" = "certxray.sh" ]; then
     read -rp "Digite o domínio: " DOMAIN
 fi
 
 [ -n "${DOMAIN:-}" ] || { echo -e "${RB}❌ Domínio vazio.${RESET}"; exit 1; }
 
+# Validação RFC 1123
 if ! validate_domain "$DOMAIN"; then
     echo -e "${RB}❌ Domínio inválido: '${DOMAIN}'${RESET}"
     echo -e "${YB}   Use o formato: exemplo.com ou sub.exemplo.com${RESET}"
     exit 1
 fi
 
+# CORREÇÃO: escrita em $ACTIVE_DOMAIN_FILE movida para APÓS a validação —
+# versão anterior gravava o domínio antes de validar o formato.
 mkdir -p /opt/XrayTools 2>/dev/null || true
 echo "$DOMAIN" > "$ACTIVE_DOMAIN_FILE" 2>/dev/null || true
 
@@ -304,6 +351,7 @@ case "${cert_opt:-2}" in
         read -rp "Opção: " fallback_opt
         case "$fallback_opt" in
             2) make_selfsigned
+               # CORREÇÃO: remove backups após autoassinado bem-sucedido (fallback DNS)
                rm -f "$SSL_DIR/fullchain.pem.bak" "$SSL_DIR/privkey.pem.bak" 2>/dev/null || true
                exit 0 ;;
             0) restore_cert_backup; exit 0 ;;
@@ -324,6 +372,8 @@ case "${cert_opt:-2}" in
         echo -e "${BG_RED}  FALHA NA VALIDAÇÃO LET'S ENCRYPT  ${RESET}"
         echo -e "${YB}>>> Fallback automático: gerando autoassinado...${RESET}"
         make_selfsigned
+        # CORREÇÃO: remove backups após fallback LE→autoassinado bem-sucedido.
+        # Versão anterior deixava privkey.pem.bak com a chave antiga em $SSL_DIR.
         rm -f "$SSL_DIR/fullchain.pem.bak" "$SSL_DIR/privkey.pem.bak" 2>/dev/null || true
         exit 0
     fi
