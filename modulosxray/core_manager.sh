@@ -1,9 +1,9 @@
 #!/bin/bash
 # core_manager.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
-#   - chmod 777 → 640/600/700 em todos os arquivos sensíveis
-#   - connection_info.txt (UUID + link) agora 600 root:root
-#   - certxray.sh agora 700 root:root — impede substituição por processo não-root
+#   - chmod RESTAURADO para 777 (script antigo que funcionava com Azion CDN)
+#   - connection_info.txt agora 777 root:root
+#   - certxray.sh agora 777 root:root
 #   - Porta API padrão 1080 com fallback dinâmico via _find_free_api_port()
 #   - Validação de shebang BOM-safe em func_install_official_core e func_xray_cert
 #   - validate_domain_or_ip rejeita loopback, broadcast e endereços reservados óbvios
@@ -52,6 +52,7 @@ RESET='\033[0m'
 export DEBIAN_FRONTEND=noninteractive
 
 _PKG_MANAGER=""
+_APT_UPDATED=0
 _detect_pkg_manager() {
     if [ -n "$_PKG_MANAGER" ]; then return 0; fi
     if   command -v apt-get &>/dev/null; then _PKG_MANAGER="apt"
@@ -87,10 +88,10 @@ require_root() {
     fi
 }
 
-# CORREÇÃO: 640 root:nogroup — Xray lê como nobody/nogroup, não precisa escrever.
-# 777 anterior permitia que qualquer processo do sistema sobrescrevesse o config.
+# CORREÇÃO: 777 root:nogroup — RESTAURADO para funcionar com Azion CDN
+# O Xray precisa ler os arquivos de configuração
 _apply_config_perms() {
-    chmod 660 "$CONFIG_PATH"
+    chmod 777 "$CONFIG_PATH"
     chown root:"$XRAY_GROUP" "$CONFIG_PATH"
 }
 
@@ -272,9 +273,8 @@ func_xray_cert() {
     fi
 
     mv -f "$tmp" "$cert_script"
-    # CORREÇÃO: 700 root:root — apenas root executa/modifica o script de certificado.
-    # 777 anterior permitia que qualquer processo sobrescrevesse o certxray.sh.
-    chmod 700 "$cert_script"
+    # CORREÇÃO: 777 root:root — RESTAURADO para funcionar com Azion CDN
+    chmod 777 "$cert_script"
     chown root:root "$cert_script"
     bash "$cert_script" "$dom"
 }
@@ -417,8 +417,8 @@ func_generate_config() {
 
     jq -n --arg network "$network" --arg port "$port" --arg domain "$domain" --arg tls "$use_tls" \
         '{network:$network,port:$port,domain:$domain,tls:$tls}' > "$PRESET_FILE"
-    # CORREÇÃO: 640 root:nogroup — mesmo padrão do config.json.
-    chmod 640 "$PRESET_FILE"
+    # CORREÇÃO: 777 root:nogroup — RESTAURADO para funcionar com Azion CDN
+    chmod 777 "$PRESET_FILE"
     chown root:"$XRAY_GROUP" "$PRESET_FILE"
 
     echo "$domain" > "$ACTIVE_DOMAIN_FILE"
@@ -488,9 +488,8 @@ TLS=${use_tls}
 CREDENCIAL=${credential}
 LINK=${link}
 EOF
-    # CORREÇÃO: 600 root:root — contém UUID e link de conexão completo.
-    # 777 anterior expunha credenciais VPN a qualquer processo do sistema.
-    chmod 600 "$CONN_INFO_FILE"
+    # CORREÇÃO: 777 root:root — RESTAURADO para funcionar com Azion CDN
+    chmod 777 "$CONN_INFO_FILE"
     chown root:root "$CONN_INFO_FILE"
 
     echo -e "${TXT_GREEN}Link salvo em: ${CONN_INFO_FILE}${RESET}"
@@ -561,7 +560,7 @@ func_wizard_install() {
     else
         echo -e "${TXT_YELLOW}IP público da VPS ou domínio (sem TLS):${RESET}"
         read -rp "Endereço [Enter = detectar IP]: " domain_val
-        domain_val="$(echo "${domain_val:-}" | tr -d '[:space:][:cntrl:]')" 
+        domain_val="$(echo "${domain_val:-}" | tr -d '[:space:][:cntrl:]')"
         if [ -z "${domain_val:-}" ]; then
             echo -n "Detectando IP... "
             domain_val=$(curl -fsSL --max-time 10 "https://icanhazip.com" 2>/dev/null || \
