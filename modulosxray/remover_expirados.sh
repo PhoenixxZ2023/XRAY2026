@@ -8,13 +8,11 @@
 #   - Passo 3 reutiliza expired_nicks_file — elimina dupla execução de is_expired()
 #   - _TMP_FILES limpo após mv -f — cleanup não tenta deletar arquivos já promovidos
 #   - chmod 600 explícito no USER_DB após mv
+#   - TAG DO INBOUND: Corrigido de inbound-dragoncore para inbound-turbonet
 
 set -Eeuo pipefail
 
 # --- CLEANUP CENTRALIZADO ---
-# CORREÇÃO: _cleanup() apenas remove tmpfiles — sem mensagem de erro.
-# A mensagem de erro fica exclusivamente no trap ERR, que só dispara em falhas reais.
-# trap EXIT com mensagem de erro causava exibição de "[ERRO]" em saída normal (exit 0).
 _TMP_FILES=()
 _cleanup() {
     for f in "${_TMP_FILES[@]:-}"; do rm -f "$f" 2>/dev/null || true; done
@@ -37,9 +35,8 @@ RESET='\033[0m'
 export DEBIAN_FRONTEND=noninteractive
 
 # --- PERMISSÕES DO CONFIG ---
-# CORREÇÃO: centralizada — 640 root:nogroup em fluxo normal e todos os rollbacks.
 _apply_config_perms() {
-    chmod 0660 "$CONFIG_PATH"
+    chmod 0640 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
@@ -69,7 +66,6 @@ ensure_cmd() {
 }
 
 # --- COMPARAÇÃO DE DATA ROBUSTA ---
-# Retorna 0 se $1 (YYYY-MM-DD) é anterior a hoje (timestamp Unix)
 is_expired() {
     local expiry="$1"
     [[ "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
@@ -80,7 +76,6 @@ is_expired() {
 }
 
 # --- VERIFICAÇÃO DE XRAY ATIVO COM RETRY ---
-# CORREÇÃO: tenta por até 5s — evita falso negativo em sistema sob carga.
 _wait_xray_active() {
     local tries=5
     while [ "$tries" -gt 0 ]; do
@@ -111,8 +106,10 @@ if ! jq empty "$CONFIG_PATH" 2>/dev/null; then
     echo -e "${TXT_RED}❌ config.json inválido.${RESET}"
     read -rp "Enter para voltar..."; exit 1
 fi
-if ! jq -e '.inbounds[]? | select(.tag=="inbound-dragoncore")' "$CONFIG_PATH" >/dev/null 2>&1; then
-    echo -e "${TXT_RED}❌ inbound-dragoncore não encontrado no config.${RESET}"
+
+# CORREÇÃO: inbound-turbonet
+if ! jq -e '.inbounds[]? | select(.tag=="inbound-turbonet")' "$CONFIG_PATH" >/dev/null 2>&1; then
+    echo -e "${TXT_RED}❌ inbound-turbonet não encontrado no config.${RESET}"
     read -rp "Enter para voltar..."; exit 1
 fi
 
@@ -121,7 +118,6 @@ echo ""
 printf "%-20s | %s\n" "USUÁRIO" "VENCIMENTO"
 echo "-----------------------------------"
 
-# Coleta expirados em arquivos temporários registrados para cleanup
 expired_uuids_file=$(mktemp /tmp/expired_uuids_XXXXXX)
 expired_nicks_file=$(mktemp /tmp/expired_nicks_XXXXXX)
 _TMP_FILES+=("$expired_uuids_file" "$expired_nicks_file")
@@ -157,11 +153,12 @@ cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
 tmp_cfg=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")
 _TMP_FILES+=("$tmp_cfg")
 
+# CORREÇÃO: inbound-turbonet
 jq --argjson dead "$expired_json" '
-  (.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+  (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
     (if type == "array" then . else [] end)
   |
-  (.inbounds[] | select(.tag=="inbound-dragoncore").settings.clients) |=
+  (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
     map(select((.id as $id | ($dead | index($id)) == null)))
 ' "$CONFIG_PATH" > "$tmp_cfg" 2>>"$LOG_FILE"
 
@@ -171,10 +168,7 @@ if ! jq empty "$tmp_cfg" 2>/dev/null; then
 fi
 
 mv -f "$tmp_cfg" "$CONFIG_PATH"
-# CORREÇÃO: remove da lista de cleanup — arquivo foi promovido para config.json,
-# não é mais temporário. Sem isso, _cleanup tentaria deletar o config.json.
 _TMP_FILES=("${_TMP_FILES[@]/$tmp_cfg}")
-# CORREÇÃO: _apply_config_perms() em vez de chmod 777.
 _apply_config_perms
 
 # --- PASSO 2: RESTART COM VERIFICAÇÃO ---
@@ -183,32 +177,24 @@ if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
    ! systemctl restart xray >/dev/null 2>&1; then
     echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}"
     mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    # CORREÇÃO: rollback usa _apply_config_perms() — não volta para 777.
     _apply_config_perms
     journalctl -u xray -n 15 --no-pager 2>/dev/null || true
     echo -e "${TXT_YELLOW}Config revertido. Nenhum usuário foi removido.${RESET}"
     sleep 3; exit 1
 fi
 
-# CORREÇÃO: retry de até 5s para confirmar xray ativo.
 if ! _wait_xray_active; then
     echo -e "${TXT_RED}❌ Xray não ficou ativo. Revertendo config...${RESET}"
     mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-    # CORREÇÃO: rollback usa _apply_config_perms() — não volta para 777.
     _apply_config_perms
     systemctl restart xray >/dev/null 2>&1 || true
     sleep 2; exit 1
 fi
 
 # --- PASSO 3: ATUALIZA O DB (após restart confirmado) ---
-# CORREÇÃO: reutiliza expired_nicks_file já coletado no Passo 1 em vez de
-# reler o DB e reexecutar is_expired() — elimina risco de divergência de clock
-# entre os dois loops (ex: NTP sync em VM durante a execução).
 tmp_db=$(mktemp "${USER_DB}.tmp.XXXXXX")
 _TMP_FILES+=("$tmp_db")
 
-# Filtra o DB removendo os nicks expirados já identificados
-# grep -vFf: remove linhas que iniciam com qualquer nick do arquivo de expirados
 while IFS='|' read -r nick uuid expiry _rest; do
     [ -n "${nick:-}" ] && [ -n "${uuid:-}" ] || continue
     if ! grep -qxF "$nick" "$expired_nicks_file" 2>/dev/null; then
@@ -219,9 +205,7 @@ while IFS='|' read -r nick uuid expiry _rest; do
 done < "$USER_DB"
 
 mv -f "$tmp_db" "$USER_DB"
-# CORREÇÃO: remove da lista de cleanup — arquivo promovido para users.db.
 _TMP_FILES=("${_TMP_FILES[@]/$tmp_db}")
-# CORREÇÃO: permissão explícita no DB — independe da umask do processo.
 chmod 600 "$USER_DB"
 
 # --- PASSO 4: LIMPA ARQUIVOS DE INFO ---
