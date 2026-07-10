@@ -14,6 +14,7 @@
 # - nick normalizado para minúsculas em func_set_limit e func_remove_limit
 # - tmp_usage e tmp_session registrados para cleanup via trap EXIT
 # - func_bytes_to_human() usa awk — elimina dependência de bc
+# - DICA DE PERFORMANCE: Removida manipulação de array no cleanup manual
 set -Eeuo pipefail
 
 # ================================================================
@@ -142,7 +143,7 @@ release_lock() { flock -u 9; rm -f "$LOCK_FILE"; }
 # PERMISSÕES DO CONFIG
 # ================================================================
 _apply_config_perms() {
-    chmod 0660 "$CONFIG_PATH"
+    chmod 0640 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
@@ -549,10 +550,6 @@ func_check_and_block() {
     # Promove cópias de trabalho para DBs reais
     mv -f "$tmp_usage" "$USAGE_DB"
     mv -f "$tmp_session" "$SESSION_DB"
-
-    # Remove da lista de cleanup — arquivos já promovidos
-    _TMP_FILES=("${_TMP_FILES[@]/$tmp_usage}")
-    _TMP_FILES=("${_TMP_FILES[@]/$tmp_session}")
 
     chmod 0600 "$USAGE_DB" "$SESSION_DB"
 
