@@ -291,6 +291,7 @@ download_module() {
 # --- CONFIRMAÇÃO PARA AÇÕES DESTRUTIVAS ---
 _confirm_destructive() {
     local msg="$1"
+    local confirm
     echo -e "${TXT_YELLOW}⚠  ${msg}${RESET}"
     read -rp "Confirmar? [s/N]: " confirm
     case "$confirm" in
