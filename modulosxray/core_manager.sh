@@ -1,9 +1,9 @@
 #!/bin/bash
 # core_manager.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
-#   - chmod RESTAURADO para 777 (script antigo que funcionava com Azion CDN)
-#   - connection_info.txt agora 777 root:root
-#   - certxray.sh agora 777 root:root
+#   - Permissões corrigidas de 777 para 644/755 aplicando princípio de menor privilégio
+#   - connection_info.txt agora 644 root:root
+#   - certxray.sh agora 755 root:root
 #   - Porta API padrão 1080 com fallback dinâmico via _find_free_api_port()
 #   - Validação de shebang BOM-safe em func_install_official_core e func_xray_cert
 #   - validate_domain_or_ip rejeita loopback, broadcast e endereços reservados óbvios
@@ -88,10 +88,10 @@ require_root() {
     fi
 }
 
-# CORREÇÃO: 777 root:nogroup — RESTAURADO para funcionar com Azion CDN
-# O Xray precisa ler os arquivos de configuração
+# CORREÇÃO: 644 para segurança. Leitura global permitida para CDN/scripts, 
+# mas alteração apenas pelo root.
 _apply_config_perms() {
-    chmod 777 "$CONFIG_PATH"
+    chmod 644 "$CONFIG_PATH"
     chown root:"$XRAY_GROUP" "$CONFIG_PATH"
 }
 
@@ -136,11 +136,11 @@ validate_domain_or_ip() {
 
         local o1="${parts[0]}" o2="${parts[1]}"
         # Rejeita IPs não-roteáveis como endereço público
-        if [ "$o1" -eq 0 ] || [ "$o1" -eq 127 ]; then return 1; fi          # 0.x, loopback
-        if [ "$o1" -eq 255 ]; then return 1; fi                               # broadcast
+        if [ "$o1" -eq 0 ] || [ "$o1" -eq 127 ]; then return 1; fi         # 0.x, loopback
+        if [ "$o1" -eq 255 ]; then return 1; fi                                # broadcast
         if [ "$o1" -eq 169 ] && [ "$o2" -eq 254 ]; then return 1; fi         # link-local
-        if (( o1 >= 224 && o1 <= 239 )); then return 1; fi                    # multicast
-        if [ "$o1" -eq 10 ]; then return 1; fi                                # RFC1918 10.x
+        if (( o1 >= 224 && o1 <= 239 )); then return 1; fi                     # multicast
+        if [ "$o1" -eq 10 ]; then return 1; fi                                 # RFC1918 10.x
         if [ "$o1" -eq 172 ] && (( o2 >= 16 && o2 <= 31 )); then return 1; fi # RFC1918 172.16-31.x
         if [ "$o1" -eq 192 ] && [ "$o2" -eq 168 ]; then return 1; fi         # RFC1918 192.168.x
 
@@ -273,8 +273,8 @@ func_xray_cert() {
     fi
 
     mv -f "$tmp" "$cert_script"
-    # CORREÇÃO: 777 root:root — RESTAURADO para funcionar com Azion CDN
-    chmod 777 "$cert_script"
+    # CORREÇÃO: 755 para ser executável de forma segura em vez de 777
+    chmod 755 "$cert_script"
     chown root:root "$cert_script"
     bash "$cert_script" "$dom"
 }
@@ -417,8 +417,8 @@ func_generate_config() {
 
     jq -n --arg network "$network" --arg port "$port" --arg domain "$domain" --arg tls "$use_tls" \
         '{network:$network,port:$port,domain:$domain,tls:$tls}' > "$PRESET_FILE"
-    # CORREÇÃO: 777 root:nogroup — RESTAURADO para funcionar com Azion CDN
-    chmod 777 "$PRESET_FILE"
+    # CORREÇÃO: 644 para segurança
+    chmod 644 "$PRESET_FILE"
     chown root:"$XRAY_GROUP" "$PRESET_FILE"
 
     echo "$domain" > "$ACTIVE_DOMAIN_FILE"
@@ -488,8 +488,8 @@ TLS=${use_tls}
 CREDENCIAL=${credential}
 LINK=${link}
 EOF
-    # CORREÇÃO: 777 root:root — RESTAURADO para funcionar com Azion CDN
-    chmod 777 "$CONN_INFO_FILE"
+    # CORREÇÃO: 644 para segurança
+    chmod 644 "$CONN_INFO_FILE"
     chown root:root "$CONN_INFO_FILE"
 
     echo -e "${TXT_GREEN}Link salvo em: ${CONN_INFO_FILE}${RESET}"
