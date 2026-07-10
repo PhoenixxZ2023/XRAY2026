@@ -2,15 +2,10 @@
 # certxray.sh - TURBONET XRAY V1.0
 # ============================================================
 # SSL Certificate Manager para Xray
-#
-# Correções V1.0:
-#   - Permissões RESTAURADAS para funcionar com Azion CDN
-#   - chmod 777 + nobody:nogroup (script antigo que funcionava)
-#   - Variáveis de cor definidas ANTES do set -Eeuo pipefail
 # ============================================================
 
 # ============================================================
-# VARIÁVEIS ANTES DO set -Eeuo pipefail (bug fix)
+# VARIÁVEIS ANTES DO set -Eeuo pipefail
 # ============================================================
 YB='\033[1;33m'
 RB='\033[1;31m'
@@ -28,10 +23,7 @@ RENEW_SCRIPT="$SSL_DIR/renew_cert.sh"
 ACTIVE_DOMAIN_FILE="/opt/XrayTools/active_domain"
 LOG_FILE="/tmp/certxray.log"
 
-# ============================================================
-# CORREÇÃO: Xray roda como nobody:nogroup, não root!
-# Necessário para Xray ler os certificados
-# ============================================================
+# O Xray roda como nobody:nogroup. Ele é o único que precisa ler os certs.
 XRAY_USER="nobody"
 XRAY_GROUP="nogroup"
 
@@ -72,9 +64,7 @@ ensure_cmd() {
 validate_domain() {
     local d="${1:-}"
     [ -n "$d" ] || return 1
-    # Rejeita IPs puros
     [[ "$d" =~ ^[0-9.]+$ ]] && return 1
-    # Valida formato: labels separadas por ponto, mínimo 2 labels
     [[ "$d" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]
 }
 
@@ -106,17 +96,22 @@ ensure_ssl_dir() {
 }
 
 # ============================================================
-# CORREÇÃO PRINCIPAL: Permissões do script antigo restauradas
-# Antigo (que funcionava): chmod 777 + nobody:nogroup
-# Atual (que não funcionava): chmod 644 + root:root
+# APLICAÇÃO DE PERMISSÕES SEGURAS
 # ============================================================
 apply_perms() {
     ensure_ssl_dir || return 1
-    # CORREÇÃO: nobody:nogroup como no script antigo que funcionava
+    
+    # 1. Passamos a posse de tudo para o usuário do Xray
     chown -R "$XRAY_USER:$XRAY_GROUP" "$SSL_DIR" 2>/dev/null || true
-    # CORREÇÃO: 777 como no script antigo
-    chmod 777 "$SSL_DIR" 2>/dev/null || true
-    chmod 777 "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" 2>/dev/null || true
+    
+    # 2. Bloqueamos acesso de outros usuários ao diretório
+    chmod 750 "$SSL_DIR" 2>/dev/null || true
+    
+    # 3. Certificado público (leitura para todos, escrita para o dono)
+    chmod 644 "$SSL_DIR/fullchain.pem" 2>/dev/null || true
+    
+    # 4. Chave PRIVADA (leitura APENAS para o dono)
+    chmod 600 "$SSL_DIR/privkey.pem" 2>/dev/null || true
 }
 
 # ============================================================
@@ -217,10 +212,10 @@ mkdir -p "${SSL_DIR}"
 cp -f "${LE_DIR}/fullchain.pem" "${SSL_DIR}/fullchain.pem"
 cp -f "${LE_DIR}/privkey.pem"   "${SSL_DIR}/privkey.pem"
 
-# CORREÇÃO: Permissões restauradas
 chown -R ${XRAY_USER}:${XRAY_GROUP} "${SSL_DIR}" 2>/dev/null || true
-chmod 777 "${SSL_DIR}" 2>/dev/null || true
-chmod 777 "${SSL_DIR}/fullchain.pem" "${SSL_DIR}/privkey.pem" 2>/dev/null || true
+chmod 750 "${SSL_DIR}" 2>/dev/null || true
+chmod 644 "${SSL_DIR}/fullchain.pem" 2>/dev/null || true
+chmod 600 "${SSL_DIR}/privkey.pem" 2>/dev/null || true
 
 systemctl restart xray >/dev/null 2>&1 || true
 sleep 3
@@ -234,7 +229,7 @@ fi
 echo "Renovação concluída com sucesso." >> "\$LOG"
 RENEW_EOF
 
-    chmod 777 "$RENEW_SCRIPT"
+    chmod 755 "$RENEW_SCRIPT"
     chown root:root "$RENEW_SCRIPT"
 
     # Agenda cron mensal sem duplicatas
@@ -252,7 +247,7 @@ RENEW_EOF
 clear
 echo -e "${YB}====================================================${RESET}"
 echo -e "${YB}         GERENCIADOR DE CERTIFICADOS SSL            ${RESET}"
-echo -e "${YB}            TURBONET XRAY v1.0                      ${RESET}"
+echo -e "${YB}             TURBONET XRAY v1.0                     ${RESET}"
 echo -e "${YB}====================================================${RESET}"
 echo ""
 
@@ -293,7 +288,7 @@ backup_existing_certs
 case "${cert_opt:-2}" in
   1)
     clear
-    echo -e "${BG_RED}             ⚠  LEIA COM ATENÇÃO  ⚠             ${RESET}"
+    echo -e "${BG_RED}              ⚠  LEIA COM ATENÇÃO  ⚠            ${RESET}"
     echo ""
     echo -e "${YB}LET'S ENCRYPT (HTTP-01) requer:${RESET}"
     echo -e " 1) ${RB}DNS do domínio apontando para o IP desta VPS${RESET}"
