@@ -46,7 +46,7 @@ trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; 
 # CORREÇÃO: 640 root:nogroup — Xray lê como nobody/nogroup, não precisa escrever.
 # Centralizado para garantir consistência em fluxo normal e rollbacks.
 _apply_config_perms() {
-    chmod 660 "$CONFIG_PATH"
+    chmod 640 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
@@ -125,9 +125,9 @@ generate_link() {
 
     local network port domain tls
     network=$(jq -r '.network // ""' "$PRESET_FILE" 2>/dev/null || echo "")
-    port=$(jq -r    '.port    // ""' "$PRESET_FILE" 2>/dev/null || echo "")
-    domain=$(jq -r  '.domain  // ""' "$PRESET_FILE" 2>/dev/null || echo "")
-    tls=$(jq -r     '.tls     // "false"' "$PRESET_FILE" 2>/dev/null || echo "false")
+    port=$(jq -r    '.port     // ""' "$PRESET_FILE" 2>/dev/null || echo "")
+    domain=$(jq -r  '.domain   // ""' "$PRESET_FILE" 2>/dev/null || echo "")
+    tls=$(jq -r     '.tls      // "false"' "$PRESET_FILE" 2>/dev/null || echo "false")
 
     [ -z "$network" ] || [ -z "$port" ] || [ -z "$domain" ] && {
         echo -e "${TXT_YELLOW}⚠  preset.json incompleto — campos network/port/domain ausentes.${RESET}" >&2
