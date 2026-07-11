@@ -5,15 +5,8 @@
 # - Endpoint /health continua público (healthcheck)
 # - API key gerada automaticamente em install_api_key()
 # - Rate limiting básico por IP (evita enumeração)
-#
-# Endpoints:
-# GET /check?user=NOME      → status por nome (requer API key)
-# GET /check?uuid=UUID      → status por UUID (requer API key)
-# GET /check/status         → status geral (requer API key)
-# GET /health               → healthcheck (público, sem auth)
-#
-# Autenticação: Header "X-API-Key: <api_key>"
-# API key armazenada em: /opt/XrayTools/.api_key (permissão 0600)
+# - Correção Python: capture_output substituído por stdout/stderr=PIPE para compatibilidade
+
 set -Eeuo pipefail
 
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
@@ -91,6 +84,7 @@ check_rate_limit() {
 
     [ ! -d "$(dirname "$RATE_LIMIT_FILE")" ] && mkdir -p "$(dirname "$RATE_LIMIT_FILE")"
     touch "$RATE_LIMIT_FILE"
+    chmod 0600 "$RATE_LIMIT_FILE"
 
     # Limpa entradas antigas (> 2 minutos)
     awk -F'|' -v now="$now" -v window="$window" '
@@ -346,7 +340,7 @@ class Handler(BaseHTTPRequestHandler):
             cfg = load_cfg()
             preset = load_preset()
             xray_ok = subprocess.run(['systemctl','is-active','xray'],
-                capture_output=True).returncode == 0
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
             users = load_db()
             total = len(users)
             active = sum(1 for n, u in users.items()
@@ -603,7 +597,7 @@ while true; do
         ;;
         6)
             install_api_key
-            echo -e "${TXT_GREEN}✅ API Key准备好了！${RESET}"
+            echo -e "${TXT_GREEN}✅ API Key pronta!${RESET}"
             show_api_key
             read -rp "Enter..."
         ;;
