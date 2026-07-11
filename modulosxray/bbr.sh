@@ -52,7 +52,7 @@ _disable_bbr() {
 
     # Remove entradas do sysctl.conf se existirem
     if [ -f /etc/sysctl.conf ]; then
-        sed -i '/net\.core\.default_qdisc.*fq/d'           /etc/sysctl.conf
+        sed -i '/net\.core\.default_qdisc.*fq/d'            /etc/sysctl.conf
         sed -i '/net\.ipv4\.tcp_congestion_control.*bbr/d' /etc/sysctl.conf
     fi
 
@@ -185,8 +185,8 @@ fi
 # --- APLICA CONFIGURAÇÃO VIA SYSCTL ---
 # Remove entradas antigas para evitar duplicatas
 if [ -f /etc/sysctl.conf ]; then
-    sed -i '/net\.core\.default_qdisc/d'              /etc/sysctl.conf
-    sed -i '/net\.ipv4\.tcp_congestion_control/d'     /etc/sysctl.conf
+    sed -i '/net\.core\.default_qdisc/d'               /etc/sysctl.conf
+    sed -i '/net\.ipv4\.tcp_congestion_control/d'      /etc/sysctl.conf
 fi
 
 # Cria ou atualiza arquivo de configuração dedicado
