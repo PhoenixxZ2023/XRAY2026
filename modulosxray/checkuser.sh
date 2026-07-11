@@ -11,6 +11,10 @@
 #   /check?user=NOME       -> consulta publica (sem senha, só status)
 #   /health                 -> healthcheck
 #
+# Correções Aplicadas:
+# - Compatibilidade estendida do Python (subprocess.run com stdout=PIPE em vez de capture_output)
+# - Hardening de arquivos (logs e pids gerados como 600)
+#
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO"; sleep 2' ERR
 
@@ -49,7 +53,7 @@ _get_api_port() {
         "$CONFIG_PATH" 2>/dev/null | head -1 || echo "1080"
 }
 
-# --- DETECCAO IP/DOMINIO (NOVO V1.2) ---
+# --- DETECCAO IP/DOMINIO ---
 _get_server_addr() {
     local addr=""
     
@@ -96,6 +100,10 @@ _start_server() {
 
     local api_port; api_port=$(_get_api_port)
     local server_addr; server_addr=$(_get_server_addr)
+
+    # Hardening: Garante que os logs comecem com permissão restrita.
+    touch "$LOG_FILE"
+    chmod 0600 "$LOG_FILE"
 
     python3 - "$port" "$USER_DB" "$CONFIG_PATH" "$XRAY_BIN" \
               "$api_port" "$CONN_DB" "$LOG_FILE" << 'PYSERVER' &
@@ -187,7 +195,7 @@ def get_active_connections(nick):
             [XRAY_BIN, 'api', 'stats',
              f'-server=127.0.0.1:{API_PORT}',
              f'-name=user>>>{nick}>>>traffic>>>downlink'],
-            capture_output=True, timeout=3
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3
         )
         
         for line in down_result.stdout.decode().split('\n'):
@@ -201,7 +209,7 @@ def get_active_connections(nick):
             [XRAY_BIN, 'api', 'stats',
              f'-server=127.0.0.1:{API_PORT}',
              f'-name=user>>>{nick}>>>traffic>>>uplink'],
-            capture_output=True, timeout=3
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3
         )
         
         for line in up_result.stdout.decode().split('\n'):
@@ -386,6 +394,8 @@ PYSERVER
     if kill -0 "$server_pid" 2>/dev/null; then
         echo "$server_pid" > "$PID_FILE"
         echo "$port"       > "$PORT_FILE"
+        # Hardening
+        chmod 0600 "$PID_FILE" "$PORT_FILE"
 
         echo -e "${TXT_GREEN}CheckUser iniciado! PID: ${server_pid}${RESET}"
         echo ""
