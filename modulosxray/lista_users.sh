@@ -338,4 +338,5 @@ while true; do
             sleep 1
             ;;
     esac
+    read -rp "Pressione Enter para voltar ao menu..."
 done
