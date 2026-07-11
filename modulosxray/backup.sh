@@ -62,7 +62,7 @@ _wait_xray_active() {
 # 600 root:root anterior impedia que o Xray (nobody/nogroup) lesse o config.
 _apply_config_perms() {
     local f="$1"
-    chmod 0660 "$f"
+    chmod 0640 "$f"
     chown root:nogroup "$f"
 }
 
@@ -73,10 +73,10 @@ is_safe_tar() {
     while IFS= read -r entry; do
         entry="${entry#./}"
         [ -n "$entry" ] || continue
-        [[ "$entry" != /* ]]     || return 1   # path absoluto
+        [[ "$entry" != /* ]]       || return 1   # path absoluto
         [[ "$entry" != *".."* ]] || return 1   # traversal
         case "$entry" in
-            opt/XrayTools|opt/XrayTools/*)            ;;
+            opt/XrayTools|opt/XrayTools/*)             ;;
             usr/local/etc/xray|usr/local/etc/xray/*)  ;;
             opt/TurbonetCoreSSL|opt/TurbonetCoreSSL/*)    ;;
             *) return 1 ;;
