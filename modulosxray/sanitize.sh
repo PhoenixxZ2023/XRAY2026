@@ -1,20 +1,20 @@
 #!/bin/bash
 # sanitize.sh - TURBONET XRAY V1.0
 # Módulo de sanitização e validação de entrada
-#用法: source sanitize.sh; validate_input "nick" "usuario123"
+# uso: source sanitize.sh; validate_input "nick" "usuario123"
 #
 # Este módulo deve ser "sourceado" por outros scripts:
 #   source /usr/local/bin/sanitize.sh
 #
 # Funções disponíveis:
 #   validate_nick()         - Valida nome de usuário
-#   validate_domain()      - Valida domínio
-#   validate_port()        - Valida porta
-#   validate_uuid()        - Valida UUID
-#   validate_date()        - Valida data (YYYY-MM-DD)
-#   sanitize_path()        - Sanitiza caminho de arquivo
-#   sanitize_json()        - Escapa caracteres para JSON
-#   log_audit()            - Log de auditoria (criação, exclusão, etc.)
+#   validate_domain()       - Valida domínio
+#   validate_port()         - Valida porta
+#   validate_uuid()         - Valida UUID
+#   validate_date()         - Valida data (YYYY-MM-DD)
+#   sanitize_path()         - Sanitiza caminho de arquivo
+#   sanitize_json()         - Escapa caracteres para JSON
+#   log_audit()             - Log de auditoria (criação, exclusão, etc.)
 
 TXT_RED='\033[1;31m'
 TXT_YELLOW='\033[1;33m'
@@ -278,7 +278,8 @@ log_audit() {
 
     # Mantém apenas os últimos 10000 registros
     if [ -f "$AUDIT_LOG" ]; then
-        lines=$(wc -l < "$AUDIT_FILE" 2>/dev/null || echo 0)
+        # CORREÇÃO: AUDIT_FILE alterado para AUDIT_LOG
+        lines=$(wc -l < "$AUDIT_LOG" 2>/dev/null || echo 0)
         if [ "$lines" -gt 10000 ]; then
             tail -n 9000 "$AUDIT_LOG" > "${AUDIT_LOG}.tmp"
             mv "${AUDIT_LOG}.tmp" "$AUDIT_LOG"
