@@ -30,7 +30,7 @@ fi
 
 # --- HELPERS ---
 _apply_config_perms() {
-    chmod 0660 "$CONFIG_PATH"
+    chmod 0640 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
