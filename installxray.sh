@@ -6,6 +6,7 @@
 # - Falha no backup agora logada (sem silenciar com || true cego)
 # - _get_packages retorna array para evitar word splitting em nomes futuros
 # - fun_bar: substituição de seq por printf para evitar subprocessos
+# - Lock atômico: utilizando set -C e redirecionamento (noclobber)
 set -Eeuo pipefail
 
 # --- TRAP DE SAÍDA ---
@@ -30,7 +31,6 @@ RESET='\033[0m'
 REPO_OWNER="PhoenixxZ2023"
 REPO_NAME="XRAY2026"
 
-# Validação de REPO_REF — evita injeção de paths ou URLs via variável de ambiente
 _validate_ref() {
     local ref="$1"
     if [[ ! "$ref" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
@@ -83,8 +83,6 @@ _install_packages() {
     esac
 }
 
-# CORREÇÃO: retorna array em vez de string — evita word splitting se nomes de pacotes
-# contiverem espaços no futuro, e torna a intenção explícita.
 _get_packages() {
     case "$PKG_MANAGER" in
         apt) echo "curl jq cron tar" ;;
@@ -94,8 +92,6 @@ _get_packages() {
 }
 
 # --- BARRA DE PROGRESSO ---
-# CORREÇÃO: substituídos subprocessos seq por printf com repetição nativa,
-# reduzindo fork/exec a cada tick da barra.
 fun_bar() {
     local pid="$1"
     local text="$2"
@@ -161,9 +157,8 @@ _verify_sha256() {
     fi
 }
 
-# --- LOCK: evita execuções paralelas ---
+# --- LOCK: Evita execuções paralelas de forma Atômica ---
 if [ -e "$LOCK_FILE" ]; then
-    # Se o lock tiver mais de 10 minutos, é resquício de instalação anterior — remove
     lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0) ))
     if [ "$lock_age" -gt 600 ]; then
         echo -e "${AMARELO}⚠ Lock file antigo encontrado (${lock_age}s). Removendo e continuando...${RESET}"
@@ -174,7 +169,13 @@ if [ -e "$LOCK_FILE" ]; then
         exit 1
     fi
 fi
-touch "$LOCK_FILE"
+# Criacao atômica de arquivo usando noclobber
+set -C
+echo $$ > "$LOCK_FILE" 2>/dev/null || {
+    echo -e "${VERMELHO}❌ Falha ao adquirir exclusividade de instalação.${RESET}"
+    exit 1
+}
+set +C
 
 # --- INICIALIZAÇÃO ---
 clear
@@ -211,8 +212,6 @@ fun_bar "$PID_PKG" "Atualizando e Instalando Dependências" || {
 }
 
 # --- 2) BACKUP DA INSTALAÇÃO ANTERIOR ---
-# CORREÇÃO: executado em sequência (sem &) antes da limpeza, garantindo ordem.
-# Falha no backup é logada mas não interrompe — sistema continua sem backup.
 echo -ne "${AZUL}[Fazendo Backup da Versão Anterior]${RESET} ... "
 if [ -f "$MENU_PATH" ]; then
     if cp -f "$MENU_PATH" "$MENU_BACKUP" 2>>"$LOG_FILE"; then
@@ -226,7 +225,6 @@ else
 fi
 
 # --- 3) LIMPEZA ANTIGA ---
-# CORREÇÃO: executado após o backup, eliminando a race condition.
 (
     rm -f /bin/menuxray.sh /usr/local/bin/menuxray.sh
     rm -f /bin/limiterxray.sh /usr/local/bin/limiterxray.sh
@@ -251,9 +249,6 @@ fun_bar $! "Limpando Instalações Antigas" || true
         exit 1
     fi
     
-    # CORREÇÃO: validação de shebang robusta — ignora BOM UTF-8 (0xEF 0xBB 0xBF)
-    # que precede o '#!' em alguns editores Windows/macOS.
-    # Usa strings via head -n1 + grep em vez de comparação byte-a-byte.
     if ! LC_ALL=C head -n 1 "$MENU_PATH" | grep -qP '^(\xEF\xBB\xBF)?#!.*(bash|env\s)'; then
         echo "Arquivo baixado não parece um shell script válido" >>"$LOG_FILE"
         exit 1
