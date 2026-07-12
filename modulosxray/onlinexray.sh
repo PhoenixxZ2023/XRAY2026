@@ -1,6 +1,7 @@
 #!/bin/bash
 # onlinexray.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
+#   - Verificação de root (EUID) adicionada para leitura do config.json restrito
 #   - API_PORT fallback 10085 → 1080 (alinhado com core_manager)
 #   - bytes_human() usa awk — elimina dependência de bc
 #   - set -Eeuo pipefail — consistente com demais módulos
@@ -25,6 +26,12 @@ SLEEP=3
 API_TIMEOUT=3
 
 export DEBIAN_FRONTEND=noninteractive
+
+# --- VERIFICAÇÃO DE ROOT ---
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo -e "${RED}❌ Execute como root!${RESET}"
+    exit 1
+fi
 
 # --- DETECÇÃO DE DISTRO ---
 _PKG_MANAGER=""
@@ -95,7 +102,6 @@ _api_stat() {
 }
 
 # CORREÇÃO: bytes_human() usa awk — elimina dependência de bc.
-# bc pode não estar instalado; awk está disponível em qualquer Unix.
 bytes_human() {
     local b="${1:-0}"
     awk -v b="$b" 'BEGIN {
@@ -107,8 +113,6 @@ bytes_human() {
 }
 
 # --- INICIALIZAÇÃO ---
-# CORREÇÃO: last_down e last_up separados — permite calcular delta real por ciclo.
-# Versão anterior usava soma (get_total_bytes) e o "delta" exibido era o total acumulado.
 declare -A last_down last_up last_seen
 
 now="$(date +%s)"
@@ -129,9 +133,6 @@ for u in "${USERS[@]}"; do
     fi
 done
 
-# CORREÇÃO: xray_ok declarado fora do loop — persiste entre ciclos.
-# Versão anterior resetava para true a cada ciclo, zerando o aviso nos 4 ciclos
-# entre verificações mesmo se o Xray tivesse caído.
 xray_ok=true
 cycle=0
 
@@ -146,8 +147,6 @@ while true; do
     fi
 
     # CORREÇÃO: coleta down e up separados uma única vez por usuário por ciclo.
-    # Versão anterior chamava _api_stat 4 vezes para usuários ativos (2 em get_total_bytes
-    # + 2 novamente para o split). Agora são sempre 2 chamadas por usuário.
     declare -A cur_down cur_up delta_d delta_u delta_total
 
     for u in "${USERS[@]}"; do
@@ -200,8 +199,6 @@ while true; do
         dt="${delta_total["$u"]:-0}"
 
         if [ "$seen" -gt 0 ] && [ "$age" -le "$WINDOW" ]; then
-            # CORREÇÃO: exibe delta real do ciclo atual (down+up deste período),
-            # não o total acumulado desde o início do Xray.
             delta_h="$(bytes_human "$dt")"
             printf " ${GREEN}%-14s${RESET} | ${YELLOW}%-12s${RESET} | ${GREEN}● Online${RESET} ${DIM}(há ${age}s)${RESET}\n" \
                 "$u" "$delta_h"
