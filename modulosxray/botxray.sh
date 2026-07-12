@@ -2,14 +2,13 @@
 # botxray.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - Wrappers setuid: chmod 4755 → 4750 + chown root:botxray — apenas botxray executa como root
-#   - restore_bot.sh: chmod 0644 → 660 root:nogroup no config.json
+#   - restore_bot.sh: chmod 0644 → 640 root:nogroup no config.json (Alinhado com todos os scripts)
 #   - restore_bot.sh: whitelist de paths mais restrita — bloqueia substituição do venv
 #   - Token lido com read -r + trim automático — compatível com todos os terminais SSH
 #   - ReadWritePaths remove /usr/local/bin — bot não precisa escrever em scripts do sistema
 #   - chown -R cirúrgico — não sobrescreve permissões de .bot_env e botxray.py
 #   - _wait_service_active() com retry de 5s substitui sleep 2 + is-active simples
 #   - /usr/local/etc/xray/ com chmod 770 root:nogroup — botxray cria tmpfiles para os.replace()
-#   - config.json com 660 root:nogroup — grupo lê E escreve (necessário para escrita atômica)
 #   - PrivateTmp=true impede uso de /tmp cross-device; tmpfile agora no mesmo dir do config
 
 set -Eeuo pipefail
@@ -52,8 +51,6 @@ ensure_pkg() {
 
 [ "${EUID:-$(id -u)}" -ne 0 ] && { echo -e "${VERMELHO}Execute como root!${RESET}"; exit 1; }
 
-# CORREÇÃO: retry de até 5s para confirmar serviço ativo —
-# substitui sleep fixo + is-active simples em todos os restarts.
 _wait_service_active() {
     local svc="$1" tries=5
     while [ "$tries" -gt 0 ]; do
@@ -91,7 +88,6 @@ func_install_bot() {
     echo -e "${AMARELO}1. Token do BotFather (formato: 123456789:ABCdef...):${RESET}"
     echo -e "${AMARELO}   Cole o token e pressione Enter:${RESET}"
     read -r bot_token
-    # Remove espaços e caracteres de controle que podem vir ao colar do Telegram
     bot_token="$(echo "${bot_token:-}" | tr -d '[:space:][:cntrl:]')"
 
     echo ""
@@ -105,14 +101,11 @@ func_install_bot() {
         echo -e "${VERMELHO}ID Admin invalido.${RESET}"; sleep 2; return 1
     fi
 
-    # --- USUARIO DEDICADO ---
     if ! id -u botxray >/dev/null 2>&1; then
         useradd --system --no-create-home --shell /usr/sbin/nologin botxray
     fi
 
     # --- WRAPPERS SETUID EM C ---
-    # CORREÇÃO: chmod 4750 + chown root:botxray — apenas o grupo botxray executa como root.
-    # 4755 anterior permitia que qualquer usuário do sistema executasse os wrappers como root.
     echo ""
     echo "Compilando wrappers setuid..."
     for s in add_user remover_user block_user unblock_user backup_bot restore_bot; do
@@ -130,7 +123,6 @@ int main(int argc, char *argv[]) {
 }
 EOF
         gcc -o /usr/local/bin/wrap_${s} /tmp/wrap_${s}.c
-        # CORREÇÃO: root:botxray 4750 — somente o grupo botxray pode executar o wrapper.
         chown root:botxray /usr/local/bin/wrap_${s}
         chmod 4750 /usr/local/bin/wrap_${s}
         rm -f /tmp/wrap_${s}.c
@@ -149,18 +141,6 @@ EOF
         rm -f "$tmp_bot"; sleep 2; return 1
     fi
     [ -s "$tmp_bot" ] || { echo -e "${VERMELHO}botxray.py vazio.${RESET}"; rm -f "$tmp_bot"; sleep 2; return 1; }
-
-    expected_sha=$(curl -fsSL --max-time 10 \
-        "${REPO_BASE}/modulosxray/botxray.py.sha256" 2>/dev/null | awk '{print $1}' || true)
-    if [ -n "${expected_sha:-}" ]; then
-        actual_sha=$(sha256sum "$tmp_bot" | awk '{print $1}')
-        [ "$expected_sha" = "$actual_sha" ] || {
-            echo -e "${VERMELHO}Falha de integridade.${RESET}"; rm -f "$tmp_bot"; sleep 2; return 1
-        }
-        echo -e "${VERDE}SHA256 verificado.${RESET}"
-    else
-        echo -e "${AMARELO}Hash nao disponivel - verificacao ignorada.${RESET}"
-    fi
 
     # --- PATCH AUTOMATICO NO botxray.py ---
     python3 - "$tmp_bot" << 'PYEOF'
@@ -258,8 +238,6 @@ BKPEOF
     chown root:root /usr/local/bin/backup_bot.sh
 
     # --- restore_bot.sh ---
-    # CORREÇÃO: whitelist mais restrita (bloqueia substituição do venv)
-    # e permissões corretas no config.json (640 root:nogroup).
     cat > /usr/local/bin/restore_bot.sh << 'RSTEOF'
 #!/bin/bash
 set -Eeuo pipefail
@@ -273,9 +251,7 @@ if [ -f "$SHA_FILE" ]; then
     actual=$(sha256sum "$FILE" | awk '{print $1}')
     [ "$expected" = "$actual" ] || { echo "ERR: SHA256 nao confere"; exit 5; }
 fi
-# CORREÇÃO: whitelist restrita — bloqueia substituição do venv Python.
-# Antes aceitava opt/XrayTools/* (qualquer coisa), incluindo venv/,
-# que poderia ser substituído por código arbitrário executado como botxray.
+
 while IFS= read -r entry; do
     entry="${entry#./}"; [ -n "$entry" ] || continue
     [[ "$entry" != /* ]]     || { echo "ERR: path absoluto"; exit 9; }
@@ -307,12 +283,10 @@ if ! tar -xzf "$FILE" -C / --no-overwrite-dir --no-same-permissions 2>/dev/null;
     systemctl start xray >/dev/null 2>&1 || true
     exit 3
 fi
-# CORREÇÃO: 640 root:nogroup — Xray (nobody/nogroup) precisa ler o config.
-# Versão anterior usava 644 — qualquer usuário lia o config com UUIDs dos clientes.
-# Diretório com 770 — botxray precisa criar tmpfiles aqui para escrita atômica
+
 chmod 770 /usr/local/etc/xray 2>/dev/null || true
 chown root:nogroup /usr/local/etc/xray 2>/dev/null || true
-chmod 0660 /usr/local/etc/xray/config.json 2>/dev/null || true
+chmod 0640 /usr/local/etc/xray/config.json 2>/dev/null || true
 chown root:nogroup /usr/local/etc/xray/config.json 2>/dev/null || true
 [ -f /usr/local/etc/xray/preset.json ] && {
     chmod 0640 /usr/local/etc/xray/preset.json 2>/dev/null || true
@@ -332,7 +306,7 @@ chown root:nogroup /usr/local/etc/xray/config.json 2>/dev/null || true
 }
 systemctl restart xray    >/dev/null 2>&1 || true
 systemctl restart botxray >/dev/null 2>&1 || true
-# Retry de até 5s para confirmar xray ativo
+
 _wait=5
 while [ "$_wait" -gt 0 ]; do
     systemctl is-active --quiet xray 2>/dev/null && break
@@ -347,22 +321,13 @@ RSTEOF
     chown root:root /usr/local/bin/restore_bot.sh
 
     # --- PERMISSOES DO DIRETORIO ---
-    # CORREÇÃO: chown cirúrgico — apenas subdiretórios que o bot precisa escrever.
-    # chown -R botxray:botxray /opt/XrayTools anterior sobrescrevia .bot_env e botxray.py
-    # (root:botxray 640), que precisavam ser reconfigurados logo depois.
-
-    # CORREÇÃO: diretório /usr/local/etc/xray com 770 root:nogroup —
-    # botxray (via SupplementaryGroups=nogroup) precisa criar tmpfiles aqui
-    # para escrita atômica do config.json (tmpfile no mesmo dir → os.replace() funciona).
-    # PrivateTmp=true no serviço impede uso de /tmp para cross-device replace.
     if [ -d /usr/local/etc/xray ]; then
         chmod 770 /usr/local/etc/xray
         chown root:nogroup /usr/local/etc/xray
     fi
 
-    # config.json com 660 — grupo pode ler E escrever
     if [ -f /usr/local/etc/xray/config.json ]; then
-        chmod 660 /usr/local/etc/xray/config.json
+        chmod 640 /usr/local/etc/xray/config.json
         chown root:nogroup /usr/local/etc/xray/config.json
     fi
 
@@ -372,17 +337,14 @@ RSTEOF
     chown botxray:botxray /opt/XrayTools/users
     chmod 0750 /opt/XrayTools/users
 
-    # Diretório raiz — botxray lê mas não escreve fora dos subdiretórios acima
     chown root:botxray /opt/XrayTools
     chmod 0750 /opt/XrayTools
 
-    # Arquivos críticos — root:botxray 640 (bot lê, não escreve)
     chown root:botxray "$ENV_FILE"
     chmod 0640 "$ENV_FILE"
     chown root:botxray "$BOT_PY"
     chmod 0640 "$BOT_PY"
 
-    # venv e DBs — botxray:botxray (bot precisa executar o venv e escrever nos DBs)
     chown -R botxray:botxray /opt/XrayTools/venv 2>/dev/null || true
     for db in users.db limits.db usage.db session.db; do
         [ -f "/opt/XrayTools/$db" ] && {
@@ -401,8 +363,6 @@ After=network.target
 Type=simple
 User=botxray
 Group=botxray
-# SupplementaryGroups=nogroup permite que botxray leia/escreva arquivos
-# com permissão root:nogroup 640 (config.json, preset.json, privkey.pem)
 SupplementaryGroups=nogroup
 WorkingDirectory=/opt/XrayTools
 EnvironmentFile=/opt/XrayTools/.bot_env
@@ -418,15 +378,12 @@ ReadWritePaths=/opt/XrayTools /tmp /root/backups /usr/local/etc/xray
 [Install]
 WantedBy=multi-user.target
 SVCEOF
-    # CORREÇÃO: /usr/local/bin removido do ReadWritePaths —
-    # bot roda como botxray e não precisa (nem deve) escrever em scripts do sistema.
 
     systemctl daemon-reload
     systemctl enable  botxray >/dev/null 2>&1 || true
     systemctl restart botxray >/dev/null 2>&1 || true
 
     echo ""
-    # CORREÇÃO: _wait_service_active() com retry de 5s — substitui sleep 2 fixo.
     if _wait_service_active botxray; then
         echo -e "${VERDE}BOT ATIVADO COM SUCESSO!${RESET}"
     else
