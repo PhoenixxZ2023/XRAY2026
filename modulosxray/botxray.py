@@ -8,7 +8,7 @@ Correções aplicadas:
   - nick normalizado para minúsculas em input_handler
   - generate_link(): sem fallback para inbounds[0] — erro explícito se inbound não encontrado
   - core_create_user(): verificação de duplicidade linha por linha (sem string.contains)
-  - Backup Python gera SHA256 e envia junto ao admin
+  - Backup Python gera SHA256 e envia junto ao admin (Refinado para leitura em chunks)
   - get_ip(): timeout aumentado para 8s
 """
 
@@ -22,6 +22,8 @@ import asyncio
 import re
 import urllib.request
 from datetime import datetime, timedelta
+import tempfile
+import shutil
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, ContextTypes, ConversationHandler,
@@ -124,7 +126,7 @@ def reload_xray_user(action: str, nick: str, user_uuid: str, inbound_tag: str = 
         return False
 
 
-def load_config() -> dict | None:
+def load_config() -> 'Optional[dict]':
     if not os.path.exists(CONFIG_PATH):
         return None
     try:
@@ -274,7 +276,7 @@ def generate_link(client_uuid: str, client_email: str) -> str:
 # FUNÇÕES CORE
 # =============================================================
 
-def core_create_user(nick: str, days: str) -> tuple[bool, str]:
+def core_create_user(nick: str, days: str) -> 'Tuple[bool, str]':
     """
     CORREÇÃO: verificação de duplicidade linha por linha com startswith()
     em vez de 'nick|' in f.read() — mais robusto com linhas corrompidas sem '|'.
@@ -569,8 +571,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "backup_start":
         await query.edit_message_text("📦 Gerando Backup...", parse_mode="Markdown")
 
-        import tempfile, shutil
-
         date_str = datetime.now().strftime("%Y%m%d_%H%M")
         bkp_file = f"/tmp/backup_{date_str}.tar.gz"
         sha_file = bkp_file + ".sha256"
@@ -603,9 +603,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
         if os.path.exists(bkp_file) and os.path.getsize(bkp_file) > 0:
-            # CORREÇÃO: gera SHA256 e envia junto ao admin —
-            # versão anterior não gerava hash, impossibilitando verificação antes do restore.
-            digest = hashlib.sha256(open(bkp_file, "rb").read()).hexdigest()
+            # CORREÇÃO: SHA256 lendo o arquivo em blocos
+            sha256_hash = hashlib.sha256()
+            with open(bkp_file, "rb") as f_hash:
+                for byte_block in iter(lambda: f_hash.read(4096), b""):
+                    sha256_hash.update(byte_block)
+            digest = sha256_hash.hexdigest()
+
             with open(sha_file, "w") as sf:
                 sf.write(f"{digest}  {os.path.basename(bkp_file)}\n")
 
