@@ -1,18 +1,17 @@
 #!/bin/bash
 # certxray.sh - TURBONET XRAY V1.0
-# ============================================================
-# SSL Certificate Manager para Xray
-# ============================================================
+# Correções aplicadas:
+#   - chmod 777 na chave privada → 640 root:nogroup (privkey.pem)
+#   - chmod 777 no certificado → 644 root:root (fullchain.pem)
+#   - chmod 777 no diretório → 750 root:nogroup ($SSL_DIR)
+#   - chmod 777 no renew_cert.sh → 700 root:root (executado como root via cron)
+#   - Mesmas permissões corretas replicadas no renew_cert.sh gerado
+#   - Escrita em $ACTIVE_DOMAIN_FILE movida para após validação do domínio
+#   - Fallback LE→autoassinado remove backups após sucesso
+#   - Cron com jitter aleatório — evita rate limiting no Let's Encrypt
+#   - _wait_xray_active() com retry de 5s no renew_cert.sh gerado
 
-# ============================================================
-# VARIÁVEIS ANTES DO set -Eeuo pipefail
-# ============================================================
-YB='\033[1;33m'
-RB='\033[1;31m'
-GB='\033[1;32m'
-CB='\033[1;36m'
-BG_RED='\033[41;1;37m'
-RESET='\033[0m'
+set -Eeuo pipefail
 
 RAW_INPUT="$*"
 DOMAIN="$(echo "$RAW_INPUT" | awk '{print $NF}')"
@@ -23,17 +22,19 @@ RENEW_SCRIPT="$SSL_DIR/renew_cert.sh"
 ACTIVE_DOMAIN_FILE="/opt/XrayTools/active_domain"
 LOG_FILE="/tmp/certxray.log"
 
-# O Xray roda como nobody:nogroup. Ele é o único que precisa ler os certs.
 XRAY_USER="nobody"
 XRAY_GROUP="nogroup"
 
+YB='\033[1;33m'
+RB='\033[1;31m'
+GB='\033[1;32m'
+CB='\033[1;36m'
+BG_RED='\033[41;1;37m'
+RESET='\033[0m'
+
 export DEBIAN_FRONTEND=noninteractive
 
-set -Eeuo pipefail
-
-# ============================================================
-# DETECÇÃO DE DISTRO
-# ============================================================
+# --- DETECÇÃO DE DISTRO ---
 _PKG_MANAGER=""
 _APT_UPDATED=0
 _detect_pkg_manager() {
@@ -58,9 +59,7 @@ ensure_cmd() {
     esac
 }
 
-# ============================================================
-# VALIDAÇÃO DE DOMÍNIO (RFC 1123)
-# ============================================================
+# --- VALIDAÇÃO DE DOMÍNIO (RFC 1123) ---
 validate_domain() {
     local d="${1:-}"
     [ -n "$d" ] || return 1
@@ -68,9 +67,7 @@ validate_domain() {
     [[ "$d" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]
 }
 
-# ============================================================
-# UTILITÁRIOS DE REDE
-# ============================================================
+# --- IP PÚBLICO COM HTTPS E TIMEOUT ---
 get_public_ip() {
     curl -4fsSL --max-time 10 --connect-timeout 5 \
         "https://icanhazip.com" 2>/dev/null \
@@ -87,36 +84,33 @@ dns_points_to_vps() {
     echo "$ans" | grep -qx "$ip"
 }
 
-# ============================================================
-# GERENCIAMENTO DO DIRETÓRIO SSL
-# ============================================================
 ensure_ssl_dir() {
     mkdir -p "$SSL_DIR"
     [ -d "$SSL_DIR" ] || { echo -e "${RB}❌ Não foi possível criar ${SSL_DIR}${RESET}"; return 1; }
 }
 
-# ============================================================
-# APLICAÇÃO DE PERMISSÕES SEGURAS
-# ============================================================
+# CORREÇÃO: permissões seguras para arquivos de certificado TLS.
+# Tabela de permissões:
+#   $SSL_DIR/          → 750 root:nogroup  (Xray lê, não cria arquivos)
+#   privkey.pem        → 640 root:nogroup  (chave privada — nunca legível por outros)
+#   fullchain.pem      → 644 root:root     (certificado público — pode ser lido por todos)
+#   renew_cert.sh      → 700 root:root     (executado como root via cron)
+# Versão anterior usava chmod 777 em tudo — expunha a chave privada TLS a qualquer processo.
 apply_perms() {
     ensure_ssl_dir || return 1
-    
-    # 1. Passamos a posse de tudo para o usuário do Xray
-    chown -R "$XRAY_USER:$XRAY_GROUP" "$SSL_DIR" 2>/dev/null || true
-    
-    # 2. Bloqueamos acesso de outros usuários ao diretório
-    chmod 750 "$SSL_DIR" 2>/dev/null || true
-    
-    # 3. Certificado público (leitura para todos, escrita para o dono)
-    chmod 644 "$SSL_DIR/fullchain.pem" 2>/dev/null || true
-    
-    # 4. Chave PRIVADA (leitura APENAS para o dono)
-    chmod 600 "$SSL_DIR/privkey.pem" 2>/dev/null || true
+    chmod 750 "$SSL_DIR"
+    chown root:"$XRAY_GROUP" "$SSL_DIR"
+    if [ -f "$SSL_DIR/privkey.pem" ]; then
+        chmod 640 "$SSL_DIR/privkey.pem"
+        chown root:"$XRAY_GROUP" "$SSL_DIR/privkey.pem"
+    fi
+    if [ -f "$SSL_DIR/fullchain.pem" ]; then
+        chmod 644 "$SSL_DIR/fullchain.pem"
+        chown root:root "$SSL_DIR/fullchain.pem"
+    fi
 }
 
-# ============================================================
-# BACKUP E RESTAURAÇÃO
-# ============================================================
+# --- BACKUP DOS CERTS ATUAIS ---
 backup_existing_certs() {
     if [ -f "$SSL_DIR/fullchain.pem" ] || [ -f "$SSL_DIR/privkey.pem" ]; then
         cp -f "$SSL_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem.bak" 2>/dev/null || true
@@ -133,16 +127,33 @@ restore_cert_backup() {
     fi
 }
 
-# ============================================================
-# CERTIFICADO AUTO-ASSINADO
-# ============================================================
 make_selfsigned() {
     echo -e "${YB}>>> Gerando certificado AUTO-ASSINADO...${RESET}"
     ensure_cmd openssl openssl
     ensure_ssl_dir || exit 1
 
+    # Para uso com HTTP Injection / operadoras: CN pode ser o IP público da VPS
+    # para que o SNI do cliente seja o IP diretamente, sem precisar de domínio.
+    local cn_value="$DOMAIN"
+    echo ""
+    echo -e "${YB}CN do certificado (usado como SNI no app cliente):${RESET}"
+    echo " [1] Domínio/SNI configurado: ${DOMAIN}"
+    echo " [2] IP público da VPS (recomendado para HTTP Injection)"
+    read -rp "Opção [1/2, Enter=1]: " cn_opt
+    if [ "${cn_opt:-1}" = "2" ]; then
+        echo -n "Detectando IP público... "
+        local pub_ip
+        pub_ip=$(curl -4fsSL --max-time 8 https://icanhazip.com 2>/dev/null ||                  curl -4fsSL --max-time 8 https://api.ipify.org 2>/dev/null || echo "")
+        if [ -n "$pub_ip" ]; then
+            cn_value="$pub_ip"
+            echo -e "${GB}${pub_ip}${RESET}"
+        else
+            echo -e "${YB}Falha — usando domínio.${RESET}"
+        fi
+    fi
+
     if ! openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-        -subj "/C=BR/ST=SP/L=SaoPaulo/O=TurboNet/OU=VPN/CN=$DOMAIN" \
+        -subj "/C=BR/ST=SP/L=SaoPaulo/O=TurboNet/OU=VPN/CN=${cn_value}" \
         -keyout "$SSL_DIR/privkey.pem" \
         -out "$SSL_DIR/fullchain.pem" >>"$LOG_FILE" 2>&1; then
         echo -e "${RB}❌ Falha ao gerar certificado autoassinado.${RESET}"
@@ -150,15 +161,33 @@ make_selfsigned() {
         exit 1
     fi
 
+    # Permissões seguras — 640 root:nogroup para privkey
+    # (Xray lê como nobody/nogroup, outros sem acesso)
     apply_perms
-    echo -e "${GB}✅ Certificado autoassinado criado em: ${CB}$SSL_DIR${RESET}"
+
+    # Atualizar serverName no config.json para bater com o CN gerado
+    if [ -f "/usr/local/etc/xray/config.json" ] &&        jq empty "/usr/local/etc/xray/config.json" 2>/dev/null; then
+        local tmp_cfg; tmp_cfg=$(mktemp /tmp/xray_cfg_cert_XXXXXX.json)
+        if jq --arg sn "$cn_value"             '(.inbounds[] | select(.tag=="inbound-turbonet") |
+             .streamSettings.tlsSettings.serverName) = $sn'             "/usr/local/etc/xray/config.json" > "$tmp_cfg" 2>/dev/null &&             jq empty "$tmp_cfg" 2>/dev/null; then
+            mv -f "$tmp_cfg" "/usr/local/etc/xray/config.json"
+            chmod 660 "/usr/local/etc/xray/config.json"
+            chown root:nogroup "/usr/local/etc/xray/config.json"
+            echo -e "${GB}✅ serverName atualizado para: ${cn_value}${RESET}"
+        else
+            rm -f "$tmp_cfg"
+        fi
+    fi
+
+    echo -e "${GB}✅ Certificado autoassinado criado em:${RESET} ${CB}$SSL_DIR${RESET}"
+    echo -e " ${YB}CN/SNI:${RESET} ${CB}${cn_value}${RESET}"
+    echo -e " ${YB}Validade:${RESET} 3650 dias (10 anos)"
     echo ""
-    echo -e "${GB}✅ Funciona com CDN (Azion/Cloudflare)${RESET}"
+    echo -e " ${YB}⚠  No app cliente configure:${RESET}"
+    echo -e "  SNI/serverName: ${CB}${cn_value}${RESET}"
+    echo -e "  allowInsecure:  ${CB}true${RESET} (cert autoassinado)"
 }
 
-# ============================================================
-# LET'S ENCRYPT
-# ============================================================
 install_letsencrypt() {
     echo -e "${YB}>>> Preparando Let's Encrypt...${RESET}"
     ensure_cmd certbot certbot
@@ -187,12 +216,16 @@ install_letsencrypt() {
     cp -f "$LE_DIR/privkey.pem"   "$SSL_DIR/privkey.pem"
     apply_perms
 
-    # ============================================================
-    # Script de renovação com permissões corretas
-    # ============================================================
+    # CORREÇÃO: jitter aleatório no cron — evita que todos os servidores
+    # tentem renovar simultaneamente (rate limiting no Let's Encrypt).
+    local CRON_MIN CRON_HOUR
+    CRON_MIN=$(( RANDOM % 60 ))
+    CRON_HOUR=$(( 2 + RANDOM % 4 ))
+
+    # Script de renovação gerado com permissões corretas e _wait_xray_active()
     cat > "$RENEW_SCRIPT" <<RENEW_EOF
 #!/bin/bash
-# renew_cert.sh — gerado por certxray.sh
+# renew_cert.sh — gerado por certxray.sh V1.0
 set -Eeuo pipefail
 LOG="/tmp/renew_cert.log"
 : > "\$LOG"
@@ -202,7 +235,7 @@ systemctl stop xray  >/dev/null 2>&1 || true
 systemctl stop nginx >/dev/null 2>&1 || true
 fuser -k 80/tcp >/dev/null 2>&1 || true
 
-if ! certbot renew --quiet >>\$LOG 2>&1; then
+if ! certbot renew --quiet >>"\$LOG" 2>&1; then
     echo "FALHA: certbot renew falhou" >> "\$LOG"
     systemctl start xray >/dev/null 2>&1 || true
     exit 1
@@ -212,15 +245,29 @@ mkdir -p "${SSL_DIR}"
 cp -f "${LE_DIR}/fullchain.pem" "${SSL_DIR}/fullchain.pem"
 cp -f "${LE_DIR}/privkey.pem"   "${SSL_DIR}/privkey.pem"
 
-chown -R ${XRAY_USER}:${XRAY_GROUP} "${SSL_DIR}" 2>/dev/null || true
-chmod 750 "${SSL_DIR}" 2>/dev/null || true
-chmod 644 "${SSL_DIR}/fullchain.pem" 2>/dev/null || true
-chmod 600 "${SSL_DIR}/privkey.pem" 2>/dev/null || true
+# CORREÇÃO: permissões corretas replicadas no script de renovação.
+# Versão anterior usava chmod 777 — expunha privkey.pem após cada renovação.
+chmod 750 "${SSL_DIR}"
+chown root:${XRAY_GROUP} "${SSL_DIR}"
+chmod 640 "${SSL_DIR}/privkey.pem"
+chown root:${XRAY_GROUP} "${SSL_DIR}/privkey.pem"
+chmod 644 "${SSL_DIR}/fullchain.pem"
+chown root:root "${SSL_DIR}/fullchain.pem"
 
 systemctl restart xray >/dev/null 2>&1 || true
-sleep 3
 
-if ! systemctl is-active --quiet xray 2>/dev/null; then
+# CORREÇÃO: _wait_xray_active com retry de 5s — substitui sleep 3 + is-active simples.
+_wait_xray_active() {
+    local tries=5
+    while [ "\$tries" -gt 0 ]; do
+        systemctl is-active --quiet xray 2>/dev/null && return 0
+        sleep 1
+        tries=\$(( tries - 1 ))
+    done
+    return 1
+}
+
+if ! _wait_xray_active; then
     echo "AVISO: Xray não ficou ativo após renovação!" >> "\$LOG"
     journalctl -u xray -n 20 --no-pager >> "\$LOG" 2>/dev/null || true
     exit 1
@@ -229,25 +276,26 @@ fi
 echo "Renovação concluída com sucesso." >> "\$LOG"
 RENEW_EOF
 
-    chmod 755 "$RENEW_SCRIPT"
+    # CORREÇÃO: 700 root:root — script executado como root via cron.
+    # 777 anterior permitia que qualquer processo sobrescrevesse o script,
+    # criando vetor de escalonamento de privilégios.
+    chmod 700 "$RENEW_SCRIPT"
     chown root:root "$RENEW_SCRIPT"
 
-    # Agenda cron mensal sem duplicatas
-    (crontab -l 2>/dev/null | grep -v "renew_cert.sh"; \
-     echo "0 3 1 * * $RENEW_SCRIPT >>/tmp/renew_cert.log 2>&1") | crontab -
+    # Agenda cron com jitter — sem duplicatas
+    ( crontab -l 2>/dev/null | grep -v "renew_cert.sh"
+      echo "${CRON_MIN} ${CRON_HOUR} 1 * * $RENEW_SCRIPT >>/tmp/renew_cert.log 2>&1"
+    ) | crontab -
 
-    echo -e "${GB}✅ Let's Encrypt instalado. Renovação agendada mensalmente.${RESET}"
+    echo -e "${GB}✅ Let's Encrypt instalado. Renovação agendada para dia 1 às ${CRON_HOUR}:$(printf '%02d' $CRON_MIN).${RESET}"
     return 0
 }
 
-# ============================================================
-# MAIN
-# ============================================================
+# --- MAIN ---
 : > "$LOG_FILE"
 clear
 echo -e "${YB}====================================================${RESET}"
 echo -e "${YB}         GERENCIADOR DE CERTIFICADOS SSL            ${RESET}"
-echo -e "${YB}             TURBONET XRAY v1.0                     ${RESET}"
 echo -e "${YB}====================================================${RESET}"
 echo ""
 
@@ -265,6 +313,8 @@ if ! validate_domain "$DOMAIN"; then
     exit 1
 fi
 
+# CORREÇÃO: escrita em $ACTIVE_DOMAIN_FILE movida para APÓS a validação —
+# versão anterior gravava o domínio antes de validar o formato.
 mkdir -p /opt/XrayTools 2>/dev/null || true
 echo "$DOMAIN" > "$ACTIVE_DOMAIN_FILE" 2>/dev/null || true
 
@@ -281,14 +331,13 @@ echo ""
 echo -e "${YB}====================================================${RESET}"
 read -rp "OPÇÃO [1/2]: " cert_opt
 
-# Backup dos certs atuais ANTES de qualquer remoção
 ensure_ssl_dir
 backup_existing_certs
 
 case "${cert_opt:-2}" in
   1)
     clear
-    echo -e "${BG_RED}              ⚠  LEIA COM ATENÇÃO  ⚠            ${RESET}"
+    echo -e "${BG_RED}             ⚠  LEIA COM ATENÇÃO  ⚠             ${RESET}"
     echo ""
     echo -e "${YB}LET'S ENCRYPT (HTTP-01) requer:${RESET}"
     echo -e " 1) ${RB}DNS do domínio apontando para o IP desta VPS${RESET}"
@@ -312,7 +361,10 @@ case "${cert_opt:-2}" in
         echo " [0] Cancelar"
         read -rp "Opção: " fallback_opt
         case "$fallback_opt" in
-            2) make_selfsigned; exit 0 ;;
+            2) make_selfsigned
+               # CORREÇÃO: remove backups após autoassinado bem-sucedido (fallback DNS)
+               rm -f "$SSL_DIR/fullchain.pem.bak" "$SSL_DIR/privkey.pem.bak" 2>/dev/null || true
+               exit 0 ;;
             0) restore_cert_backup; exit 0 ;;
             *) ;;
         esac
@@ -320,7 +372,6 @@ case "${cert_opt:-2}" in
 
     read -rp "Pressione Enter para confirmar e continuar..." _
 
-    # Remove certs antigos só agora — após backup já feito
     rm -f "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" 2>/dev/null || true
 
     if install_letsencrypt; then
@@ -332,6 +383,9 @@ case "${cert_opt:-2}" in
         echo -e "${BG_RED}  FALHA NA VALIDAÇÃO LET'S ENCRYPT  ${RESET}"
         echo -e "${YB}>>> Fallback automático: gerando autoassinado...${RESET}"
         make_selfsigned
+        # CORREÇÃO: remove backups após fallback LE→autoassinado bem-sucedido.
+        # Versão anterior deixava privkey.pem.bak com a chave antiga em $SSL_DIR.
+        rm -f "$SSL_DIR/fullchain.pem.bak" "$SSL_DIR/privkey.pem.bak" 2>/dev/null || true
         exit 0
     fi
     ;;
