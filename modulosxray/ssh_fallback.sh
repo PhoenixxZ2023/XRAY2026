@@ -76,7 +76,7 @@ _wait_xray_active() {
 }
 
 _dropbear_status() {
-    if systemctl is-active --quiet dropbear 2>/dev/null; then
+    if systemctl is-active --quiet turbonet-dropbear 2>/dev/null; then
         echo -e "${TXT_GREEN}ATIVO${RESET}"
     else
         echo -e "${TXT_RED}INATIVO${RESET}"
@@ -103,43 +103,55 @@ _install_dropbear() {
 
     ensure_pkg dropbear dropbear
 
-    # Configurar Dropbear apenas em loopback na porta 2222
-    # Não exposto diretamente — acesso via Xray fallback
-    local dropbear_conf="/etc/default/dropbear"
-    if [ -f "$dropbear_conf" ]; then
-        # Desabilita porta padrão do dropbear (acesso só via Xray)
-        sed -i 's/^NO_START=.*/NO_START=0/'         "$dropbear_conf" || true
-        sed -i 's/^DROPBEAR_PORT=.*/DROPBEAR_PORT=/' "$dropbear_conf" || true
-        sed -i 's/^DROPBEAR_EXTRA_ARGS=.*/DROPBEAR_EXTRA_ARGS="-p 127.0.0.1:2222 -w -s"/' \
-            "$dropbear_conf" || true
-    fi
+    # No Ubuntu/Debian o pacote dropbear vem com init script LSB que conflita
+    # com o systemd. Solução: criar servico proprio turbonet-dropbear independente.
 
-    # Para sistemas com systemd direto
-    local service_override="/etc/systemd/system/dropbear.service.d"
-    mkdir -p "$service_override"
-    cat > "${service_override}/override.conf" << 'EOF'
+    # Parar e desabilitar servico padrao do pacote
+    systemctl stop    dropbear 2>/dev/null || true
+    systemctl disable dropbear 2>/dev/null || true
+    service  dropbear stop     2>/dev/null || true
+    update-rc.d dropbear disable 2>/dev/null || true
+    sleep 1
+
+    # Gerar chaves do host se nao existirem
+    mkdir -p /etc/dropbear
+    [ -f /etc/dropbear/dropbear_rsa_host_key ] || \
+        dropbearkey -t rsa   -f /etc/dropbear/dropbear_rsa_host_key   >>"$LOG_FILE" 2>&1 || true
+    [ -f /etc/dropbear/dropbear_ecdsa_host_key ] || \
+        dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key >>"$LOG_FILE" 2>&1 || true
+
+    # Criar servico systemd proprio — nao depende do init LSB do pacote
+    cat > /etc/systemd/system/turbonet-dropbear.service << SVCEOF
+[Unit]
+Description=TURBONET XRAY Dropbear SSH (loopback 2222)
+After=network.target
+
 [Service]
-ExecStart=
-ExecStart=/usr/sbin/dropbear -F -E -p 127.0.0.1:2222 -w
-EOF
-    # -F: foreground
-    # -E: log para stderr
-    # -p 127.0.0.1:2222: apenas loopback, porta 2222
-    # -w: desabilita login como root via SSH (segurança)
+Type=simple
+ExecStart=/usr/sbin/dropbear -F -E -p 127.0.0.1:2222 -w -j -k
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+    # Flags: -F foreground, -E log stderr, -p loopback:2222
+    #        -w sem root, -j/-k sem port forward
 
     systemctl daemon-reload
-    systemctl enable  dropbear >/dev/null 2>&1 || true
-    systemctl restart dropbear >/dev/null 2>&1 || true
+    systemctl enable  turbonet-dropbear >/dev/null 2>&1
+    systemctl restart turbonet-dropbear >/dev/null 2>&1
     sleep 2
 
-    if systemctl is-active --quiet dropbear 2>/dev/null; then
-        echo -e "${TXT_GREEN}✅ Dropbear ativo em 127.0.0.1:2222${RESET}"
+    if systemctl is-active --quiet turbonet-dropbear 2>/dev/null; then
+        echo -e "${TXT_GREEN}OK Dropbear ativo em 127.0.0.1:2222${RESET}"
     else
-        echo -e "${TXT_RED}❌ Falha ao iniciar Dropbear.${RESET}"
-        journalctl -u dropbear -n 10 --no-pager 2>/dev/null || true
+        echo -e "${TXT_RED}Falha ao iniciar Dropbear.${RESET}"
+        journalctl -u turbonet-dropbear -n 15 --no-pager 2>/dev/null || true
         return 1
     fi
 }
+
 
 # --- ADICIONAR FALLBACKS NO XRAY ---
 _configure_xray_fallback() {
@@ -399,7 +411,7 @@ while true; do
             ;;
         7) _show_connection_info ;;
         8)
-            journalctl -u dropbear -n 30 --no-pager 2>/dev/null || \
+            journalctl -u turbonet-dropbear -n 30 --no-pager 2>/dev/null || \
                 cat /var/log/dropbear.log 2>/dev/null || echo "Sem logs."
             read -rp "Enter..."
             ;;
@@ -407,9 +419,9 @@ while true; do
             read -rp "Remover SSH fallback e Dropbear? [s/N]: " conf
             [[ "${conf:-n}" =~ ^[Ss]$ ]] || { echo "Cancelado."; sleep 1; continue; }
             _remove_xray_fallback
-            systemctl stop    dropbear >/dev/null 2>&1 || true
-            systemctl disable dropbear >/dev/null 2>&1 || true
-            rm -f /etc/systemd/system/dropbear.service.d/override.conf
+            systemctl stop    turbonet-dropbear >/dev/null 2>&1 || true
+            systemctl disable turbonet-dropbear >/dev/null 2>&1 || true
+            rm -f /etc/systemd/system/turbonet-dropbear.service
             systemctl daemon-reload
             echo -e "${TXT_GREEN}✅ SSH fallback removido.${RESET}"
             read -rp "Enter..."
