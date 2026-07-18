@@ -2,11 +2,14 @@
 # ssh_fallback.sh - TURBONET XRAY V1.0
 # SSH completo integrado ao Xray XHTTP:
 #   - Dropbear na porta 22 (loopback) — acesso via Xray fallback porta 443
-#   - Proxy porta 80: SOCKS5 + WebSocket + Remote (SSH over HTTP)
+#   - Proxy porta 8080: TCP Direto (SSH over HTTP)
+#   - Proxy porta 80: WebSocket SSH (ws+ssh) - Ideal para CDN
+#   - Proxy porta 1080: SOCKS5
 #   - Um cadastro = acesso XHTTP/VLESS + SSH simultaneamente
 # Correções Aplicadas:
 #   - Prevenção contra SOCKS5 Open Proxy (autenticação PAM obrigatória)
 #   - Detecção dinâmica de interface de rede para o Dante (evita quebras fora de eth0)
+#   - WebSocket movido para porta 80 nativa / Proxy TCP movido para 8080
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO"; sleep 2' ERR
@@ -84,8 +87,8 @@ _xray_fallback_status() {
 }
 
 _proxy80_status() {
-    systemctl is-active --quiet turbonet-proxy80 2>/dev/null && \
-        echo -e "${TXT_GREEN}ATIVO (porta 80)${RESET}" || \
+    systemctl is-active --quiet turbonet-wssh 2>/dev/null && \
+        echo -e "${TXT_GREEN}ATIVO (WS porta 80)${RESET}" || \
         echo -e "${TXT_RED}INATIVO${RESET}"
 }
 
@@ -204,39 +207,40 @@ _remove_xray_fallback() {
     fi
 }
 
-# --- PROXY PORTA 80: SOCKS5 + WEBSOCKET + REMOTE ---
+# --- PROXY PORTA 80 E EXTRAS ---
 _setup_proxy80() {
-    echo -e "${TXT_YELLOW}Configurando proxy SSH completo na porta 80...${RESET}"
+    echo -e "${TXT_YELLOW}Configurando proxies SSH (TCP, WebSocket e SOCKS5)...${RESET}"
     echo ""
-    echo -e "${TXT_CYAN}Tipos de proxy disponíveis na porta 80:${RESET}"
-    echo " [1] TCP direto (SSH over HTTP) — mais simples"
-    echo " [2] SOCKS5 (via dante) — suporta TCP+UDP"
-    echo " [3] WebSocket SSH (ws+ssh) — melhor compatibilidade com CDN"
+    echo -e "${TXT_CYAN}Tipos de proxy disponíveis:${RESET}"
+    echo " [1] TCP direto (SSH over HTTP) — Porta 8080"
+    echo " [2] SOCKS5 (via dante) — Porta 1080"
+    echo " [3] WebSocket SSH (ws+ssh) — Porta 80 (Recomendado para CDN)"
     echo " [4] Todos os modos (recomendado)"
     read -rp "Opção [1-4, Enter=4]: " proxy_opt
     proxy_opt="${proxy_opt:-4}"
 
-    # Verificar porta 80
-    if ss -tlnp 2>/dev/null | grep -q ":80 "; then
-        echo -e "${TXT_YELLOW}⚠  Porta 80 em uso. Liberando...${RESET}"
+    # Verificar porta 80 e 8080
+    if ss -tlnp 2>/dev/null | grep -qE ":(80|8080) "; then
+        echo -e "${TXT_YELLOW}⚠  Portas de proxy em uso. Liberando...${RESET}"
         systemctl stop nginx  2>/dev/null || true
         systemctl stop apache2 2>/dev/null || true
         fuser -k 80/tcp 2>/dev/null || true
+        fuser -k 8080/tcp 2>/dev/null || true
         sleep 1
     fi
 
     ensure_pkg socat socat
 
-    # --- MODO 1: TCP direto porta 80 → SSH 22 ---
+    # --- MODO 1: TCP direto porta 8080 → SSH 22 ---
     if [ "$proxy_opt" = "1" ] || [ "$proxy_opt" = "4" ]; then
         cat > /etc/systemd/system/turbonet-proxy80.service << 'P80EOF'
 [Unit]
-Description=TURBONET XRAY SSH Proxy TCP porta 80
+Description=TURBONET XRAY SSH Proxy TCP porta 8080
 After=network.target turbonet-dropbear.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:80,fork,reuseaddr TCP:127.0.0.1:22
+ExecStart=/usr/bin/socat TCP-LISTEN:8080,fork,reuseaddr TCP:127.0.0.1:22
 Restart=always
 RestartSec=3
 
@@ -303,7 +307,7 @@ SOCKS5EOF
         fi
     fi
 
-    # --- MODO 3: WebSocket SSH (porta 8880) ---
+    # --- MODO 3: WebSocket SSH (porta 80) ---
     if [ "$proxy_opt" = "3" ] || [ "$proxy_opt" = "4" ]; then
         cat > /usr/local/bin/turbonet-wssh.py << 'WSEOF'
 #!/usr/bin/env python3
@@ -358,7 +362,7 @@ WSEOF
 
         cat > /etc/systemd/system/turbonet-wssh.service << 'WSSVCEOF'
 [Unit]
-Description=TURBONET XRAY WebSocket SSH Bridge porta 8880
+Description=TURBONET XRAY WebSocket SSH Bridge porta 80
 After=network.target turbonet-dropbear.service
 
 [Service]
@@ -375,7 +379,7 @@ WSSVCEOF
         systemctl restart turbonet-wssh >/dev/null 2>&1
         sleep 1
         systemctl is-active --quiet turbonet-wssh 2>/dev/null && \
-            echo -e "${TXT_GREEN}✅ WebSocket SSH ativo na porta 8880${RESET}" || \
+            echo -e "${TXT_GREEN}✅ WebSocket SSH ativo na porta 80${RESET}" || \
             echo -e "${TXT_YELLOW}⚠  WebSocket SSH falhou.${RESET}"
     fi
 
@@ -412,8 +416,8 @@ WSSVCEOF
     echo ""
     echo -e " ${TXT_CYAN}Conexões disponíveis:${RESET}"
     echo -e "  SSH direto 443:     ${TXT_YELLOW}${pub_ip}:443${RESET} (via Xray fallback)"
-    echo -e "  SSH proxy TCP 80:   ${TXT_YELLOW}${pub_ip}:80${RESET}"
-    echo -e "  SSH WebSocket 8880: ${TXT_YELLOW}ws://${pub_ip}:8880${RESET}"
+    echo -e "  SSH proxy TCP 8080: ${TXT_YELLOW}${pub_ip}:8080${RESET}"
+    echo -e "  SSH WebSocket 80:   ${TXT_YELLOW}ws://${pub_ip}:80${RESET} (Ideal Azion CDN)"
     echo -e "  SOCKS5:             ${TXT_YELLOW}${pub_ip}:1080${RESET}"
     echo ""
     echo -e " ${TXT_CYAN}Configuração no app (HTTP Injector/HTTP Custom):${RESET}"
@@ -435,7 +439,7 @@ _remove_proxy80() {
     done
     rm -f /usr/local/bin/turbonet-wssh.py
     systemctl daemon-reload
-    echo -e "${TXT_GREEN}✅ Proxies porta 80/1080/8880 removidos.${RESET}"
+    echo -e "${TXT_GREEN}✅ Proxies removidos.${RESET}"
 }
 
 # --- SINCRONIZAR USERS.DB → SSH ---
@@ -493,8 +497,8 @@ _show_info() {
     echo -e " Porta: ${TXT_YELLOW}443${RESET} | Usuário+Senha do painel"
     echo -e " UDPGW: ${TXT_YELLOW}127.0.0.1:7300${RESET}"
     echo ""
-    echo -e "${TXT_CYAN}━━━━ MODO SSH PORTA 80 (proxy TCP) ━━━━━━━━━━${RESET}"
-    echo -e " Host: ${TXT_YELLOW}${pub_ip}${RESET} | Porta: ${TXT_YELLOW}80${RESET}"
+    echo -e "${TXT_CYAN}━━━━ MODO SSH PORTA 8080 (proxy TCP) ━━━━━━━━${RESET}"
+    echo -e " Host: ${TXT_YELLOW}${pub_ip}${RESET} | Porta: ${TXT_YELLOW}8080${RESET}"
     echo ""
     echo -e "${TXT_CYAN}━━━━ WEBSOCKET SSH (porta 80) ━━━━━━━━━━━━━${RESET}"
     echo -e " URL: ${TXT_YELLOW}ws://${pub_ip}:80${RESET}"
@@ -523,12 +527,12 @@ while true; do
     echo ""
     echo -e "${TXT_CYAN}[2] Instalar apenas Dropbear (porta 22)${RESET}"
     echo -e "${TXT_CYAN}[3] Configurar fallback no Xray (443→22)${RESET}"
-    echo -e "${TXT_CYAN}[4] Ativar proxy porta 80 + WS + SOCKS5${RESET}"
+    echo -e "${TXT_CYAN}[4] Ativar proxies (Porta 80, 8080, 1080)${RESET}"
     echo -e "${TXT_CYAN}[5] Sincronizar usuários DB → SSH${RESET}"
     echo -e "${TXT_CYAN}[6] Criar usuário SSH manualmente${RESET}"
     echo -e "${TXT_CYAN}[7] Ver info de conexão${RESET}"
     echo -e "${TXT_CYAN}[8] Ver logs Dropbear${RESET}"
-    echo -e "${TXT_RED}[9] Remover proxy 80/WS/SOCKS5${RESET}"
+    echo -e "${TXT_RED}[9] Remover proxies (80/8080/1080)${RESET}"
     echo -e "${TXT_RED}[10] Remover tudo (Dropbear + fallback + proxies)${RESET}"
     echo -e "${TXT_CYAN}[0] Voltar${RESET}"
     echo "-----------------------------------------"
