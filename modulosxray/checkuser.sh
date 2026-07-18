@@ -14,6 +14,7 @@
 # Correções Aplicadas:
 # - Compatibilidade estendida do Python (subprocess.run com stdout=PIPE em vez de capture_output)
 # - Hardening de arquivos (logs e pids gerados como 600)
+# - Força o uso do IP da VPS na geração dos links, ignorando domínios
 #
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO"; sleep 2' ERR
@@ -53,34 +54,16 @@ _get_api_port() {
         "$CONFIG_PATH" 2>/dev/null | head -1 || echo "1080"
 }
 
-# --- DETECCAO IP/DOMINIO ---
+# --- DETECCAO APENAS DE IP DA VPS ---
 _get_server_addr() {
     local addr=""
     
-    # 1) Tenta do preset.json (dominio configurado)
-    if [ -f "$PRESET_FILE" ] && command -v jq &>/dev/null; then
-        local domain
-        domain=$(jq -r '.domain // empty' "$PRESET_FILE" 2>/dev/null)
-        if [ -n "$domain" ]; then
-            addr="$domain"
-        fi
-    fi
+    # Consulta diretamente o IP público da VPS, ignorando domínios
+    addr=$(curl -4fsSL --max-time 5 https://icanhazip.com 2>/dev/null | tr -d '[:space:]' || \
+           curl -4fsSL --max-time 5 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || echo "")
     
-    # 2) Tenta do active_domain
-    if [ -z "$addr" ] && [ -f "$ACTIVE_DOMAIN_FILE" ]; then
-        local active_domain
-        active_domain=$(cat "$ACTIVE_DOMAIN_FILE" 2>/dev/null | tr -d '[:space:]')
-        if [ -n "$active_domain" ]; then
-            addr="$active_domain"
-        fi
-    fi
-    
-    # 3) Fallback: IP publico
     if [ -z "$addr" ]; then
-        addr=$(curl -4fsSL --max-time 5 https://icanhazip.com 2>/dev/null | tr -d '[:space:]' || echo "")
-        if [ -z "$addr" ]; then
-            addr="SEU_IP"
-        fi
+        addr="SEU_IP"
     fi
     
     echo "$addr"
