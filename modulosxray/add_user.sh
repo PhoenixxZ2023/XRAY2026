@@ -1,12 +1,12 @@
 #!/bin/bash
 # add_user.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
-#   - chmod 777 → 640 root:nogroup em todos os pontos (fluxo normal + rollbacks)
+#   - chmod 777 → 0640 root:nogroup em todos os pontos (fluxo normal + rollbacks)
 #   - trap duplo eliminado — _cleanup() centralizado com trap EXIT
 #   - Verificação de xray ativo com retry de até 5s (evita falso negativo em sistema lento)
 #   - Duplicidade case-insensitive — nome normalizado para minúsculas
 #   - generate_link exibe aviso quando preset.json não existe
-#   - Rollback chama _apply_config_perms() em vez de chmod 777 manual
+#   - INTEGRAÇÃO SSH: Cria o usuário no sistema operacional para Dropbear/SOCKS5 automaticamente.
 
 set -Eeuo pipefail
 
@@ -26,8 +26,6 @@ TITLE_BAR='\033[1;47;34m'
 export DEBIAN_FRONTEND=noninteractive
 
 # --- CLEANUP CENTRALIZADO ---
-# CORREÇÃO: trap único no EXIT — cobre saída normal, ERR e sinais.
-# Elimina a necessidade de redefinir trap no meio do script.
 _tmp_cfg=""
 _cleanup() {
     rm -f "$_tmp_cfg"
@@ -36,10 +34,8 @@ trap '_cleanup' EXIT
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
 
 # --- PERMISSÕES DO CONFIG ---
-# CORREÇÃO: 640 root:nogroup — Xray lê como nobody/nogroup, não precisa escrever.
-# Centralizado para garantir consistência em fluxo normal e rollbacks.
 _apply_config_perms() {
-    chmod 660 "$CONFIG_PATH"
+    chmod 0640 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
@@ -92,8 +88,6 @@ generate_uuid() {
 }
 
 # --- GERAÇÃO DO LINK VLESS A PARTIR DO PRESET ---
-# CORREÇÃO: exibe aviso explicativo quando preset.json não existe,
-# em vez de retornar string vazia silenciosamente.
 generate_link() {
     local uuid="$1" nick="$2"
 
@@ -136,8 +130,6 @@ generate_link() {
 }
 
 # --- VERIFICAÇÃO DE XRAY ATIVO COM RETRY ---
-# CORREÇÃO: tenta por até 5s antes de concluir falha.
-# sleep 1 simples anterior causava falso negativo em sistemas lentos.
 _wait_xray_active() {
     local tries=5
     while [ "$tries" -gt 0 ]; do
@@ -153,6 +145,7 @@ _wait_xray_active() {
 ensure_cmd jq jq
 mkdir -p "$(dirname "$USER_DB")" "$CONN_INFO_DIR"
 touch "$USER_DB"
+chmod 0600 "$USER_DB"
 
 if [ ! -s "$CONFIG_PATH" ]; then
     echo -e "${TXT_RED}❌ Config não encontrada: $CONFIG_PATH${RESET}"
@@ -184,17 +177,13 @@ if ! [[ "$raw_nick" =~ ^[a-zA-Z0-9]{5,9}$ ]]; then
     sleep 2; exit 1
 fi
 
-# CORREÇÃO: normaliza para minúsculas — evita que "User1" e "user1" coexistam.
-# Bash 4+ suporta ${var,,}; tr é fallback portável.
 nick=$(echo "$raw_nick" | tr '[:upper:]' '[:lower:]')
 
-# Duplicidade no DB (case-insensitive via normalização)
 if grep -q "^${nick}|" "$USER_DB" 2>/dev/null; then
-    echo -e "${TXT_RED}❌ Usuário '${nick}' já existe.${RESET}"
+    echo -e "${TXT_RED}❌ Usuário '${nick}' já existe no banco de dados.${RESET}"
     sleep 2; exit 1
 fi
 
-# Duplicidade no config.json
 if jq -e --arg nick "$nick" \
     '.inbounds[]? | select(.tag=="inbound-turbonet") | .settings.clients[]? | select(.email==$nick)' \
     "$CONFIG_PATH" >/dev/null 2>&1; then
@@ -202,25 +191,20 @@ if jq -e --arg nick "$nick" \
     sleep 2; exit 1
 fi
 
-# Validade
 read -rp "Dias de validade [Enter = 30]: " days
 [ -z "${days:-}" ] && days=30
 [[ "$days" =~ ^[0-9]+$ ]] || days=30
 (( days < 1 || days > 3650 )) && days=30
 
-# Senha para CheckUser (aplicativos VPN como Conecta4G, DTunnel)
 echo ""
-echo -e " ${TXT_CYAN}Senha para CheckUser${RESET} (apps VPN usam usuário+senha):"
+echo -e " ${TXT_CYAN}Senha para SSH, SOCKS5 e CheckUser${RESET}:"
 read -rp " Senha [Enter = gerar automaticamente]: " user_pass
 if [ -z "${user_pass:-}" ]; then
-    # Gera senha aleatória de 8 chars alfanuméricos
     user_pass=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 8)
     echo -e " Senha gerada: ${TXT_YELLOW}${user_pass}${RESET}"
 fi
-# Remove espaços da senha
 user_pass=$(echo "$user_pass" | tr -d '[:space:]')
 
-# Limite de conexões simultâneas
 echo ""
 read -rp " Limite de conexões [Enter = 0 = ilimitado]: " conn_limit
 [ -z "${conn_limit:-}" ] && conn_limit=0
@@ -229,7 +213,7 @@ read -rp " Limite de conexões [Enter = 0 = ilimitado]: " conn_limit
 uuid=$(generate_uuid) || { sleep 2; exit 1; }
 expiry="$(date -d "+${days} days" +%F)"
 
-# --- APLICA NO CONFIG (atômico + validação antes de mv) ---
+# --- APLICA NO CONFIG DO XRAY ---
 _tmp_cfg=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")
 
 jq --arg uuid "$uuid" --arg nick "$nick" '
@@ -247,10 +231,10 @@ fi
 
 cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
 mv -f "$_tmp_cfg" "$CONFIG_PATH"
-_tmp_cfg=""   # já movido — _cleanup não deve tentar remover
+_tmp_cfg=""
 _apply_config_perms
 
-# --- HOT RELOAD VIA API (sem derrubar conexões ativas) ---
+# --- HOT RELOAD VIA API ---
 _xray_api_port() {
     jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
 }
@@ -263,9 +247,9 @@ _hotreload_add() {
 }
 
 if _hotreload_add; then
-    echo -e "${TXT_GREEN}Usuário aplicado via API (sem restart).${RESET}"
+    echo -e "${TXT_GREEN}✅ Usuário aplicado via API no Xray (sem restart).${RESET}"
 else
-    echo -e "${TXT_YELLOW}API indisponível — recarregando serviço...${RESET}"
+    echo -e "${TXT_YELLOW}API indisponível — recarregando serviço Xray...${RESET}"
     if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 &&        ! systemctl restart xray >/dev/null 2>&1; then
         echo -e "${TXT_RED}❌ Falha ao recarregar Xray. Revertendo config...${RESET}"
         mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
@@ -283,9 +267,9 @@ else
     fi
 fi
 
-# --- GRAVA NO DB SOMENTE APÓS RESTART OK ---
-# Formato: nick|uuid|expiry|password|limit_connections
+# --- GRAVA NO DB ---
 echo "${nick}|${uuid}|${expiry}|${user_pass}|${conn_limit}" >> "$USER_DB"
+chmod 0600 "$USER_DB"
 
 link=$(generate_link "$uuid" "$nick")
 
@@ -300,13 +284,13 @@ user_file="${CONN_INFO_DIR}/${nick}.txt"
 } > "$user_file"
 chmod 0600 "$user_file"
 
-# --- CRIAR USUÁRIO SSH AUTOMATICAMENTE SE DROPBEAR ATIVO ---
-if systemctl is-active --quiet turbonet-dropbear 2>/dev/null; then
+# --- INTEGRAÇÃO SSH/SOCKS5: CRIAR USUÁRIO NO LINUX AUTOMATICAMENTE ---
+if systemctl is-active --quiet turbonet-dropbear 2>/dev/null || systemctl is-active --quiet turbonet-socks5 2>/dev/null; then
     if ! id "$nick" &>/dev/null; then
         useradd -M -s /bin/false "$nick" 2>/dev/null || true
     fi
     echo "${nick}:${user_pass}" | chpasswd 2>/dev/null || true
-    echo -e "${TXT_GREEN}Usuário SSH criado automaticamente.${RESET}"
+    echo -e "${TXT_GREEN}✅ Conta local configurada (Acesso liberado ao SSH e SOCKS5).${RESET}"
 fi
 
 # --- RESULTADO ---
