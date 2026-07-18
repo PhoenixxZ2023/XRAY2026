@@ -1,20 +1,13 @@
 #!/bin/bash
-# add_user.sh - TURBONET XRAY V1.2
+# add_user.sh - TURBONET XRAY V1.0
 # Correções aplicadas:
 #   - chmod 777 → 640 root:nogroup em todos os pontos (fluxo normal + rollbacks)
 #   - trap duplo eliminado — _cleanup() centralizado com trap EXIT
 #   - Verificação de xray ativo com retry de até 5s (evita falso negativo em sistema lento)
 #   - Duplicidade case-insensitive — nome normalizado para minúsculas
+#   - generate_link exibe aviso quando preset.json não existe
 #   - Rollback chama _apply_config_perms() em vez de chmod 777 manual
-#   - V1.2: Adicionado campo SENHA na criação de usuário
-#   - V1.2: Formato users.db: nick|uuid|expiry|password|conn_limit
-#   - V1.2: Validação de senha (mín 4 caracteres) + sanitização
-#   - V1.2: Limite de conexões (padrão ilimitado = 0)
-#   - V1.2: Compatível com CheckUser API (/checkuserxray)
-#
-# V1.0 (original):
-#   - Todas as correções listadas acima
-#
+
 set -Eeuo pipefail
 
 CONFIG_PATH="/usr/local/etc/xray/config.json"
@@ -46,7 +39,7 @@ trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; 
 # CORREÇÃO: 640 root:nogroup — Xray lê como nobody/nogroup, não precisa escrever.
 # Centralizado para garantir consistência em fluxo normal e rollbacks.
 _apply_config_perms() {
-    chmod 640 "$CONFIG_PATH"
+    chmod 660 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
@@ -77,13 +70,6 @@ ensure_cmd() {
         dnf|yum) "$_PKG_MANAGER" install -y "$pkg" >>"$LOG_FILE" 2>&1 ;;
         pacman)  pacman -Sy --noconfirm "$pkg"      >>"$LOG_FILE" 2>&1 ;;
     esac
-}
-
-# --- GERAÇÃO DE SENHA ALEATÓRIA ---
-generate_password() {
-    local length="${1:-8}"
-    # Gera senha alfanumérica com caracteres seguros
-    tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c "$length"
 }
 
 # --- UUID COM FALLBACK E VALIDAÇÃO ---
@@ -125,9 +111,9 @@ generate_link() {
 
     local network port domain tls
     network=$(jq -r '.network // ""' "$PRESET_FILE" 2>/dev/null || echo "")
-    port=$(jq -r    '.port     // ""' "$PRESET_FILE" 2>/dev/null || echo "")
-    domain=$(jq -r  '.domain   // ""' "$PRESET_FILE" 2>/dev/null || echo "")
-    tls=$(jq -r     '.tls      // "false"' "$PRESET_FILE" 2>/dev/null || echo "false")
+    port=$(jq -r    '.port    // ""' "$PRESET_FILE" 2>/dev/null || echo "")
+    domain=$(jq -r  '.domain  // ""' "$PRESET_FILE" 2>/dev/null || echo "")
+    tls=$(jq -r     '.tls     // "false"' "$PRESET_FILE" 2>/dev/null || echo "false")
 
     [ -z "$network" ] || [ -z "$port" ] || [ -z "$domain" ] && {
         echo -e "${TXT_YELLOW}⚠  preset.json incompleto — campos network/port/domain ausentes.${RESET}" >&2
@@ -144,13 +130,6 @@ generate_link() {
         ws)     link="vless://${uuid}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#${nick}" ;;
         xhttp)  link="vless://${uuid}@${domain}:${port}?mode=auto&path=%2F&security=${sec}&encryption=none&host=${domain}&type=xhttp&sni=${domain}#${nick}" ;;
         vision) link="vless://${uuid}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#${nick}" ;;
-        httpupgrade)
-            link="vless://${uuid}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=httpupgrade&sni=${domain}#${nick}" ;;
-        h2)
-            link="vless://${uuid}@${domain}:${port}?path=%2F&security=tls&encryption=none&host=${domain}&type=h2&sni=${domain}#${nick}" ;;
-        trojan)
-            echo -e "${TXT_YELLOW}⚠  Trojan usa senha, não UUID — link não gerado para este protocolo.${RESET}" >&2
-            return ;;
         *)      link="vless://${uuid}@${domain}:${port}?security=${sec}&encryption=none&type=tcp&sni=${domain}#${nick}" ;;
     esac
     echo "$link"
@@ -206,6 +185,7 @@ if ! [[ "$raw_nick" =~ ^[a-zA-Z0-9]{5,9}$ ]]; then
 fi
 
 # CORREÇÃO: normaliza para minúsculas — evita que "User1" e "user1" coexistam.
+# Bash 4+ suporta ${var,,}; tr é fallback portável.
 nick=$(echo "$raw_nick" | tr '[:upper:]' '[:lower:]')
 
 # Duplicidade no DB (case-insensitive via normalização)
@@ -222,55 +202,30 @@ if jq -e --arg nick "$nick" \
     sleep 2; exit 1
 fi
 
-# --- SENHA ---
-echo ""
-echo -e " ${TXT_CYAN}Senha para CheckUser${RESET} (apps VPN usam usuário+senha):"
-echo " - Mínimo 4 caracteres"
-read -rp " Senha [Enter = gerar automaticamente]: " password
-
-if [ -z "$password" ]; then
-    password=$(generate_password 8)
-    echo -e " ${TXT_GREEN}Senha gerada: ${password}${RESET}"
-fi
-
-if [ ${#password} -lt 4 ]; then
-    echo -e "${TXT_RED}❌ Senha muito curta (mín 4 caracteres).${RESET}"
-    sleep 2; exit 1
-fi
-
-# Remove caracteres perigosos da senha (evita problemas no DB)
-password=$(echo "$password" | tr -cd 'a-zA-Z0-9@#$%&*+-=._')
-if [ -z "$password" ]; then
-    echo -e "${TXT_RED}❌ Senha contém apenas caracteres inválidos.${RESET}"
-    sleep 2; exit 1
-fi
-
-# --- LIMITE DE CONEXÕES ---
-echo ""
-echo -e " ${TXT_CYAN}Limite de conexões simultâneas${RESET}:"
-echo "   [0] Ilimitado (padrão)"
-echo "   [1] Apenas 1 dispositivo"
-echo "   [2] Até 2 dispositivos"
-echo "   [n] Número específico (máx 100)"
-read -rp " Limite [Enter = 0 = ilimitado]: " conn_limit
-
-[ -z "$conn_limit" ] && conn_limit=0
-
-if ! [[ "$conn_limit" =~ ^[0-9]+$ ]]; then
-    conn_limit=0
-fi
-
-if [ "$conn_limit" -gt 100 ]; then
-    conn_limit=100
-fi
-
-# --- VALIDADE ---
+# Validade
 read -rp "Dias de validade [Enter = 30]: " days
 [ -z "${days:-}" ] && days=30
 [[ "$days" =~ ^[0-9]+$ ]] || days=30
 (( days < 1 || days > 3650 )) && days=30
 
-# --- GERAÇÃO ---
+# Senha para CheckUser (aplicativos VPN como Conecta4G, DTunnel)
+echo ""
+echo -e " ${TXT_CYAN}Senha para CheckUser${RESET} (apps VPN usam usuário+senha):"
+read -rp " Senha [Enter = gerar automaticamente]: " user_pass
+if [ -z "${user_pass:-}" ]; then
+    # Gera senha aleatória de 8 chars alfanuméricos
+    user_pass=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 8)
+    echo -e " Senha gerada: ${TXT_YELLOW}${user_pass}${RESET}"
+fi
+# Remove espaços da senha
+user_pass=$(echo "$user_pass" | tr -d '[:space:]')
+
+# Limite de conexões simultâneas
+echo ""
+read -rp " Limite de conexões [Enter = 0 = ilimitado]: " conn_limit
+[ -z "${conn_limit:-}" ] && conn_limit=0
+[[ "$conn_limit" =~ ^[0-9]+$ ]] || conn_limit=0
+
 uuid=$(generate_uuid) || { sleep 2; exit 1; }
 expiry="$(date -d "+${days} days" +%F)"
 
@@ -304,14 +259,14 @@ _hotreload_add() {
     [ -z "${api_port:-}" ] && return 1
     local user_json
     user_json=$(jq -n --arg id "$uuid" --arg email "$nick" '{"id":$id,"email":$email,"level":0}')
-    /usr/local/bin/xray api adduser -server="127.0.0.1:${api_port}" -inboundTag="inbound-turbonet" -user="$user_json" >/dev/null 2>&1
+    /usr/local/bin/xray api adduser         -server="127.0.0.1:${api_port}"         -inboundTag="inbound-turbonet"         -user="$user_json" >/dev/null 2>&1
 }
 
 if _hotreload_add; then
     echo -e "${TXT_GREEN}Usuário aplicado via API (sem restart).${RESET}"
 else
     echo -e "${TXT_YELLOW}API indisponível — recarregando serviço...${RESET}"
-    if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && ! systemctl restart xray >/dev/null 2>&1; then
+    if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 &&        ! systemctl restart xray >/dev/null 2>&1; then
         echo -e "${TXT_RED}❌ Falha ao recarregar Xray. Revertendo config...${RESET}"
         mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
         _apply_config_perms
@@ -328,37 +283,40 @@ else
     fi
 fi
 
-# --- GRAVA NO DB (V1.2: com senha e limite) ---
-# Formato: nick|uuid|expiry|password|conn_limit
-echo "${nick}|${uuid}|${expiry}|${password}|${conn_limit}" >> "$USER_DB"
+# --- GRAVA NO DB SOMENTE APÓS RESTART OK ---
+# Formato: nick|uuid|expiry|password|limit_connections
+echo "${nick}|${uuid}|${expiry}|${user_pass}|${conn_limit}" >> "$USER_DB"
 
 link=$(generate_link "$uuid" "$nick")
 
-# Arquivo individual do usuário
 user_file="${CONN_INFO_DIR}/${nick}.txt"
 {
     echo "# TURBONET XRAY - Usuário: ${nick}"
     echo "# Criado em: $(date '+%Y-%m-%d %H:%M:%S')"
     echo "NOME=${nick}"
     echo "UUID=${uuid}"
-    echo "SENHA=${password}"
     echo "EXPIRA=${expiry}"
-    echo "LIMIT_CONN=${conn_limit}"
     [ -n "$link" ] && echo "LINK=${link}"
 } > "$user_file"
 chmod 0600 "$user_file"
+
+# --- CRIAR USUÁRIO SSH AUTOMATICAMENTE SE DROPBEAR ATIVO ---
+if systemctl is-active --quiet turbonet-dropbear 2>/dev/null; then
+    if ! id "$nick" &>/dev/null; then
+        useradd -M -s /bin/false "$nick" 2>/dev/null || true
+    fi
+    echo "${nick}:${user_pass}" | chpasswd 2>/dev/null || true
+    echo -e "${TXT_GREEN}Usuário SSH criado automaticamente.${RESET}"
+fi
 
 # --- RESULTADO ---
 clear
 echo -e "${TXT_GREEN}✅ Usuário criado com sucesso!${RESET}"
 echo "-----------------------------------------"
-echo -e " 👤 Nome:   ${TXT_CYAN}${nick}${RESET}"
-echo -e " 🔑 UUID:   ${TXT_YELLOW}${uuid}${RESET}"
-echo -e " 🔐 Senha:  ${TXT_YELLOW}${password}${RESET}"
-echo -e " 📅 Expira: ${expiry} (${days} dias)"
-echo -e " 🔢 Limite: ${conn_limit} conexão(ões)"
+echo -e " 👤 Nome:    ${TXT_CYAN}${nick}${RESET}"
+echo -e " 🔑 UUID:    ${TXT_YELLOW}${uuid}${RESET}"
+echo -e " 🔐 Senha:   ${TXT_YELLOW}${user_pass}${RESET}"
+echo -e " 📅 Expira:  ${expiry} (${days} dias)"
+echo -e " 🔗 Limite:  ${conn_limit} conexões simultâneas"
 echo "-----------------------------------------"
-echo ""
-echo -e "${TXT_CYAN}⚠ Anote a senha — não será exibida novamente!${RESET}"
-[ -n "$link" ] && echo -e "${TXT_YELLOW}🔗 Link: ${link}${RESET}"
 read -rp "Enter para voltar..."
