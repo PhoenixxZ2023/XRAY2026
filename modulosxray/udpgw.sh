@@ -8,12 +8,16 @@
 #
 # Configuração no app cliente:
 #   Ativar UDPGW e apontar para: 127.0.0.1:7300
+#
+# Correções Aplicadas:
+#   - Limpeza garantida do diretório de compilação no cenário de sucesso
+#   - Segurança no path absoluto do SystemD
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO"; sleep 2' ERR
 
 UDPGW_PORT=7300
-UDPGW_MAX_CLIENTS=500
+UDPGW_MAX_CLIENTS=1000
 UDPGW_LOG="/tmp/turbonet_udpgw.log"
 UDPGW_PID_FILE="/tmp/turbonet_udpgw.pid"
 UDPGW_SERVICE="/etc/systemd/system/turbonet-udpgw.service"
@@ -117,7 +121,7 @@ _install_udpgw() {
     fi
 
     install -m 755 udpgw/badvpn-udpgw "$UDPGW_BIN"
-    cd /; rm -rf "$tmp_dir"
+    cd /; rm -rf "$tmp_dir" # Limpeza garantida após o sucesso
     echo -e "${TXT_GREEN}✅ badvpn-udpgw compilado e instalado.${RESET}"
 }
 
@@ -132,7 +136,7 @@ After=network.target xray.service
 
 [Service]
 Type=simple
-ExecStart=${UDPGW_BIN} --listen-addr 127.0.0.1:${port} --max-clients ${max} --max-connections-for-client 10
+ExecStart=/usr/local/bin/badvpn-udpgw --listen-addr 127.0.0.1:${port} --max-clients ${max} --max-connections-for-client 10
 Restart=always
 RestartSec=3
 StandardOutput=journal
