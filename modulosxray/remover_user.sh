@@ -3,7 +3,6 @@
 # Correções aplicadas:
 #   - chmod 777 → _apply_config_perms() (640 root:nogroup) nos 3 pontos
 #   - _cleanup() + trap EXIT desde o início — elimina trap tardio após mktemp
-#   - Variável de exclusão do limitador ajustada para _tmp_db para ser pega pelo trap EXIT
 #   - _wait_xray_active() com retry de 5s — substitui sleep 1 + is-active simples
 #   - identifier normalizado para minúsculas quando não é UUID — evita dessincronização DB/config
 #   - chmod 600 explícito no USER_DB após mv
@@ -39,7 +38,7 @@ trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; 
 # --- PERMISSÕES DO CONFIG ---
 # CORREÇÃO: centralizada — 640 root:nogroup em fluxo normal e em todos os rollbacks.
 _apply_config_perms() {
-    chmod 0640 "$CONFIG_PATH"
+    chmod 0660 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
@@ -210,7 +209,7 @@ after_count=$(jq  '[.inbounds[]? | select(.tag=="inbound-turbonet").settings.cli
 
 mv -f "$_tmp_cfg" "$CONFIG_PATH"
 _tmp_cfg=""   # já movido — _cleanup não deve tentar remover
-
+# CORREÇÃO: _apply_config_perms() em vez de chmod 777.
 _apply_config_perms
 
 # --- HELPER: porta da API do Xray ---
@@ -268,23 +267,6 @@ if [ "$found_in_db" -eq 1 ] && [ -s "$USER_DB" ]; then
     # CORREÇÃO: permissão explícita no DB — independe da umask do processo.
     chmod 600 "$USER_DB"
 fi
-
-# ==========================================
-# LIMPEZA DO LIMITADOR INSERIDA AQUI:
-# ==========================================
-limit_id="${nick_real:-$identifier}"
-if [ -n "$limit_id" ]; then
-    for db in "/opt/XrayTools/limits.db" "/opt/XrayTools/usage.db" "/opt/XrayTools/session.db"; do
-        if [ -f "$db" ]; then
-            _tmp_db=$(mktemp "${db}.tmp.XXXXXX")
-            awk -F'|' -v id="$limit_id" '$1!=id {print $0}' "$db" > "$_tmp_db"
-            mv -f "$_tmp_db" "$db"
-            _tmp_db=""
-            chmod 0600 "$db"
-        fi
-    done
-fi
-# ==========================================
 
 # CORREÇÃO: flag booleana rastreia se o arquivo existia antes da remoção.
 # Evita exibir "apagado" para arquivo que nunca existiu.
