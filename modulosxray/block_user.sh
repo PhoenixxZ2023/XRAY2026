@@ -35,7 +35,7 @@ export DEBIAN_FRONTEND=noninteractive
 # --- PERMISSÕES DO CONFIG ---
 # CORREÇÃO: centralizada — 640 root:nogroup em fluxo normal e todos os rollbacks.
 _apply_config_perms() {
-    chmod 0640 "$CONFIG_PATH"
+    chmod 0660 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
@@ -258,6 +258,11 @@ if _api_remove "$user_block" && _api_add "LOCKED_${user_block}" "$FAKE_UUID"; th
 else
     echo -e "${TXT_YELLOW}API indisponível — recarregando serviço...${RESET}"
     _fallback_reload || exit 1
+fi
+
+# Bloquear SSH automaticamente se Dropbear ativo
+if systemctl is-active --quiet turbonet-dropbear 2>/dev/null; then
+    passwd -l "$user_block" 2>/dev/null || true
 fi
 
 echo ""
