@@ -308,9 +308,9 @@ SOCKS5EOF
         cat > /usr/local/bin/turbonet-wssh.py << 'WSEOF'
 #!/usr/bin/env python3
 # TURBONET XRAY - WebSocket SSH Bridge
-# Escuta na porta 8880, faz bridge para SSH 127.0.0.1:22
+# Escuta na porta 80, faz bridge para SSH 127.0.0.1:22
 import asyncio, socket, sys
-WS_PORT  = 8880
+WS_PORT  = 80
 SSH_HOST = '127.0.0.1'
 SSH_PORT = 22
 
@@ -496,8 +496,8 @@ _show_info() {
     echo -e "${TXT_CYAN}━━━━ MODO SSH PORTA 80 (proxy TCP) ━━━━━━━━━━${RESET}"
     echo -e " Host: ${TXT_YELLOW}${pub_ip}${RESET} | Porta: ${TXT_YELLOW}80${RESET}"
     echo ""
-    echo -e "${TXT_CYAN}━━━━ WEBSOCKET SSH (porta 8880) ━━━━━━━━━━━━━${RESET}"
-    echo -e " URL: ${TXT_YELLOW}ws://${pub_ip}:8880${RESET}"
+    echo -e "${TXT_CYAN}━━━━ WEBSOCKET SSH (porta 80) ━━━━━━━━━━━━━${RESET}"
+    echo -e " URL: ${TXT_YELLOW}ws://${pub_ip}:80${RESET}"
     echo ""
     echo -e "${TXT_CYAN}━━━━ SOCKS5 (porta 1080) ━━━━━━━━━━━━━━━━━━━${RESET}"
     echo -e " Host: ${TXT_YELLOW}${pub_ip}:1080${RESET} (Exige Usuário/Senha do painel)"
