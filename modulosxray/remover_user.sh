@@ -8,6 +8,7 @@
 #   - chmod 600 explícito no USER_DB após mv
 #   - Flag file_removed para exibição correta do arquivo apagado
 #   - UUID truncado na listagem inicial — não expõe credencial completa no terminal
+#   - INTEGRAÇÃO SSH: Remove o usuário local do Linux para bloquear acesso ao Dropbear e SOCKS5
 
 set -Eeuo pipefail
 
@@ -26,7 +27,6 @@ RESET='\033[0m'
 export DEBIAN_FRONTEND=noninteractive
 
 # --- CLEANUP CENTRALIZADO ---
-# CORREÇÃO: registrado no início via trap EXIT — cobre toda saída (normal, ERR, sinal).
 _tmp_cfg=""
 _tmp_db=""
 _cleanup() {
@@ -36,9 +36,8 @@ trap '_cleanup' EXIT
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
 
 # --- PERMISSÕES DO CONFIG ---
-# CORREÇÃO: centralizada — 640 root:nogroup em fluxo normal e em todos os rollbacks.
 _apply_config_perms() {
-    chmod 0660 "$CONFIG_PATH"
+    chmod 0640 "$CONFIG_PATH"
     chown root:nogroup "$CONFIG_PATH"
 }
 
@@ -67,7 +66,6 @@ ensure_cmd() {
     esac
 }
 
-# Aceita nome (5-9 alfanum) OU UUID no formato padrão
 validate_identifier() {
     local id="$1"
     [[ "$id" =~ ^[a-zA-Z0-9]{5,9}$ ]] && return 0
@@ -75,8 +73,6 @@ validate_identifier() {
     return 1
 }
 
-# --- VERIFICAÇÃO DE XRAY ATIVO COM RETRY ---
-# CORREÇÃO: tenta por até 5s — evita falso negativo em sistema sob carga.
 _wait_xray_active() {
     local tries=5
     while [ "$tries" -gt 0 ]; do
@@ -114,8 +110,6 @@ echo ""
 if [ -s "$USER_DB" ]; then
     echo -e "${TXT_CYAN}Usuários cadastrados:${RESET}"
     echo "-----------------------------------------"
-    # CORREÇÃO: UUID truncado — exibe apenas primeiros 8 chars na tabela.
-    # UUID completo permanece acessível em users.db e no arquivo individual.
     printf "%-12s %-14s %-12s\n" "NOME" "UUID" "EXPIRA"
     echo "-----------------------------------------"
     while IFS='|' read -r name uuid expiry _rest; do
@@ -137,9 +131,6 @@ if ! validate_identifier "$identifier"; then
     sleep 2; exit 1
 fi
 
-# CORREÇÃO: normaliza para minúsculas apenas se for nome (não UUID).
-# Evita dessincronização entre DB (minúsculas) e config.json quando
-# operador digita "User1" mas o registro está como "user1".
 if [[ ! "$identifier" =~ ^[0-9a-fA-F]{8}- ]]; then
     identifier=$(echo "$identifier" | tr '[:upper:]' '[:lower:]')
 fi
@@ -165,7 +156,7 @@ if [ "$found_in_config" -eq 0 ] && [ "$found_in_db" -eq 0 ]; then
     sleep 2; exit 0
 fi
 
-# Resolve nome real para limpeza do arquivo de info
+# Resolve nome real para limpeza do arquivo de info e SSH
 nick_real=""
 if [ "$found_in_db" -eq 1 ] && [ -s "$USER_DB" ]; then
     nick_real=$(awk -F'|' -v id="$identifier" '($1==id || $2==id){print $1; exit}' "$USER_DB" 2>/dev/null || echo "")
@@ -208,8 +199,7 @@ before_count=$(jq '[.inbounds[]? | select(.tag=="inbound-turbonet").settings.cli
 after_count=$(jq  '[.inbounds[]? | select(.tag=="inbound-turbonet").settings.clients[]?] | length' "$_tmp_cfg"    2>/dev/null || echo 0)
 
 mv -f "$_tmp_cfg" "$CONFIG_PATH"
-_tmp_cfg=""   # já movido — _cleanup não deve tentar remover
-# CORREÇÃO: _apply_config_perms() em vez de chmod 777.
+_tmp_cfg=""
 _apply_config_perms
 
 # --- HELPER: porta da API do Xray ---
@@ -221,13 +211,6 @@ _api_remove() {
     local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
     /usr/local/bin/xray api removeuser -server="127.0.0.1:${p}" \
         -inboundTag="inbound-turbonet" -email="$email" >/dev/null 2>&1
-}
-_api_add() {
-    local email="$1" id="$2"
-    local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
-    local uj; uj=$(jq -n --arg id "$id" --arg e "$email" '{"id":$id,"email":$e,"level":0}')
-    /usr/local/bin/xray api adduser -server="127.0.0.1:${p}" \
-        -inboundTag="inbound-turbonet" -user="$uj" >/dev/null 2>&1
 }
 _fallback_reload() {
     local bak_restore="${1:-}"
@@ -263,13 +246,10 @@ if [ "$found_in_db" -eq 1 ] && [ -s "$USER_DB" ]; then
     _tmp_db=$(mktemp "${USER_DB}.tmp.XXXXXX")
     awk -F'|' -v id="$identifier" '($1!=id && $2!=id){print $0}' "$USER_DB" > "$_tmp_db"
     mv -f "$_tmp_db" "$USER_DB"
-    _tmp_db=""   # já movido
-    # CORREÇÃO: permissão explícita no DB — independe da umask do processo.
+    _tmp_db=""
     chmod 600 "$USER_DB"
 fi
 
-# CORREÇÃO: flag booleana rastreia se o arquivo existia antes da remoção.
-# Evita exibir "apagado" para arquivo que nunca existiu.
 file_removed=0
 if [ -n "$nick_real" ]; then
     user_file="${CONN_INFO_DIR}/${nick_real}.txt"
@@ -277,6 +257,14 @@ if [ -n "$nick_real" ]; then
         rm -f "$user_file"
         file_removed=1
     fi
+fi
+
+# --- INTEGRAÇÃO SSH: REMOVER USUÁRIO DO SISTEMA (Dropbear/SOCKS5) ---
+ssh_removed=0
+if [ -n "$nick_real" ] && id "$nick_real" &>/dev/null; then
+    # -f força a deleção mesmo que o usuário esteja logado ativamente
+    userdel -f "$nick_real" 2>/dev/null || true
+    ssh_removed=1
 fi
 
 # --- RESULTADO ---
@@ -289,6 +277,7 @@ if [ "$removed_config" -gt 0 ] || [ "$found_in_db" -eq 1 ]; then
     [ "$removed_config" -gt 0 ] && echo -e " Config:  ${TXT_GREEN}removido do Xray${RESET}"
     [ "$found_in_db"    -eq 1 ] && echo -e " DB:      ${TXT_GREEN}removido do banco${RESET}"
     [ "$file_removed"   -eq 1 ] && echo -e " Arquivo: ${TXT_GREEN}${CONN_INFO_DIR}/${nick_real}.txt apagado${RESET}"
+    [ "$ssh_removed"    -eq 1 ] && echo -e " SSH/SOCKS:${TXT_GREEN}acesso local bloqueado${RESET}"
     echo "-----------------------------------------"
 else
     echo -e "${TXT_RED}⚠  Nenhum dado removido (usuário não estava no config).${RESET}"
