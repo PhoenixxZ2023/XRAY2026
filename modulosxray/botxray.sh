@@ -1,15 +1,13 @@
 #!/bin/bash
-# botxray.sh - TURBONET XRAY V1.0
-# Correções aplicadas:
+# botxray.sh - TURBONET XRAY V1.3 (PRO)
+# Correções e Hardening:
 #   - Wrappers setuid: chmod 4755 → 4750 + chown root:botxray — apenas botxray executa como root
-#   - restore_bot.sh: chmod 0644 → 640 root:nogroup no config.json (Alinhado com todos os scripts)
-#   - restore_bot.sh: whitelist de paths mais restrita — bloqueia substituição do venv
-#   - Token lido com read -r + trim automático — compatível com todos os terminais SSH
+#   - C Wrapper Dinâmico: Repassa os argumentos (argv) para o bash, permitindo CLI args.
+#   - restore_bot.sh: Integração Híbrida SSH/SOCKS5 após restore via Telegram.
+#   - restore_bot.sh: chmod 640 root:nogroup no config.json (Alinhado com todos os scripts)
+#   - Integração Total: Adicionado wrap_renew_user para suportar renovações via bot.
 #   - ReadWritePaths remove /usr/local/bin — bot não precisa escrever em scripts do sistema
-#   - chown -R cirúrgico — não sobrescreve permissões de .bot_env e botxray.py
-#   - _wait_service_active() com retry de 5s substitui sleep 2 + is-active simples
 #   - /usr/local/etc/xray/ com chmod 770 root:nogroup — botxray cria tmpfiles para os.replace()
-#   - PrivateTmp=true impede uso de /tmp cross-device; tmpfile agora no mesmo dir do config
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (codigo: $?)"; read -rp "Enter...";' ERR
@@ -68,7 +66,7 @@ func_install_bot() {
     : > "$LOG_FILE"
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}      INSTALADOR BOT TELEGRAM - V1.0         ${RESET}"
+    echo -e "${AMARELO}      INSTALADOR BOT TELEGRAM - V1.3 (PRO)       ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
     echo ""
 
@@ -108,7 +106,8 @@ func_install_bot() {
     # --- WRAPPERS SETUID EM C ---
     echo ""
     echo "Compilando wrappers setuid..."
-    for s in add_user remover_user block_user unblock_user backup_bot restore_bot; do
+    # ⚠️ Adicionado 'renew_user' à lista de wrappers compilados
+    for s in add_user remover_user block_user unblock_user renew_user backup_bot restore_bot; do
         cat > /tmp/wrap_${s}.c << EOF
 #include <unistd.h>
 #include <stdlib.h>
@@ -117,8 +116,15 @@ int main(int argc, char *argv[]) {
     putenv("TERM=xterm");
     putenv("HOME=/opt/XrayTools");
     putenv("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-    char *args[] = {"/bin/bash", "/usr/local/bin/${s}.sh", (char*)0};
-    execv("/bin/bash", args);
+    
+    // Repassa os argumentos dinamicamente para suportar chamadas via CLI do bot
+    char **new_args = malloc((argc + 2) * sizeof(char*));
+    new_args[0] = "/bin/bash";
+    new_args[1] = "/usr/local/bin/${s}.sh";
+    for(int i = 1; i < argc; i++) new_args[i+1] = argv[i];
+    new_args[argc+1] = NULL;
+    
+    execv("/bin/bash", new_args);
     return 1;
 }
 EOF
@@ -159,6 +165,7 @@ for old, new in [
     ('"/usr/local/bin/remover_user.sh"', '"/usr/local/bin/wrap_remover_user"'),
     ('"/usr/local/bin/block_user.sh"',   '"/usr/local/bin/wrap_block_user"'),
     ('"/usr/local/bin/unblock_user.sh"', '"/usr/local/bin/wrap_unblock_user"'),
+    ('"/usr/local/bin/renew_user.sh"',   '"/usr/local/bin/wrap_renew_user"'),
     ('"/usr/local/bin/backup_bot.sh"',   '"/usr/local/bin/wrap_backup_bot"'),
     ('"/usr/local/bin/restore_bot.sh"',  '"/usr/local/bin/wrap_restore_bot"'),
 ]:
@@ -214,7 +221,7 @@ OUT_DIR="/root/backups"
 mkdir -p "$OUT_DIR"
 ts="$(date +%Y%m%d_%H%M%S)"
 OUT_FILE="${OUT_DIR}/backup_turbonet_bot_${ts}.tar.gz"
-[ -d /opt/XrayTools      ] || { echo "ERR: /opt/XrayTools ausente"; exit 2; }
+[ -d /opt/XrayTools       ] || { echo "ERR: /opt/XrayTools ausente"; exit 2; }
 [ -d /usr/local/etc/xray ] || { echo "ERR: /usr/local/etc/xray ausente"; exit 2; }
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -304,6 +311,16 @@ chown root:nogroup /usr/local/etc/xray/config.json 2>/dev/null || true
     chmod 640 /opt/TurbonetCoreSSL/privkey.pem 2>/dev/null || true
     chown root:nogroup /opt/TurbonetCoreSSL/privkey.pem 2>/dev/null || true
 }
+
+# ⚠️ INTEGRAÇÃO SSH: Re-sincronizar usuários e senhas para Dropbear/SOCKS5
+if [ -s /opt/XrayTools/users.db ]; then
+    while IFS='|' read -r nick uuid expiry pass limit _rest; do
+        [ -n "${nick:-}" ] && [ -n "${pass:-}" ] || continue
+        id "$nick" &>/dev/null || useradd -M -s /bin/false "$nick" 2>/dev/null || true
+        echo "${nick}:${pass}" | chpasswd 2>/dev/null || true
+    done < /opt/XrayTools/users.db
+fi
+
 systemctl restart xray    >/dev/null 2>&1 || true
 systemctl restart botxray >/dev/null 2>&1 || true
 
@@ -432,7 +449,7 @@ func_view_logs() {
 while true; do
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.0        ${RESET}"
+    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.3        ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
 
     status_msg="${VERMELHO}NÃO INSTALADO${RESET}"
