@@ -345,6 +345,7 @@ menu_display() {
     echo -e "${TXT_CYAN}[16] CHECKUSER (CONSULTA POR APP VPN)${RESET}"
     echo -e "${TXT_CYAN}[17] UDPGW (RESOLVE UDP NO TÚNEL)${RESET}"
     echo -e "${TXT_CYAN}[18] SSH FALLBACK (SSH NA PORTA 443)${RESET}"
+    echo -e "${TXT_CYAN}[19] RENOVAR USUÁRIO${RESET}"
     echo -e "${TXT_YELLOW}[99] ATUALIZAR MÓDULOS (FORÇA DOWNLOAD)${RESET}"
     echo -e "${TXT_CYAN}[00] SAIR${RESET}"
     echo "-----------------------------------------"
@@ -374,7 +375,8 @@ menu_display() {
         15)   run_module "vercel_relay.sh"      "CDN Relay Vercel" ;;
         16)   run_module "checkuser.sh"          "CheckUser" ;;
         17)   run_module "udpgw.sh"              "UDPGW" ;;
-        18)   run_module "ssh_fallback.sh"     "SSH Fallback" ;;
+        18)   run_module "ssh_fallback.sh"      "SSH Fallback" ;;
+        19)   run_module "renew_user.sh"        "Renovar Usuário" ;;
         99)
             # Usa download_module() — baixa e valida SEM executar.
             # run_module() sempre executa o script após download, travando em módulos
@@ -390,7 +392,7 @@ menu_display() {
                 add_user.sh remover_user.sh lista_users.sh core_manager.sh
                 remover_expirados.sh uninstall.sh limiterxray.sh botxray.sh
                 backup.sh block_user.sh unblock_user.sh onlinexray.sh
-                certxray.sh bbr.sh check_api.sh vercel_relay.sh checkuser.sh udpgw.sh ssh_fallback.sh
+                certxray.sh bbr.sh check_api.sh vercel_relay.sh checkuser.sh udpgw.sh ssh_fallback.sh renew_user.sh
             )
 
             local ok=0 fail=0
