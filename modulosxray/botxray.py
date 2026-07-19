@@ -1,5 +1,5 @@
 """
-botxray.py - TURBONET XRAY V1.0
+botxray.py - TURBONET XRAY V1.3 (PRO)
 Correções aplicadas:
   - save_config(): escrita atômica via tmpfile + os.replace() + chmod 0o640
   - core_delete_user(): USER_DB atômico via tmpfile + os.replace()
@@ -10,6 +10,9 @@ Correções aplicadas:
   - core_create_user(): verificação de duplicidade linha por linha (sem string.contains)
   - Backup Python gera SHA256 e envia junto ao admin (Refinado para leitura em chunks)
   - get_ip(): timeout aumentado para 8s
+Integração V1.3:
+  - useradd, userdel, passwd -l, passwd -u nativos no Python (Sincronia Híbrida).
+  - Renovação inteligente de usuários.
 """
 
 import os
@@ -62,7 +65,9 @@ logger = logging.getLogger(__name__)
     GET_USER_TO_DELETE,
     GET_USER_TO_BLOCK,
     GET_USER_TO_UNBLOCK,
-) = range(6)
+    GET_USER_TO_RENEW,
+    GET_DAYS_TO_RENEW,
+) = range(8)
 
 
 # =============================================================
@@ -309,17 +314,27 @@ def core_create_user(nick: str, days: str) -> 'Tuple[bool, str]':
     if not save_config(data):
         return False, "❌ Falha ao salvar config.json."
 
+    # Adicionado suporte ao padrão do checkuser no arquivo (inclui senha igual ao nick e limite 0)
     with open(USER_DB, "a") as f:
-        f.write(f"{nick}|{user_uuid}|{expiry_date}\n")
+        f.write(f"{nick}|{user_uuid}|{expiry_date}|{nick}|0\n")
+
+    # Integração Híbrida SSH/SOCKS5
+    subprocess.run(["useradd", "-M", "-s", "/bin/false", nick], check=False, stderr=subprocess.DEVNULL)
+    chp = subprocess.Popen(["chpasswd"], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    chp.communicate(f"{nick}:{nick}".encode('utf-8'))
 
     # Adiciona usuário via API do Xray em tempo real (sem restart, sem derrubar outros)
     reload_xray_user("add", nick, user_uuid)
+
+    link = generate_link(user_uuid, nick)
 
     return True, (
         f"✅ *Usuário Criado!*\n\n"
         f"👤 Nome:   `{nick}`\n"
         f"🔑 UUID:   `{user_uuid}`\n"
-        f"📅 Expira: `{expiry_date}`"
+        f"📅 Expira: `{expiry_date}`\n"
+        f"🔐 Senha App: `{nick}`\n\n"
+        f"🔗 *Link:*\n`{link}`"
     )
 
 
@@ -359,8 +374,12 @@ def core_delete_user(nick: str) -> str:
     if not found:
         return "❌ Usuário não encontrado no sistema."
 
+    # Integração Híbrida SSH/SOCKS5
+    subprocess.run(["userdel", "-r", "-f", nick], check=False, stderr=subprocess.DEVNULL)
+
     # Remove usuário via API do Xray em tempo real
     reload_xray_user("remove", nick, "")
+    reload_xray_user("remove", f"LOCKED_{nick}", "")
     return "✅ Usuário removido do sistema."
 
 
@@ -386,6 +405,9 @@ def core_block_user(nick: str) -> str:
 
     if not save_config(data):
         return "❌ Falha ao salvar config.json."
+
+    # Integração Híbrida SSH/SOCKS5
+    subprocess.run(["passwd", "-l", nick], check=False, stderr=subprocess.DEVNULL)
 
     # Remove o usuário com UUID real e adiciona com UUID falso via API (sem restart)
     reload_xray_user("remove", nick, "")
@@ -429,10 +451,72 @@ def core_unblock_user(nick: str) -> str:
     if not save_config(data):
         return "❌ Falha ao salvar config.json."
 
+    # Integração Híbrida SSH/SOCKS5
+    subprocess.run(["passwd", "-u", nick], check=False, stderr=subprocess.DEVNULL)
+
     # Remove entrada LOCKED_ e adiciona com UUID real via API (sem restart)
     reload_xray_user("remove", f"LOCKED_{nick}", "")
     reload_xray_user("add", nick, real_uuid)
     return f"✅ Usuário `{nick}` REATIVADO com sucesso."
+
+
+def core_renew_user(nick: str, days_to_add: str) -> str:
+    real_uuid = None
+    current_expiry = None
+    found = False
+    lines = []
+
+    if os.path.exists(USER_DB):
+        with open(USER_DB, "r") as f:
+            lines = f.readlines()
+
+    for i, line in enumerate(lines):
+        if line.startswith(f"{nick}|"):
+            parts = line.strip().split("|")
+            if len(parts) >= 3:
+                real_uuid = parts[1]
+                current_expiry = parts[2]
+                try:
+                    exp_date = datetime.strptime(current_expiry, "%Y-%m-%d")
+                    if exp_date < datetime.now():
+                        exp_date = datetime.now()
+                    new_expiry = (exp_date + timedelta(days=int(days_to_add))).strftime("%Y-%m-%d")
+                except:
+                    new_expiry = (datetime.now() + timedelta(days=int(days_to_add))).strftime("%Y-%m-%d")
+
+                parts[2] = new_expiry
+                lines[i] = "|".join(parts) + "\n"
+                found = True
+            break
+
+    if not found:
+        return "❌ Usuário não encontrado no banco de dados."
+
+    tmp_db = USER_DB + ".tmp"
+    with open(tmp_db, "w") as f:
+        f.writelines(lines)
+    os.replace(tmp_db, USER_DB)
+
+    # Integração Híbrida SSH/SOCKS5
+    subprocess.run(["passwd", "-u", nick], check=False, stderr=subprocess.DEVNULL)
+
+    data = load_config()
+    was_locked = False
+    if data:
+        for inbound in data.get("inbounds", []):
+            if inbound.get("tag") == "inbound-turbonet":
+                for client in inbound["settings"]["clients"]:
+                    if client.get("email") == f"LOCKED_{nick}":
+                        client["email"] = nick
+                        client["id"] = real_uuid
+                        was_locked = True
+                        break
+    if was_locked:
+        save_config(data)
+        reload_xray_user("remove", f"LOCKED_{nick}", "")
+        reload_xray_user("add", nick, real_uuid)
+
+    return f"🔄 Usuário `{nick}` RENOVADO com sucesso!\nNova data: {new_expiry}"
 
 
 def core_list_users_text() -> str:
@@ -490,10 +574,13 @@ def build_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ REATIVAR",  callback_data="unblock_start"),
         ],
         [
+            InlineKeyboardButton("🔄 RENOVAR",   callback_data="renew_start"),
             InlineKeyboardButton("📋 LISTAR (TXT)", callback_data="list_users"),
-            InlineKeyboardButton("📥 BACKUP",        callback_data="backup_start"),
         ],
-        [InlineKeyboardButton("❌ SAIR", callback_data="cancel")],
+        [
+            InlineKeyboardButton("📥 BACKUP",        callback_data="backup_start"),
+            InlineKeyboardButton("❌ SAIR", callback_data="cancel"),
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -503,7 +590,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data.clear()
     await update.message.reply_text(
-        "🐉 *PAINEL TURBONET XRAY V1.0*",
+        "🐉 *PAINEL TURBONET XRAY V1.3 (PRO)*\n_Integração Híbrida SSH Ativa_",
         reply_markup=build_menu(),
         parse_mode="Markdown",
     )
@@ -546,6 +633,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Nome para ✅ REATIVAR:", parse_mode="Markdown"
         )
         return GET_USER_TO_UNBLOCK
+
+    if query.data == "renew_start":
+        await query.edit_message_text(
+            "Nome para 🔄 RENOVAR:", parse_mode="Markdown"
+        )
+        return GET_USER_TO_RENEW
 
     if query.data == "list_users":
         report = core_list_users_text()
@@ -712,6 +805,21 @@ async def input_handler(
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu())
         return SELECTING_ACTION
 
+    if mode == "renew_nick":
+        context.user_data["renew_nick"] = text
+        await update.message.reply_text(
+            f"Quantos dias deseja adicionar para `{text}`?", parse_mode="Markdown"
+        )
+        return GET_DAYS_TO_RENEW
+
+    if mode == "renew_days":
+        if not text.isdigit():
+            await update.message.reply_text("Só números.")
+            return GET_DAYS_TO_RENEW
+        msg = core_renew_user(context.user_data["renew_nick"], text)
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu())
+        return SELECTING_ACTION
+
     # Fallback — modo desconhecido, retorna ao menu sem travar
     logger.warning("input_handler: modo desconhecido '%s'", mode)
     await update.message.reply_text("❌ Operação inválida.", reply_markup=build_menu())
@@ -724,6 +832,8 @@ async def h_create_days(u, c): return await input_handler(u, c, "create_days")
 async def h_delete(u, c):      return await input_handler(u, c, "delete")
 async def h_block(u, c):       return await input_handler(u, c, "block")
 async def h_unblock(u, c):     return await input_handler(u, c, "unblock")
+async def h_renew_nick(u, c):  return await input_handler(u, c, "renew_nick")
+async def h_renew_days(u, c):  return await input_handler(u, c, "renew_days")
 
 
 async def cancel_op(u, c):
@@ -765,12 +875,20 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, h_unblock),
                 CallbackQueryHandler(unexpected_button),
             ],
+            GET_USER_TO_RENEW: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, h_renew_nick),
+                CallbackQueryHandler(unexpected_button),
+            ],
+            GET_DAYS_TO_RENEW: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, h_renew_days),
+                CallbackQueryHandler(unexpected_button),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel_op)],
         allow_reentry=True,
     )
     app.add_handler(conv)
-    logger.info("TURBONET XRAY Bot V1.0 iniciado. Admin ID: %d", ADMIN_ID)
+    logger.info("TURBONET XRAY Bot V1.3 iniciado. Admin ID: %d", ADMIN_ID)
     app.run_polling()
 
 
