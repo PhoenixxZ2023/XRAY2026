@@ -1,5 +1,5 @@
 #!/bin/bash
-# checkuser.sh - TURBONET XRAY V1.2 (HIBRIDO)
+# checkuser.sh - TURBONET XRAY V1.3 (HIBRIDO)
 # Servidor CheckUser compativel com apps VPN (Conecta4G, DTunnel, HTTP Custom, etc.)
 #
 # Endpoint: http://IP:PORTA/checkuserxray?user=NOME&pass=SENHA
@@ -7,7 +7,7 @@
 #            "expiration_days":30,"limit_connections":2}
 #
 # Tambem suporta:
-#   /checkuserxray          -> autenticacao por usuario+senha
+#   /checkuserxray         -> autenticacao por usuario+senha
 #   /check?user=NOME       -> consulta publica (sem senha, só status)
 #   /health                 -> healthcheck
 #
@@ -16,6 +16,9 @@
 # - Hardening de arquivos (logs e pids gerados como 600)
 # - Força o uso do IP da VPS na geração dos links, ignorando domínios
 #
+# Melhorias V1.3 (Segurança Severa):
+# - ELIMINADO RCE RISK: Endpoint público protegido contra vazamento de stacktrace Python
+# - SANITIZAÇÃO DE INPUT: QS string estritamente higienizada para Regex Alfanumérica
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO"; sleep 2' ERR
 
@@ -90,7 +93,7 @@ _start_server() {
 
     python3 - "$port" "$USER_DB" "$CONFIG_PATH" "$XRAY_BIN" \
               "$api_port" "$CONN_DB" "$LOG_FILE" << 'PYSERVER' &
-import sys, json, os, subprocess, time, threading
+import sys, json, os, subprocess, time, threading, re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
@@ -112,6 +115,10 @@ def log(msg):
         with open(LOG_FILE, 'a') as f:
             f.write(f"[{ts}] {msg}\n")
     except: pass
+
+def is_safe_input(val):
+    # V1.3 Hardening: Aceita apenas caracteres seguros
+    return bool(re.match(r'^[a-zA-Z0-9_-]+$', val))
 
 def load_users():
     """Carrega users.db - formato: nick|uuid|expiry|password|limit"""
@@ -169,7 +176,9 @@ def expiry_formatted(expiry):
         return expiry
 
 def get_active_connections(nick):
-    """Consulta conexoes ativas via API do Xray"""
+    """Consulta conexoes ativas via API do Xray com Sanitização V1.3"""
+    if not is_safe_input(nick):
+        return 0
     try:
         down = 0
         up = 0
@@ -243,127 +252,131 @@ class CheckUserHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        qs     = parse_qs(parsed.query)
-        path   = parsed.path.rstrip('/')
+        try:
+            parsed = urlparse(self.path)
+            qs     = parse_qs(parsed.query)
+            path   = parsed.path.rstrip('/')
 
-        # Health check
-        if path == '/health':
-            self._send_json(200, {
-                'status':  'ok',
-                'service': 'TURBONET XRAY CheckUser V1.2'
-            })
-            return
-
-        # Status endpoint
-        if path == '/status':
-            users = load_users()
-            self._send_json(200, {
-                'status': 'running',
-                'users_count': len(users)
-            })
-            return
-
-        # CheckUser principal - compativel com apps VPN
-        if path in ('/checkuserxray', '/checkuser'):
-            user = qs.get('user', [None])[0]
-            pwd  = qs.get('pass', qs.get('password', [None]))[0]
-
-            if not user:
-                self._send_json(400, {'error': 'user parameter required'})
-                return
-
-            users = load_users()
-            user  = user.lower().strip()
-
-            if user not in users:
+            # Health check
+            if path == '/health':
                 self._send_json(200, {
-                    'username':           user,
-                    'count_connections':  0,
-                    'expiration_date':    '',
-                    'expiration_days':    0,
-                    'limit_connections':  0,
-                    'status':             'invalid'
+                    'status':  'ok',
+                    'service': 'TURBONET XRAY CheckUser V1.3'
                 })
                 return
 
-            u = users[user]
+            # Status endpoint
+            if path == '/status':
+                users = load_users()
+                self._send_json(200, {
+                    'status': 'running',
+                    'users_count': len(users)
+                })
+                return
 
-            # Valida senha se fornecida e cadastrada
-            if u['password'] and pwd is not None:
-                if pwd != u['password']:
-                    self._send_json(200, {
-                        'username':          user,
-                        'count_connections': 0,
-                        'expiration_date':   '',
-                        'expiration_days':   0,
-                        'limit_connections': 0,
-                        'status':            'invalid'
-                    })
-                    log(f"AUTH FAIL: user={user} wrong password")
+            # CheckUser principal - compativel com apps VPN
+            if path in ('/checkuserxray', '/checkuser'):
+                user = qs.get('user', [None])[0]
+                pwd  = qs.get('pass', qs.get('password', [None]))[0]
+
+                if not user:
+                    self._send_json(400, {'error': 'user parameter required'})
                     return
 
-            cfg    = load_cfg()
-            locked = is_locked(user, cfg)
-            dl     = days_left(u['expiry'])
-            conns  = get_active_connections(user)
+                users = load_users()
+                user  = user.lower().strip()
 
-            log(f"CHECK: user={user} conns={conns} limit={u['limit']} days={dl} locked={locked}")
+                if user not in users or not is_safe_input(user):
+                    self._send_json(200, {
+                        'username':           user,
+                        'count_connections':  0,
+                        'expiration_date':    '',
+                        'expiration_days':    0,
+                        'limit_connections':  0,
+                        'status':             'invalid'
+                    })
+                    return
 
-            self._send_json(200, {
-                'username':          user,
-                'uuid':              u['uuid'],
-                'count_connections': conns,
-                'expiration_date':   expiry_formatted(u['expiry']),
-                'expiration_days':   dl,
-                'limit_connections': u['limit'],
-                'valid':             True,
-                'status': 'locked'   if locked  else
-                          'expired'  if dl <= 0  else
-                          'active'
-            })
-            return
+                u = users[user]
 
-        # Consulta publica /check (sem senha)
-        if path == '/check':
-            user = qs.get('user', [None])[0]
-            if not user:
-                self._send_json(400, {'error': 'user parameter required'})
+                # Valida senha se fornecida e cadastrada
+                if u['password'] and pwd is not None:
+                    if pwd != u['password']:
+                        self._send_json(200, {
+                            'username':          user,
+                            'count_connections': 0,
+                            'expiration_date':   '',
+                            'expiration_days':   0,
+                            'limit_connections': 0,
+                            'status':            'invalid'
+                        })
+                        log(f"AUTH FAIL: user={user} wrong password")
+                        return
+
+                cfg    = load_cfg()
+                locked = is_locked(user, cfg)
+                dl     = days_left(u['expiry'])
+                conns  = get_active_connections(user)
+
+                log(f"CHECK: user={user} conns={conns} limit={u['limit']} days={dl} locked={locked}")
+
+                self._send_json(200, {
+                    'username':          user,
+                    'uuid':              u['uuid'],
+                    'count_connections': conns,
+                    'expiration_date':   expiry_formatted(u['expiry']),
+                    'expiration_days':   dl,
+                    'limit_connections': u['limit'],
+                    'valid':             True,
+                    'status': 'locked'   if locked  else
+                              'expired'  if dl <= 0  else
+                              'active'
+                })
                 return
-            users = load_users()
-            user  = user.lower().strip()
-            if user not in users:
-                self._send_json(404, {'error': 'user not found'})
-                return
-            u      = users[user]
-            cfg    = load_cfg()
-            locked = is_locked(user, cfg)
-            dl     = days_left(u['expiry'])
-            conns  = get_active_connections(user)
-            self._send_json(200, {
-                'username':          user,
-                'count_connections': conns,
-                'expiration_date':   expiry_formatted(u['expiry']),
-                'expiration_days':   dl,
-                'limit_connections': u['limit'],
-                'status': 'locked'  if locked else
-                          'expired' if dl <= 0 else 'active'
-            })
-            return
 
-        self._send_json(404, {
-            'error':     'endpoint not found',
-            'endpoints': [
-                '/checkuserxray?user=NOME&pass=SENHA',
-                '/check?user=NOME',
-                '/health',
-                '/status'
-            ]
-        })
+            # Consulta publica /check (sem senha)
+            if path == '/check':
+                user = qs.get('user', [None])[0]
+                if not user or not is_safe_input(user):
+                    self._send_json(400, {'error': 'user parameter required'})
+                    return
+                users = load_users()
+                user  = user.lower().strip()
+                if user not in users:
+                    self._send_json(404, {'error': 'user not found'})
+                    return
+                u      = users[user]
+                cfg    = load_cfg()
+                locked = is_locked(user, cfg)
+                dl     = days_left(u['expiry'])
+                conns  = get_active_connections(user)
+                self._send_json(200, {
+                    'username':          user,
+                    'count_connections': conns,
+                    'expiration_date':   expiry_formatted(u['expiry']),
+                    'expiration_days':   dl,
+                    'limit_connections': u['limit'],
+                    'status': 'locked'  if locked else
+                              'expired' if dl <= 0 else 'active'
+                })
+                return
+
+            self._send_json(404, {
+                'error':     'endpoint not found',
+                'endpoints': [
+                    '/checkuserxray?user=NOME&pass=SENHA',
+                    '/check?user=NOME',
+                    '/health',
+                    '/status'
+                ]
+            })
+        except Exception as e:
+            # V1.3: Aborta stacktrace exposure em falha I/O (Security)
+            self._send_json(500, {'error': 'internal_server_error'})
 
 try:
     server = HTTPServer(('0.0.0.0', PORT), CheckUserHandler)
-    log(f"TURBONET XRAY CheckUser V1.2 iniciado na porta {PORT}")
+    log(f"TURBONET XRAY CheckUser V1.3 iniciado na porta {PORT}")
     print(f'Server started on port {PORT}')
     server.serve_forever()
 except Exception as e:
@@ -548,7 +561,7 @@ fi
 # --- MENU INTERATIVO ---
 while true; do
     clear
-    echo -e "${TITLE_BAR}   CHECKUSER - TURBONET XRAY V1.2   ${RESET}"
+    echo -e "${TITLE_BAR}   CHECKUSER - TURBONET XRAY V1.3   ${RESET}"
     echo ""
     echo -e " Status:$(_status)"
     echo ""
