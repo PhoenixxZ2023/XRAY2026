@@ -270,8 +270,9 @@ log_audit() {
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     ip=$(who am i 2>/dev/null | awk '{print $NF}' | tr -d '()' || echo "local")
 
-    # Cria diretório de logs se não existir
+    # Cria diretório de logs se não existir e garante permissões 0600
     mkdir -p "$(dirname "$AUDIT_LOG")"
+    [ ! -f "$AUDIT_LOG" ] && touch "$AUDIT_LOG" && chmod 0600 "$AUDIT_LOG"
 
     # Formato: timestamp|user|action|target|details|ip
     echo "${timestamp}|${user}|${action}|${target}|${details}|${ip}" >> "$AUDIT_LOG"
@@ -282,6 +283,7 @@ log_audit() {
         lines=$(wc -l < "$AUDIT_LOG" 2>/dev/null || echo 0)
         if [ "$lines" -gt 10000 ]; then
             tail -n 9000 "$AUDIT_LOG" > "${AUDIT_LOG}.tmp"
+            chmod 0600 "${AUDIT_LOG}.tmp"
             mv "${AUDIT_LOG}.tmp" "$AUDIT_LOG"
         fi
     fi
