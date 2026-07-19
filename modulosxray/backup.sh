@@ -8,6 +8,7 @@
 #   - rotate_backups() usa find + mapfile — sem parse de ls, seguro com nomes especiais
 #   - _wait_xray_active() com retry de 5s — substitui sleep 2 + is-active simples
 #   - SNAP_FILE registrado para cleanup em caso de abort
+#   - INTEGRAÇÃO SSH: Re-sincroniza usuários do users.db com as contas Linux após Restore
 
 set -Eeuo pipefail
 
@@ -312,9 +313,9 @@ case "${opt:-0}" in
     # CORREÇÃO: permissões explícitas após restore — tar pode restaurar
     # permissões do backup, que podem diferir do padrão atual do projeto.
     echo "Aplicando permissões..."
-    chmod 700  /opt/XrayTools                                   2>/dev/null || true
-    chmod 600  /opt/XrayTools/users.db                          2>/dev/null || true
-    chown root:root /opt/XrayTools/users.db                     2>/dev/null || true
+    chmod 700  /opt/XrayTools                                       2>/dev/null || true
+    chmod 600  /opt/XrayTools/users.db                              2>/dev/null || true
+    chown root:root /opt/XrayTools/users.db                         2>/dev/null || true
 
     # CORREÇÃO: 640 root:nogroup — Xray (nobody/nogroup) precisa ler o config.
     # Versão anterior usava 600 root:root — Xray não conseguia ler após restore.
@@ -352,6 +353,17 @@ case "${opt:-0}" in
     local_xray_status="${TXT_RED}FALHA${RESET}"
     if _wait_xray_active; then
         local_xray_status="${TXT_GREEN}ATIVO${RESET}"
+    fi
+
+    # INTEGRAÇÃO SSH: Re-sincronizar usuários e senhas para Dropbear/SOCKS5
+    echo "Sincronizando usuários de SSH (Dropbear/SOCKS5)..."
+    if [ -s /opt/XrayTools/users.db ]; then
+        while IFS='|' read -r nick uuid expiry pass limit _rest; do
+            [ -n "${nick:-}" ] && [ -n "${pass:-}" ] || continue
+            id "$nick" &>/dev/null || useradd -M -s /bin/false "$nick" 2>/dev/null || true
+            echo "${nick}:${pass}" | chpasswd 2>/dev/null || true
+        done < /opt/XrayTools/users.db
+        echo -e "${TXT_GREEN}✅ Contas locais Linux sincronizadas com o banco.${RESET}"
     fi
 
     echo -e "${TXT_GREEN}✅ Sistema restaurado!${RESET}"
