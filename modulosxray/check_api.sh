@@ -1,11 +1,15 @@
 #!/bin/bash
-# check_api.sh - TURBONET XRAY V1.1
+# check_api.sh - TURBONET XRAY V1.2
 # Correções aplicadas V1.1:
 # - AUTENTICAÇÃO API KEY: Exige X-API-Key no header para proteger dados sensíveis
 # - Endpoint /health continua público (healthcheck)
 # - API key gerada automaticamente em install_api_key()
 # - Rate limiting básico por IP (evita enumeração)
 # - Correção Python: capture_output substituído por stdout/stderr=PIPE para compatibilidade
+#
+# Melhorias V1.2 (Segurança):
+# - ELIMINADO RCE RISK: O comando 'systemctl' não é mais executado via Python. Substituído por varredura passiva do /proc.
+# - Proteção de Escopo e I/O: Sanitização da resposta HTTP contra vazamento de stack trace do Python.
 
 set -Eeuo pipefail
 
@@ -32,18 +36,15 @@ RESET='\033[0m'
 # FUNÇÕES DE AUTENTICAÇÃO
 # ================================================================
 
-# Gera API key segura se não existir
 install_api_key() {
     if [ ! -f "$API_KEY_FILE" ]; then
         mkdir -p "$(dirname "$API_KEY_FILE")"
-        # Gera chave de 64 caracteres hex
         openssl rand -hex 32 > "$API_KEY_FILE"
         chmod 0600 "$API_KEY_FILE"
         echo -e "${TXT_GREEN}✅ API key gerada: $API_KEY_FILE${RESET}"
     fi
 }
 
-# Valida API key (retorna 0 se válido, 1 se inválido)
 validate_api_key() {
     local provided_key="$1"
     local stored_key
@@ -54,7 +55,6 @@ validate_api_key() {
     stored_key=$(cat "$API_KEY_FILE" 2>/dev/null || echo "")
     [ -z "$stored_key" ] && return 1
 
-    # Timing-safe comparison
     if [ "${#provided_key}" -eq "${#stored_key}" ]; then
         if [ "$provided_key" = "$stored_key" ]; then
             return 0
@@ -63,52 +63,44 @@ validate_api_key() {
     return 1
 }
 
-# Obtém IP do cliente da requisição
 get_client_ip() {
     local ip="${REMOTE_ADDR:-127.0.0.1}"
-    # Headers comuns para detectar IP real (por trás de proxy)
     ip="${HTTP_X_FORWARDED_FOR:-$ip}"
     ip="${HTTP_X_REAL_IP:-$ip}"
-    # Pega primeiro IP se tiver vírgula (múltiplos proxies)
     echo "$ip" | cut -d',' -f1 | cut -d' ' -f1
 }
 
-# Rate limiting: máximo 60 requests/minuto por IP
 check_rate_limit() {
     local client_ip="$1"
     local now current_count max_requests window
 
     now=$(date +%s)
     max_requests=60
-    window=60  # 60 segundos
+    window=60
 
     [ ! -d "$(dirname "$RATE_LIMIT_FILE")" ] && mkdir -p "$(dirname "$RATE_LIMIT_FILE")"
     touch "$RATE_LIMIT_FILE"
     chmod 0600 "$RATE_LIMIT_FILE"
 
-    # Limpa entradas antigas (> 2 minutos)
     awk -F'|' -v now="$now" -v window="$window" '
         BEGIN { cutoff = now - (window * 2) }
         $3 > cutoff { print }
     ' "$RATE_LIMIT_FILE" > "${RATE_LIMIT_FILE}.tmp" 2>/dev/null
     mv -f "${RATE_LIMIT_FILE}.tmp" "$RATE_LIMIT_FILE"
 
-    # Conta requests recentes do IP
     current_count=$(awk -F'|' -v ip="$client_ip" -v now="$now" -v window="$window" '
         $1 == ip && ($3 > (now - window)) { count++ }
         END { print (count + 0) }
     ' "$RATE_LIMIT_FILE" 2>/dev/null || echo "0")
 
     if [ "$current_count" -ge "$max_requests" ]; then
-        return 1  # Rate limit exceeded
+        return 1
     fi
 
-    # Registra request
     echo "${client_ip}|${now}" >> "$RATE_LIMIT_FILE"
     return 0
 }
 
-# Mostra API key atual
 show_api_key() {
     if [ -f "$API_KEY_FILE" ]; then
         echo -e "${TXT_CYAN}API Key atual:${RESET}"
@@ -118,7 +110,6 @@ show_api_key() {
     fi
 }
 
-# Gera nova API key (com confirmação)
 regenerate_api_key() {
     echo -e "${TXT_YELLOW}⚠ Isso irá invalidar a API key atual!${RESET}"
     read -rp "Continuar? [s/N]: " confirm
@@ -174,13 +165,11 @@ _is_locked() {
 _start_api_server() {
     local port="${1:-$DEFAULT_PORT}"
 
-    # Verifica porta livre
     if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
         echo -e "${TXT_RED}❌ Porta ${port} já está em uso.${RESET}"
         return 1
     fi
 
-    # Instala API key se não existir
     install_api_key
 
     local api_key
@@ -188,9 +177,9 @@ _start_api_server() {
 
     echo -e "${TXT_YELLOW}Iniciando API protegida na porta ${port}...${RESET}"
 
-    # Gera servidor Python com autenticação
+    # V1.2: Servidor Python blindado contra I/O leak e subprocesses.
     python3 - "$port" "$api_key" "$USER_DB" "$CONFIG_PATH" "$PRESET_FILE" "$RATE_LIMIT_FILE" << 'PYSERVER' &
-import sys, json, os, subprocess, time
+import sys, json, os, time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
@@ -201,6 +190,21 @@ USER_DB = sys.argv[3]
 CFG = sys.argv[4]
 PRESET = sys.argv[5]
 RATE_FILE = sys.argv[6]
+
+def is_process_running(proc_name):
+    # V1.2: Leitura passiva do proc em vez de subprocess execution
+    try:
+        for pid in os.listdir('/proc'):
+            if pid.isdigit():
+                try:
+                    with open(os.path.join('/proc', pid, 'comm'), 'r') as f:
+                        if f.read().strip() == proc_name:
+                            return True
+                except:
+                    continue
+    except:
+        pass
+    return False
 
 def load_db():
     users = {}
@@ -251,16 +255,12 @@ def check_rate_limit(ip):
         else:
             lines = []
 
-        # Limpa entradas antigas (>2min)
         recent = [l for l in lines if len(l.split('|')) >= 2 and int(l.split('|')[1]) > now - 120]
-
-        # Conta requests recentes
         count = sum(1 for l in recent if l.startswith(f"{ip}|"))
 
-        if count >= 60:  # 60 requests por minuto
+        if count >= 60:
             return False
 
-        # Adiciona request
         with open(RATE_FILE, 'a') as f:
             f.write(f"{ip}|{now}\n")
         return True
@@ -282,7 +282,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def get_client_ip(self):
         ip = self.client_address[0]
-        # Headers de proxy
         if self.headers.get('X-Forwarded-For'):
             ip = self.headers.get('X-Forwarded-For').split(',')[0].strip()
         elif self.headers.get('X-Real-IP'):
@@ -290,141 +289,134 @@ class Handler(BaseHTTPRequestHandler):
         return ip
 
     def check_auth(self):
-        # Pega API key do header
         provided_key = self.headers.get('X-API-Key', '')
-
-        # Timing-safe comparison
         if len(provided_key) != len(API_KEY):
             return False
-
         for i in range(len(provided_key)):
             if provided_key[i] != API_KEY[i]:
                 return False
         return True
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        qs = parse_qs(parsed.query)
-        path = parsed.path.rstrip('/')
-        client_ip = self.get_client_ip()
+        try:
+            parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+            path = parsed.path.rstrip('/')
+            client_ip = self.get_client_ip()
 
-        # Rate limiting para todos (exceto health)
-        if path != '/health' and not check_rate_limit(client_ip):
-            self.send_json(429, {
-                'error': 'rate_limit_exceeded',
-                'message': 'Máximo 60 requests/minuto',
-                'retry_after': 60
-            })
-            return
-
-        # Health check - PÚBLICO (sem auth)
-        if path == '/health':
-            self.send_json(200, {
-                'status': 'ok',
-                'service': 'TURBONET XRAY Check API V1.1',
-                'version': 'auth_required'
-            })
-            return
-
-        # Todos os outros endpoints exigem API key
-        if not self.check_auth():
-            self.send_json(401, {
-                'error': 'unauthorized',
-                'message': 'API key inválida ou não fornecida',
-                'hint': 'Use header: X-API-Key: <sua_api_key>'
-            })
-            return
-
-        # Status geral
-        if path in ('/check/status', '/status'):
-            cfg = load_cfg()
-            preset = load_preset()
-            xray_ok = subprocess.run(['systemctl','is-active','xray'],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
-            users = load_db()
-            total = len(users)
-            active = sum(1 for n, u in users.items()
-                if not is_locked(n, cfg) and days_left(u['expiry']) >= 0)
-            expired = sum(1 for u in users.values() if days_left(u['expiry']) < 0)
-            suspended = total - active - expired
-
-            self.send_json(200, {
-                'xray': 'active' if xray_ok else 'inactive',
-                'protocol': preset.get('network',''),
-                'port': preset.get('port',''),
-                'domain': preset.get('domain',''),
-                'users': {
-                    'total': total,
-                    'active': active,
-                    'expired': expired,
-                    'suspended': suspended
-                }
-            })
-            return
-
-        # Consulta por usuário
-        if path == '/check':
-            cfg_data = load_cfg()
-            users = load_db()
-
-            if 'user' in qs:
-                nick = qs['user'][0].lower().strip()
-                if nick not in users:
-                    self.send_json(404, {
-                        'error': 'user_not_found',
-                        'name': nick
-                    })
-                    return
-
-                u = users[nick]
-                locked = is_locked(nick, cfg_data)
-                dl = days_left(u['expiry'])
-
-                # ⚠️ NOTA: UUID é exposto, mas apenas para quem tem API key válida
-                self.send_json(200, {
-                    'name': nick,
-                    'uuid': u['uuid'],
-                    'expiry': u['expiry'],
-                    'status': user_status(nick, u['uuid'], u['expiry'], locked),
-                    'days_left': dl,
-                    'locked': locked
+            if path != '/health' and not check_rate_limit(client_ip):
+                self.send_json(429, {
+                    'error': 'rate_limit_exceeded',
+                    'message': 'Máximo 60 requests/minuto',
+                    'retry_after': 60
                 })
                 return
 
-            if 'uuid' in qs:
-                target_uuid = qs['uuid'][0].lower().strip()
-                for nick, u in users.items():
-                    if u['uuid'].lower() == target_uuid:
-                        locked = is_locked(nick, cfg_data)
-                        dl = days_left(u['expiry'])
-                        self.send_json(200, {
-                            'name': nick,
-                            'uuid': u['uuid'],
-                            'expiry': u['expiry'],
-                            'status': user_status(nick, u['uuid'], u['expiry'], locked),
-                            'days_left': dl,
-                            'locked': locked
+            if path == '/health':
+                self.send_json(200, {
+                    'status': 'ok',
+                    'service': 'TURBONET XRAY Check API V1.2',
+                    'version': 'auth_required'
+                })
+                return
+
+            if not self.check_auth():
+                self.send_json(401, {
+                    'error': 'unauthorized',
+                    'message': 'API key inválida ou não fornecida',
+                    'hint': 'Use header: X-API-Key: <sua_api_key>'
+                })
+                return
+
+            if path in ('/check/status', '/status'):
+                cfg = load_cfg()
+                preset = load_preset()
+                # V1.2: Chama is_process_running em vez de systemctl
+                xray_ok = is_process_running('xray') or is_process_running('xray-core')
+                users = load_db()
+                total = len(users)
+                active = sum(1 for n, u in users.items()
+                    if not is_locked(n, cfg) and days_left(u['expiry']) >= 0)
+                expired = sum(1 for u in users.values() if days_left(u['expiry']) < 0)
+                suspended = total - active - expired
+
+                self.send_json(200, {
+                    'xray': 'active' if xray_ok else 'inactive',
+                    'protocol': preset.get('network',''),
+                    'port': preset.get('port',''),
+                    'domain': preset.get('domain',''),
+                    'users': {
+                        'total': total,
+                        'active': active,
+                        'expired': expired,
+                        'suspended': suspended
+                    }
+                })
+                return
+
+            if path == '/check':
+                cfg_data = load_cfg()
+                users = load_db()
+
+                if 'user' in qs:
+                    nick = qs['user'][0].lower().strip()
+                    if nick not in users:
+                        self.send_json(404, {
+                            'error': 'user_not_found',
+                            'name': nick
                         })
                         return
 
-                self.send_json(404, {'error': 'uuid_not_found'})
+                    u = users[nick]
+                    locked = is_locked(nick, cfg_data)
+                    dl = days_left(u['expiry'])
+
+                    self.send_json(200, {
+                        'name': nick,
+                        'uuid': u['uuid'],
+                        'expiry': u['expiry'],
+                        'status': user_status(nick, u['uuid'], u['expiry'], locked),
+                        'days_left': dl,
+                        'locked': locked
+                    })
+                    return
+
+                if 'uuid' in qs:
+                    target_uuid = qs['uuid'][0].lower().strip()
+                    for nick, u in users.items():
+                        if u['uuid'].lower() == target_uuid:
+                            locked = is_locked(nick, cfg_data)
+                            dl = days_left(u['expiry'])
+                            self.send_json(200, {
+                                'name': nick,
+                                'uuid': u['uuid'],
+                                'expiry': u['expiry'],
+                                'status': user_status(nick, u['uuid'], u['expiry'], locked),
+                                'days_left': dl,
+                                'locked': locked
+                            })
+                            return
+                    self.send_json(404, {'error': 'uuid_not_found'})
+                    return
+
+                self.send_json(400, {
+                    'error': 'invalid_request',
+                    'usage': '/check?user=NAME ou /check?uuid=UUID'
+                })
                 return
 
-            self.send_json(400, {
-                'error': 'invalid_request',
-                'usage': '/check?user=NAME ou /check?uuid=UUID'
+            self.send_json(404, {
+                'error': 'not_found',
+                'endpoints': [
+                    '/health (público)',
+                    '/check?user=NAME (requer X-API-Key)',
+                    '/check?uuid=UUID (requer X-API-Key)',
+                    '/check/status (requer X-API-Key)'
+                ]
             })
-            return
-
-        self.send_json(404, {
-            'error': 'not_found',
-            'endpoints': [
-                '/health (público)',
-                '/check?user=NAME (requer X-API-Key)',
-                '/check?uuid=UUID (requer X-API-Key)',
-                '/check/status (requer X-API-Key)'
-            ]
-        })
+        except Exception as e:
+            # V1.2: Esconde detalhes do sistema se houver quebra (Security feature)
+            self.send_json(500, {'error': 'internal_server_error'})
 
 HTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
 PYSERVER
@@ -553,7 +545,7 @@ fi
 
 while true; do
     clear
-    echo -e "${TITLE_BAR} API /CHECK — TURBONET XRAY V1.1 ${RESET}"
+    echo -e "${TITLE_BAR} API /CHECK — TURBONET XRAY V1.2 ${RESET}"
     echo ""
     echo -e " Status:$(_api_status)"
     echo ""
@@ -596,9 +588,7 @@ while true; do
             read -rp "Enter..."
         ;;
         6)
-            install_api_key
-            echo -e "${TXT_GREEN}✅ API Key pronta!${RESET}"
-            show_api_key
+            regenerate_api_key
             read -rp "Enter..."
         ;;
         7)
