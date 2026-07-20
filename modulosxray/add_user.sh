@@ -1,12 +1,13 @@
 #!/bin/bash
-# add_user.sh - TURBONET XRAY V1.0
+# add_user.sh - TURBONET XRAY V1.3 (PRO)
 # Correções aplicadas:
 #   - chmod 777 → 0640 root:nogroup em todos os pontos (fluxo normal + rollbacks)
 #   - trap duplo eliminado — _cleanup() centralizado com trap EXIT
 #   - Verificação de xray ativo com retry de até 5s (evita falso negativo em sistema lento)
 #   - Duplicidade case-insensitive — nome normalizado para minúsculas
 #   - generate_link exibe aviso quando preset.json não existe
-#   - INTEGRAÇÃO SSH: Cria o usuário no sistema operacional para Dropbear/SOCKS5 automaticamente.
+#   - INTEGRAÇÃO SSH: Cria o usuário no sistema operacional para Dropbear/SOCKS5.
+#   - HOT RELOAD INTELIGENTE: Detecção dinâmica de API (Portas TCP ou UNIX Sockets).
 
 set -Eeuo pipefail
 
@@ -234,23 +235,44 @@ mv -f "$_tmp_cfg" "$CONFIG_PATH"
 _tmp_cfg=""
 _apply_config_perms
 
-# --- HOT RELOAD VIA API ---
-_xray_api_port() {
-    jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
+# --- HOT RELOAD VIA API INTELIGENTE ---
+_xray_api_address() {
+    # Busca a porta da API, buscando pela tag ou pelo protocolo padrão dokodemo-door
+    jq -r '
+        .inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door") | 
+        if .port then "127.0.0.1:\(.port)" 
+        elif .listen then "unix:\(.listen)" 
+        else empty end
+    ' "$CONFIG_PATH" 2>/dev/null | head -1
 }
+
 _hotreload_add() {
-    local api_port; api_port=$(_xray_api_port)
-    [ -z "${api_port:-}" ] && return 1
+    local api_addr
+    api_addr=$(_xray_api_address)
+    
+    if [ -z "${api_addr:-}" ]; then
+        echo "Aviso: Bloco da API não encontrado no config.json. Retornando ao recarregamento padrao." >> "$LOG_FILE"
+        return 1
+    fi
+    
     local user_json
     user_json=$(jq -n --arg id "$uuid" --arg email "$nick" '{"id":$id,"email":$email,"level":0}')
-    /usr/local/bin/xray api adduser         -server="127.0.0.1:${api_port}"         -inboundTag="inbound-turbonet"         -user="$user_json" >/dev/null 2>&1
+    
+    local api_cmd=(/usr/local/bin/xray api adduser -server="${api_addr}" -inboundTag="inbound-turbonet" -user="$user_json")
+    
+    if ! "${api_cmd[@]}" >> "$LOG_FILE" 2>&1; then
+        echo "Erro ao executar xray api adduser na porta ${api_addr}." >> "$LOG_FILE"
+        return 1
+    fi
+    return 0
 }
 
 if _hotreload_add; then
     echo -e "${TXT_GREEN}✅ Usuário aplicado via API no Xray (sem restart).${RESET}"
 else
     echo -e "${TXT_YELLOW}API indisponível — recarregando serviço Xray...${RESET}"
-    if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 &&        ! systemctl restart xray >/dev/null 2>&1; then
+    if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
+       ! systemctl restart xray >/dev/null 2>&1; then
         echo -e "${TXT_RED}❌ Falha ao recarregar Xray. Revertendo config...${RESET}"
         mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
         _apply_config_perms
