@@ -346,6 +346,7 @@ menu_display() {
     echo -e "${TXT_CYAN}[17] UDPGW (RESOLVE UDP NO TÚNEL)${RESET}"
     echo -e "${TXT_CYAN}[18] SSH FALLBACK (SSH NA PORTA 443)${RESET}"
     echo -e "${TXT_CYAN}[19] RENOVAR USUÁRIO${RESET}"
+    echo -e "${TXT_CYAN}[20] PARAR / INICIAR / REINICIAR XRAY${RESET}"
     echo -e "${TXT_YELLOW}[99] ATUALIZAR MÓDULOS (FORÇA DOWNLOAD)${RESET}"
     echo -e "${TXT_CYAN}[00] SAIR${RESET}"
     echo "-----------------------------------------"
@@ -373,10 +374,11 @@ menu_display() {
         13)   run_module "bbr.sh"               "Ativar BBR" ;;
         14)   run_module "check_api.sh"         "API Check" ;;
         15)   run_module "vercel_relay.sh"      "CDN Relay Vercel" ;;
-        16)   run_module "checkuser.sh"          "CheckUser" ;;
-        17)   run_module "udpgw.sh"              "UDPGW" ;;
+        16)   run_module "checkuser.sh"         "CheckUser" ;;
+        17)   run_module "udpgw.sh"             "UDPGW" ;;
         18)   run_module "ssh_fallback.sh"      "SSH Fallback" ;;
         19)   run_module "renew_user.sh"        "Renovar Usuário" ;;
+        20) run_module "gerenciar_xray.sh"      "Gerenciar Serviço" ;;
         99)
             # Usa download_module() — baixa e valida SEM executar.
             # run_module() sempre executa o script após download, travando em módulos
