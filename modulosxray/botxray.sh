@@ -1,13 +1,7 @@
 #!/bin/bash
 # botxray.sh - TURBONET XRAY V1.3 (PRO)
-# Correções e Hardening:
-#   - Wrappers setuid: chmod 4755 → 4750 + chown root:botxray — apenas botxray executa como root
-#   - C Wrapper Dinâmico: Repassa os argumentos (argv) para o bash, permitindo CLI args.
-#   - restore_bot.sh: Integração Híbrida SSH/SOCKS5 após restore via Telegram.
-#   - restore_bot.sh: chmod 640 root:nogroup no config.json (Alinhado com todos os scripts)
-#   - Integração Total: Adicionado wrap_renew_user para suportar renovações via bot.
-#   - ReadWritePaths remove /usr/local/bin — bot não precisa escrever em scripts do sistema
-#   - /usr/local/etc/xray/ com chmod 770 root:nogroup — botxray cria tmpfiles para os.replace()
+# Correções:
+#   - Correção crítica no ensure_pkg do python3-venv (força instalação direta se o módulo falhar)
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (codigo: $?)"; read -rp "Enter...";' ERR
@@ -78,7 +72,15 @@ func_install_bot() {
     ensure_pkg gcc        gcc
     ensure_pkg tar        tar
 
-    python3 -m venv --help >/dev/null 2>&1 || ensure_pkg python3 python3-venv || true
+    # CORREÇÃO: Força instalação do python3-venv diretamente caso o módulo falhe
+    if ! python3 -m venv --help >/dev/null 2>&1; then
+        _detect_pkg_manager
+        case "$_PKG_MANAGER" in
+            apt) apt-get install -y python3-venv >>"$LOG_FILE" 2>&1 || true ;;
+            dnf|yum) "$_PKG_MANAGER" install -y python3-virtualenv >>"$LOG_FILE" 2>&1 || true ;;
+            pacman) pacman -Sy --noconfirm python-virtualenv >>"$LOG_FILE" 2>&1 || true ;;
+        esac
+    fi
 
     mkdir -p /opt/XrayTools
 
@@ -106,7 +108,6 @@ func_install_bot() {
     # --- WRAPPERS SETUID EM C ---
     echo ""
     echo "Compilando wrappers setuid..."
-    # ⚠️ Adicionado 'renew_user' à lista de wrappers compilados
     for s in add_user remover_user block_user unblock_user renew_user backup_bot restore_bot; do
         cat > /tmp/wrap_${s}.c << EOF
 #include <unistd.h>
@@ -117,7 +118,6 @@ int main(int argc, char *argv[]) {
     putenv("HOME=/opt/XrayTools");
     putenv("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
     
-    // Repassa os argumentos dinamicamente para suportar chamadas via CLI do bot
     char **new_args = malloc((argc + 2) * sizeof(char*));
     new_args[0] = "/bin/bash";
     new_args[1] = "/usr/local/bin/${s}.sh";
@@ -312,7 +312,6 @@ chown root:nogroup /usr/local/etc/xray/config.json 2>/dev/null || true
     chown root:nogroup /opt/TurbonetCoreSSL/privkey.pem 2>/dev/null || true
 }
 
-# ⚠️ INTEGRAÇÃO SSH: Re-sincronizar usuários e senhas para Dropbear/SOCKS5
 if [ -s /opt/XrayTools/users.db ]; then
     while IFS='|' read -r nick uuid expiry pass limit _rest; do
         [ -n "${nick:-}" ] && [ -n "${pass:-}" ] || continue
