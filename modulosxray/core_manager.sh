@@ -1,11 +1,10 @@
 #!/bin/bash
-# core_manager.sh - TURBONET XRAY V1.2 (Otimizado com Engenharia DragonCore)
-# Correções aplicadas V1.2:
-#   - Removido mux inválido do outbound freedom (evita falha de startup no Xray-core)
-#   - Corrigido xhttpSettings para o schema oficial do Xray-core ("headers" no plural)
-#   - Removido fallbacks incompatíveis no transporte xhttp (orienta uso do Proxy 80)
+# core_manager.sh - TURBONET XRAY V1.2.1 (Otimizado com Engenharia DragonCore)
+# Correções aplicadas V1.2.1:
+#   - Eliminado SIGPIPE (exit 141) sob pipefail na geração de senha/UUID/trojan (/dev/urandom com leitura limitada)
+#   - Uso de `jq -c` em _build_initial_clients_and_sample para garantir JSON em linha única
+#   - Removido mux inválido do outbound freedom e corrigido xhttpSettings ("headers" no plural)
 #   - Preserva usuários ativos/bloqueados do users.db ao regenerar config.json (ou cria admin sincronizado)
-#   - Fallback automático de routing rules caso geoip.dat/geosite.dat não existam
 #   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner) e permissões 750/640
 
 set -Eeuo pipefail
@@ -197,7 +196,8 @@ generate_uuid() {
     elif [ -r /proc/sys/kernel/random/uuid ]; then
         cat /proc/sys/kernel/random/uuid
     else
-        od -x /dev/urandom | head -1 | awk '{print $2$3"-"$4"-4"substr($5,2)"-"substr($6,1,1)"8"substr($6,2)"-"$7$8}'
+        dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -x | head -1 | \
+            awk '{print $2$3"-"$4"-4"substr($5,2)"-"substr($6,1,1)"8"substr($6,2)"-"$7$8}'
     fi
 }
 
@@ -205,8 +205,13 @@ generate_trojan_password() {
     if command -v openssl &>/dev/null; then
         openssl rand -hex 16
     else
-        cat /dev/urandom | tr -dc 'a-f0-9' | head -c 32
+        dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'
     fi
+}
+
+_generate_random_alnum() {
+    local len="${1:-10}"
+    head -c 128 /dev/urandom | tr -dc 'a-zA-Z0-9' | cut -c1-"$len"
 }
 
 _verify_sha256() {
@@ -337,7 +342,6 @@ _build_initial_clients_and_sample() {
     tmp_clients=$(mktemp /tmp/xray_clients_XXXXXX.json)
     echo "[]" > "$tmp_clients"
 
-    # Captura mapa de usuários bloqueados do config atual (se houver)
     declare -A old_locked
     if [ -s "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null; then
         while IFS= read -r lemail; do
@@ -352,7 +356,6 @@ _build_initial_clients_and_sample() {
             cred="${cred//$'\r'/}"
             [ -n "${nick:-}" ] && [ -n "${cred:-}" ] || continue
 
-            # Verifica compatibilidade da credencial com o protocolo escolhido
             if [ "$network" = "trojan" ]; then
                 [[ "$cred" =~ ^[0-9a-fA-F]{32}$ ]] || continue
             else
@@ -373,13 +376,13 @@ _build_initial_clients_and_sample() {
             fi
 
             if [ "$network" = "trojan" ]; then
-                jq --arg pwd "$cred_out" --arg em "$email_out" \
+                jq -c --arg pwd "$cred_out" --arg em "$email_out" \
                     '. + [{"password":$pwd,"email":$em,"level":0}]' "$tmp_clients" > "${tmp_clients}.new" && mv -f "${tmp_clients}.new" "$tmp_clients"
             elif [ "$network" = "vision" ]; then
-                jq --arg id "$cred_out" --arg em "$email_out" \
+                jq -c --arg id "$cred_out" --arg em "$email_out" \
                     '. + [{"id":$id,"email":$em,"level":0,"flow":"xtls-rprx-vision"}]' "$tmp_clients" > "${tmp_clients}.new" && mv -f "${tmp_clients}.new" "$tmp_clients"
             else
-                jq --arg id "$cred_out" --arg em "$email_out" \
+                jq -c --arg id "$cred_out" --arg em "$email_out" \
                     '. + [{"id":$id,"email":$em,"level":0}]' "$tmp_clients" > "${tmp_clients}.new" && mv -f "${tmp_clients}.new" "$tmp_clients"
             fi
             imported=$((imported + 1))
@@ -391,19 +394,19 @@ _build_initial_clients_and_sample() {
         local default_exp
         default_exp=$(date -d "+30 days" +%F 2>/dev/null || date +%F)
         local default_pass
-        default_pass=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 10)
+        default_pass=$(_generate_random_alnum 10)
 
         if [ "$network" = "trojan" ]; then
             sample_cred=$(generate_trojan_password)
-            jq -n --arg pwd "$sample_cred" --arg em "$default_nick" \
+            jq -n -c --arg pwd "$sample_cred" --arg em "$default_nick" \
                 '[{"password":$pwd,"email":$em,"level":0}]' > "$tmp_clients"
         elif [ "$network" = "vision" ]; then
             sample_cred=$(generate_uuid)
-            jq -n --arg id "$sample_cred" --arg em "$default_nick" \
+            jq -n -c --arg id "$sample_cred" --arg em "$default_nick" \
                 '[{"id":$id,"email":$em,"level":0,"flow":"xtls-rprx-vision"}]' > "$tmp_clients"
         else
             sample_cred=$(generate_uuid)
-            jq -n --arg id "$sample_cred" --arg em "$default_nick" \
+            jq -n -c --arg id "$sample_cred" --arg em "$default_nick" \
                 '[{"id":$id,"email":$em,"level":0}]' > "$tmp_clients"
         fi
 
@@ -420,7 +423,7 @@ _build_initial_clients_and_sample() {
     fi
 
     local clients_out
-    clients_out=$(cat "$tmp_clients")
+    clients_out=$(jq -c '.' "$tmp_clients")
     rm -f "$tmp_clients"
     printf '%s\n%s\n' "$sample_cred" "$clients_out"
 }
@@ -697,7 +700,7 @@ func_generate_config() {
     fi
     sleep 2
 
-    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2)"
+    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2.1)"
 
     local status_show="${TXT_RED}FALHA${RESET}"
     if systemctl is-active --quiet xray 2>/dev/null; then
