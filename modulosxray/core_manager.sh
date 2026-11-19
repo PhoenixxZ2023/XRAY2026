@@ -1,8 +1,9 @@
 #!/bin/bash
-# core_manager.sh - TURBONET XRAY V1.2.1 (Otimizado com Engenharia DragonCore)
-# Correções aplicadas V1.2.1:
-#   - Eliminado SIGPIPE (exit 141) sob pipefail na geração de senha/UUID/trojan (/dev/urandom com leitura limitada)
-#   - Uso de `jq -c` em _build_initial_clients_and_sample para garantir JSON em linha única
+# core_manager.sh - TURBONET XRAY V1.2.2 (Otimizado com Engenharia DragonCore)
+# Correções aplicadas V1.2.2:
+#   - Eliminado curto-circuito `&&` no final de blocos sob `set -Eeuo pipefail` ao ler users.db
+#   - Removida subshell `$()` na montagem dos clientes iniciais (evita captura do trap ERR)
+#   - Eliminado SIGPIPE (exit 141) na geração de senhas/UUIDs aleatórios
 #   - Removido mux inválido do outbound freedom e corrigido xhttpSettings ("headers" no plural)
 #   - Preserva usuários ativos/bloqueados do users.db ao regenerar config.json (ou cria admin sincronizado)
 #   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner) e permissões 750/640
@@ -24,6 +25,7 @@ CRT_FILE="$SSL_DIR/fullchain.pem"
 
 XRAY_USER="nobody"
 XRAY_GROUP="nogroup"
+SAMPLE_CRED=""
 
 API_PORT="${XRAY_API_PORT:-1080}"
 
@@ -128,7 +130,9 @@ _apply_config_perms() {
 
 _test_xray_config() {
     local cfg="$1"
-    [ ! -x /usr/local/bin/xray ] && return 0
+    if [ ! -x /usr/local/bin/xray ]; then
+        return 0
+    fi
     _detect_xray_owner
     if command -v runuser &>/dev/null && [ "$XRAY_USER" != "root" ]; then
         runuser -u "$XRAY_USER" -- /usr/local/bin/xray run -test -config "$cfg"
@@ -196,8 +200,10 @@ generate_uuid() {
     elif [ -r /proc/sys/kernel/random/uuid ]; then
         cat /proc/sys/kernel/random/uuid
     else
-        dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -x | head -1 | \
-            awk '{print $2$3"-"$4"-4"substr($5,2)"-"substr($6,1,1)"8"substr($6,2)"-"$7$8}'
+        local hex
+        hex=$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+        printf '%s-%s-4%s-a%s-%s\n' \
+            "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" "${hex:17:3}" "${hex:20:12}"
     fi
 }
 
@@ -217,7 +223,7 @@ _generate_random_alnum() {
 _verify_sha256() {
     local file="$1" sha_url="$2" label="$3"
     local expected
-    expected=$(curl -fLsS --max-time 10 --connect-timeout 5 "$sha_url" 2>/dev/null | awk '{print $1}')
+    expected=$(curl -fLsS --max-time 10 --connect-timeout 5 "$sha_url" 2>/dev/null | awk '{print $1}' || true)
     if [ -z "$expected" ]; then
         echo -e "${TXT_YELLOW}⚠  Hash não encontrado para ${label} — verificação ignorada.${RESET}" >&2
         return 0
@@ -289,7 +295,6 @@ func_install_official_core() {
     bash "$install_script" install
     rm -f "$install_script"
 
-    # Injeção DragonCore: Blindagem de CPU e Limites de Arquivo
     local cpu_cores
     cpu_cores=$(nproc 2>/dev/null || echo 1)
     mkdir -p /etc/systemd/system/xray.service.d
@@ -313,7 +318,8 @@ func_xray_cert() {
     local cert_script="/usr/local/bin/certxray.sh"
     ensure_cmd curl curl
 
-    local tmp; tmp=$(mktemp /tmp/certxray_XXXXXX)
+    local tmp
+    tmp=$(mktemp /tmp/certxray_XXXXXX)
     if ! curl -fLsS --retry 3 --retry-delay 2 --max-time 60 --connect-timeout 10 \
         -o "$tmp" "$CERT_SCRIPT_URL" 2>>"$LOG_FILE"; then
         echo -e "${TXT_RED}❌ Erro ao baixar certxray.sh${RESET}"; rm -f "$tmp"; return 1
@@ -334,32 +340,39 @@ func_xray_cert() {
     _apply_config_perms
 }
 
-# Constrói lista de clientes preservando usuários existentes no users.db ou criando admin inicial
-_build_initial_clients_and_sample() {
+# Preenche $out_file com array JSON de clientes e define SAMPLE_CRED no escopo atual
+_build_initial_clients() {
     local network="$1"
-    local sample_cred=""
-    local tmp_clients
-    tmp_clients=$(mktemp /tmp/xray_clients_XXXXXX.json)
-    echo "[]" > "$tmp_clients"
+    local out_file="$2"
+    SAMPLE_CRED=""
+    echo "[]" > "$out_file"
 
     declare -A old_locked
     if [ -s "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null; then
         while IFS= read -r lemail; do
-            [ -n "$lemail" ] && old_locked["${lemail#LOCKED_}"]=1
+            if [ -n "$lemail" ]; then
+                old_locked["${lemail#LOCKED_}"]=1
+            fi
         done < <(jq -r '.inbounds[]? | select(.tag=="inbound-turbonet") | .settings.clients[]? | select(.email? and (.email | startswith("LOCKED_"))) | .email' "$CONFIG_PATH" 2>/dev/null || true)
     fi
 
     local imported=0
     if [ -s "$USER_DB" ]; then
-        while IFS='|' read -r nick cred expiry _rest; do
+        while IFS='|' read -r nick cred expiry _rest || [ -n "${nick:-}" ]; do
             nick="${nick//$'\r'/}"
             cred="${cred//$'\r'/}"
-            [ -n "${nick:-}" ] && [ -n "${cred:-}" ] || continue
+            if [ -z "${nick:-}" ] || [ -z "${cred:-}" ]; then
+                continue
+            fi
 
             if [ "$network" = "trojan" ]; then
-                [[ "$cred" =~ ^[0-9a-fA-F]{32}$ ]] || continue
+                if [[ ! "$cred" =~ ^[0-9a-fA-F]{32}$ ]]; then
+                    continue
+                fi
             else
-                [[ "$cred" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || continue
+                if [[ ! "$cred" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+                    continue
+                fi
             fi
 
             local email_out="$nick"
@@ -372,19 +385,22 @@ _build_initial_clients_and_sample() {
                     cred_out=$(generate_uuid)
                 fi
             else
-                [ -z "$sample_cred" ] && sample_cred="$cred"
+                if [ -z "$SAMPLE_CRED" ]; then
+                    SAMPLE_CRED="$cred"
+                fi
             fi
 
             if [ "$network" = "trojan" ]; then
                 jq -c --arg pwd "$cred_out" --arg em "$email_out" \
-                    '. + [{"password":$pwd,"email":$em,"level":0}]' "$tmp_clients" > "${tmp_clients}.new" && mv -f "${tmp_clients}.new" "$tmp_clients"
+                    '. + [{"password":$pwd,"email":$em,"level":0}]' "$out_file" > "${out_file}.new"
             elif [ "$network" = "vision" ]; then
                 jq -c --arg id "$cred_out" --arg em "$email_out" \
-                    '. + [{"id":$id,"email":$em,"level":0,"flow":"xtls-rprx-vision"}]' "$tmp_clients" > "${tmp_clients}.new" && mv -f "${tmp_clients}.new" "$tmp_clients"
+                    '. + [{"id":$id,"email":$em,"level":0,"flow":"xtls-rprx-vision"}]' "$out_file" > "${out_file}.new"
             else
                 jq -c --arg id "$cred_out" --arg em "$email_out" \
-                    '. + [{"id":$id,"email":$em,"level":0}]' "$tmp_clients" > "${tmp_clients}.new" && mv -f "${tmp_clients}.new" "$tmp_clients"
+                    '. + [{"id":$id,"email":$em,"level":0}]' "$out_file" > "${out_file}.new"
             fi
+            mv -f "${out_file}.new" "$out_file"
             imported=$((imported + 1))
         done < "$USER_DB"
     fi
@@ -397,35 +413,30 @@ _build_initial_clients_and_sample() {
         default_pass=$(_generate_random_alnum 10)
 
         if [ "$network" = "trojan" ]; then
-            sample_cred=$(generate_trojan_password)
-            jq -n -c --arg pwd "$sample_cred" --arg em "$default_nick" \
-                '[{"password":$pwd,"email":$em,"level":0}]' > "$tmp_clients"
+            SAMPLE_CRED=$(generate_trojan_password)
+            jq -n -c --arg pwd "$SAMPLE_CRED" --arg em "$default_nick" \
+                '[{"password":$pwd,"email":$em,"level":0}]' > "$out_file"
         elif [ "$network" = "vision" ]; then
-            sample_cred=$(generate_uuid)
-            jq -n -c --arg id "$sample_cred" --arg em "$default_nick" \
-                '[{"id":$id,"email":$em,"level":0,"flow":"xtls-rprx-vision"}]' > "$tmp_clients"
+            SAMPLE_CRED=$(generate_uuid)
+            jq -n -c --arg id "$SAMPLE_CRED" --arg em "$default_nick" \
+                '[{"id":$id,"email":$em,"level":0,"flow":"xtls-rprx-vision"}]' > "$out_file"
         else
-            sample_cred=$(generate_uuid)
-            jq -n -c --arg id "$sample_cred" --arg em "$default_nick" \
-                '[{"id":$id,"email":$em,"level":0}]' > "$tmp_clients"
+            SAMPLE_CRED=$(generate_uuid)
+            jq -n -c --arg id "$SAMPLE_CRED" --arg em "$default_nick" \
+                '[{"id":$id,"email":$em,"level":0}]' > "$out_file"
         fi
 
         mkdir -p "$XRAYTOOLS_DIR"
-        echo "${default_nick}|${sample_cred}|${default_exp}|${default_pass}|0" >> "$USER_DB"
+        echo "${default_nick}|${SAMPLE_CRED}|${default_exp}|${default_pass}|0" >> "$USER_DB"
         chmod 600 "$USER_DB"
         chown root:root "$USER_DB"
-    elif [ -z "$sample_cred" ]; then
+    elif [ -z "$SAMPLE_CRED" ]; then
         if [ "$network" = "trojan" ]; then
-            sample_cred=$(generate_trojan_password)
+            SAMPLE_CRED=$(generate_trojan_password)
         else
-            sample_cred=$(generate_uuid)
+            SAMPLE_CRED=$(generate_uuid)
         fi
     fi
-
-    local clients_out
-    clients_out=$(jq -c '.' "$tmp_clients")
-    rm -f "$tmp_clients"
-    printf '%s\n%s\n' "$sample_cred" "$clients_out"
 }
 
 _build_routing_rules() {
@@ -493,7 +504,9 @@ func_generate_config() {
             echo ""
             read -rp "Host adicional CDN (Enter = usar só domínio): " extra_host
             extra_host=$(echo "${extra_host:-}" | tr -d '[:space:][:cntrl:]')
-            [ -n "$extra_host" ] && xhttp_host_field="${domain},${extra_host}"
+            if [ -n "$extra_host" ]; then
+                xhttp_host_field="${domain},${extra_host}"
+            fi
 
             if [ "$xhttp_mode" = "3" ]; then
                 echo ""
@@ -632,20 +645,23 @@ func_generate_config() {
             fi ;;
     esac
 
-    local client_bundle credential clients_json
-    client_bundle=$(_build_initial_clients_and_sample "$network")
-    credential=$(echo "$client_bundle" | sed -n '1p')
-    clients_json=$(echo "$client_bundle" | sed -n '2p')
+    local tmp_clients
+    tmp_clients=$(mktemp /tmp/xray_clients_XXXXXX.json)
+    _build_initial_clients "$network" "$tmp_clients"
+    local credential="$SAMPLE_CRED"
 
-    if [ -z "${credential:-}" ] || [ -z "${clients_json:-}" ]; then
-        echo -e "${TXT_RED}❌ Falha ao gerar credenciais iniciais.${RESET}"; return 1
+    if [ -z "${credential:-}" ] || [ ! -s "$tmp_clients" ] || ! jq empty "$tmp_clients" 2>/dev/null; then
+        rm -f "$tmp_clients"
+        echo -e "${TXT_RED}❌ Falha ao gerar credenciais iniciais.${RESET}"
+        return 1
     fi
 
     if [ -f "$CONFIG_PATH" ]; then
         cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
     fi
 
-    local tmp_config; tmp_config=$(mktemp /tmp/xray_config_XXXXXX.json)
+    local tmp_config
+    tmp_config=$(mktemp /tmp/xray_config_XXXXXX.json)
 
     local inbound_protocol="vless"
     if [ "$network" = "trojan" ]; then
@@ -653,15 +669,17 @@ func_generate_config() {
     fi
 
     jq -n \
-        --argjson stream   "$stream_settings" \
-        --arg     port     "$port" \
-        --arg     api      "$api_port" \
-        --argjson pol      "$policy" \
-        --argjson rules    "$routing_rules" \
-        --argjson clients  "$clients_json" \
-        --arg     proto    "$inbound_protocol" \
-        '{log:{loglevel:"warning"},stats:{},api:{services:["HandlerService","LoggerService","StatsService"],tag:"api"},policy:$pol,inbounds:[{tag:"api",port:($api|tonumber),protocol:"dokodemo-door",settings:{address:"127.0.0.1"},listen:"127.0.0.1"},{tag:"inbound-turbonet",port:($port|tonumber),protocol:$proto,settings:(if $proto=="trojan" then {clients:$clients} else {clients:$clients,decryption:"none",fallbacks:[]} end),streamSettings:$stream}],outbounds:[{protocol:"freedom",tag:"direct"},{protocol:"blackhole",tag:"blocked"},{protocol:"freedom",tag:"api"}],routing:{domainStrategy:"AsIs",rules:$rules}}' \
+        --argjson   stream   "$stream_settings" \
+        --arg       port     "$port" \
+        --arg       api      "$api_port" \
+        --argjson   pol      "$policy" \
+        --argjson   rules    "$routing_rules" \
+        --slurpfile clients  "$tmp_clients" \
+        --arg       proto    "$inbound_protocol" \
+        '{log:{loglevel:"warning"},stats:{},api:{services:["HandlerService","LoggerService","StatsService"],tag:"api"},policy:$pol,inbounds:[{tag:"api",port:($api|tonumber),protocol:"dokodemo-door",settings:{address:"127.0.0.1"},listen:"127.0.0.1"},{tag:"inbound-turbonet",port:($port|tonumber),protocol:$proto,settings:(if $proto=="trojan" then {clients:$clients[0]} else {clients:$clients[0],decryption:"none",fallbacks:[]} end),streamSettings:$stream}],outbounds:[{protocol:"freedom",tag:"direct"},{protocol:"blackhole",tag:"blocked"},{protocol:"freedom",tag:"api"}],routing:{domainStrategy:"AsIs",rules:$rules}}' \
         > "$tmp_config"
+
+    rm -f "$tmp_clients"
 
     if ! jq empty "$tmp_config" 2>/dev/null; then
         echo -e "${TXT_RED}❌ Config JSON inválido.${RESET}"; rm -f "$tmp_config"; return 1
@@ -700,7 +718,7 @@ func_generate_config() {
     fi
     sleep 2
 
-    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2.1)"
+    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2.2)"
 
     local status_show="${TXT_RED}FALHA${RESET}"
     if systemctl is-active --quiet xray 2>/dev/null; then
