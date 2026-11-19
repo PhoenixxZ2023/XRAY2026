@@ -1,15 +1,11 @@
 #!/bin/bash
-# check_api.sh - TURBONET XRAY V1.2
-# Correções aplicadas V1.1:
-# - AUTENTICAÇÃO API KEY: Exige X-API-Key no header para proteger dados sensíveis
-# - Endpoint /health continua público (healthcheck)
-# - API key gerada automaticamente em install_api_key()
-# - Rate limiting básico por IP (evita enumeração)
-# - Correção Python: capture_output substituído por stdout/stderr=PIPE para compatibilidade
-#
-# Melhorias V1.2 (Segurança):
-# - ELIMINADO RCE RISK: O comando 'systemctl' não é mais executado via Python. Substituído por varredura passiva do /proc.
-# - Proteção de Escopo e I/O: Sanitização da resposta HTTP contra vazamento de stack trace do Python.
+# check_api.sh - TURBONET XRAY V1.3
+# Correções aplicadas V1.3:
+# - Daemon iniciado com nohup + redirecionamento para $API_LOG (sobrevive ao logout SSH)
+# - ThreadingHTTPServer com allow_reuse_address = True (evita erro TIME_WAIT ao reiniciar)
+# - Correção em days_left() comparando .date() (não marca usuário como expirado no dia do vencimento)
+# - Rate limiting thread-safe em memória com limpeza automática e proteção contra spoof de X-Forwarded-For
+# - Comparação de API Key via hmac.compare_digest() e restart automático ao regenerar chave
 
 set -Eeuo pipefail
 
@@ -23,7 +19,6 @@ API_PID_FILE="/tmp/turbonet_check_api.pid"
 API_PORT_FILE="/tmp/turbonet_check_api.port"
 API_LOG="/tmp/turbonet_check_api.log"
 DEFAULT_PORT=9090
-RATE_LIMIT_FILE="/tmp/turbonet_api_ratelimit.db"
 
 TXT_GREEN='\033[1;32m'
 TXT_RED='\033[1;31m'
@@ -37,72 +32,17 @@ RESET='\033[0m'
 # ================================================================
 
 install_api_key() {
-    if [ ! -f "$API_KEY_FILE" ]; then
+    if [ ! -s "$API_KEY_FILE" ]; then
         mkdir -p "$(dirname "$API_KEY_FILE")"
         openssl rand -hex 32 > "$API_KEY_FILE"
         chmod 0600 "$API_KEY_FILE"
+        chown root:root "$API_KEY_FILE"
         echo -e "${TXT_GREEN}✅ API key gerada: $API_KEY_FILE${RESET}"
     fi
 }
 
-validate_api_key() {
-    local provided_key="$1"
-    local stored_key
-
-    [ -z "$API_KEY_FILE" ] && return 1
-    [ ! -f "$API_KEY_FILE" ] && return 1
-
-    stored_key=$(cat "$API_KEY_FILE" 2>/dev/null || echo "")
-    [ -z "$stored_key" ] && return 1
-
-    if [ "${#provided_key}" -eq "${#stored_key}" ]; then
-        if [ "$provided_key" = "$stored_key" ]; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
-get_client_ip() {
-    local ip="${REMOTE_ADDR:-127.0.0.1}"
-    ip="${HTTP_X_FORWARDED_FOR:-$ip}"
-    ip="${HTTP_X_REAL_IP:-$ip}"
-    echo "$ip" | cut -d',' -f1 | cut -d' ' -f1
-}
-
-check_rate_limit() {
-    local client_ip="$1"
-    local now current_count max_requests window
-
-    now=$(date +%s)
-    max_requests=60
-    window=60
-
-    [ ! -d "$(dirname "$RATE_LIMIT_FILE")" ] && mkdir -p "$(dirname "$RATE_LIMIT_FILE")"
-    touch "$RATE_LIMIT_FILE"
-    chmod 0600 "$RATE_LIMIT_FILE"
-
-    awk -F'|' -v now="$now" -v window="$window" '
-        BEGIN { cutoff = now - (window * 2) }
-        $3 > cutoff { print }
-    ' "$RATE_LIMIT_FILE" > "${RATE_LIMIT_FILE}.tmp" 2>/dev/null
-    mv -f "${RATE_LIMIT_FILE}.tmp" "$RATE_LIMIT_FILE"
-
-    current_count=$(awk -F'|' -v ip="$client_ip" -v now="$now" -v window="$window" '
-        $1 == ip && ($3 > (now - window)) { count++ }
-        END { print (count + 0) }
-    ' "$RATE_LIMIT_FILE" 2>/dev/null || echo "0")
-
-    if [ "$current_count" -ge "$max_requests" ]; then
-        return 1
-    fi
-
-    echo "${client_ip}|${now}" >> "$RATE_LIMIT_FILE"
-    return 0
-}
-
 show_api_key() {
-    if [ -f "$API_KEY_FILE" ]; then
+    if [ -s "$API_KEY_FILE" ]; then
         echo -e "${TXT_CYAN}API Key atual:${RESET}"
         cat "$API_KEY_FILE"
     else
@@ -118,43 +58,27 @@ regenerate_api_key() {
         return 1
     fi
 
+    local was_running=false
+    local running_port="$DEFAULT_PORT"
+    if [ -f "$API_PID_FILE" ]; then
+        local old_pid
+        old_pid=$(cat "$API_PID_FILE" 2>/dev/null || true)
+        if [ -n "${old_pid:-}" ] && kill -0 "$old_pid" 2>/dev/null; then
+            was_running=true
+            [ -f "$API_PORT_FILE" ] && running_port=$(cat "$API_PORT_FILE" 2>/dev/null || echo "$DEFAULT_PORT")
+        fi
+    fi
+
     rm -f "$API_KEY_FILE"
     install_api_key
     echo -e "${TXT_GREEN}✅ Nova API key gerada!${RESET}"
     show_api_key
-}
 
-# ================================================================
-# HELPERS DE STATUS
-# ================================================================
-
-_is_expired() {
-    local expiry="$1"
-    [[ "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 0
-    local exp_ts today_ts
-    exp_ts=$(date -d "$expiry" +%s 2>/dev/null) || return 0
-    today_ts=$(date +%s)
-    [ "$exp_ts" -lt "$today_ts" ]
-}
-
-_days_left() {
-    local expiry="$1"
-    [[ "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo -1; return; }
-    local exp_ts today_ts
-    exp_ts=$(date -d "$expiry" +%s 2>/dev/null) || { echo -1; return; }
-    today_ts=$(date +%s)
-    echo $(( (exp_ts - today_ts) / 86400 ))
-}
-
-_is_locked() {
-    local nick="$1"
-    [ ! -s "$CONFIG_PATH" ] && echo false && return
-    if jq -e --arg lock "LOCKED_${nick}" '
-        any(.inbounds[]? | select(.tag=="inbound-turbonet").settings.clients[]?; .email == $lock)
-    ' "$CONFIG_PATH" >/dev/null 2>&1; then
-        echo true
-    else
-        echo false
+    if [ "$was_running" = true ]; then
+        echo ""
+        echo -e "${TXT_YELLOW}Reiniciando API na porta ${running_port} para aplicar a nova chave...${RESET}"
+        _stop_api_server
+        _start_api_server "$running_port"
     fi
 }
 
@@ -162,10 +86,29 @@ _is_locked() {
 # SERVIDOR HTTP COM AUTENTICAÇÃO
 # ================================================================
 
+_port_in_use() {
+    local port="$1"
+    if command -v ss &>/dev/null; then
+        ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)${port}$"
+    else
+        python3 -c "import socket,sys; s=socket.socket(); r=s.connect_ex(('127.0.0.1',int(sys.argv[1]))); s.close(); sys.exit(0 if r==0 else 1)" "$port" 2>/dev/null
+    fi
+}
+
 _start_api_server() {
     local port="${1:-$DEFAULT_PORT}"
 
-    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+    if [ -f "$API_PID_FILE" ]; then
+        local existing_pid
+        existing_pid=$(cat "$API_PID_FILE" 2>/dev/null || true)
+        if [ -n "${existing_pid:-}" ] && kill -0 "$existing_pid" 2>/dev/null; then
+            echo -e "${TXT_YELLOW}⚠ A API já está em execução (PID ${existing_pid}). Pare-a antes de iniciar outra.${RESET}"
+            return 1
+        fi
+        rm -f "$API_PID_FILE" "$API_PORT_FILE"
+    fi
+
+    if _port_in_use "$port"; then
         echo -e "${TXT_RED}❌ Porta ${port} já está em uso.${RESET}"
         return 1
     fi
@@ -173,14 +116,20 @@ _start_api_server() {
     install_api_key
 
     local api_key
-    api_key=$(cat "$API_KEY_FILE" 2>/dev/null || echo "")
+    api_key=$(tr -d '[:space:]' < "$API_KEY_FILE" 2>/dev/null || echo "")
+    if [ -z "$api_key" ]; then
+        echo -e "${TXT_RED}❌ Falha ao ler API key.${RESET}"
+        return 1
+    fi
+
+    touch "$API_LOG"
+    chmod 0600 "$API_LOG"
 
     echo -e "${TXT_YELLOW}Iniciando API protegida na porta ${port}...${RESET}"
 
-    # V1.2: Servidor Python blindado contra I/O leak e subprocesses.
-    python3 - "$port" "$api_key" "$USER_DB" "$CONFIG_PATH" "$PRESET_FILE" "$RATE_LIMIT_FILE" << 'PYSERVER' &
-import sys, json, os, time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+    nohup python3 - "$port" "$api_key" "$USER_DB" "$CONFIG_PATH" "$PRESET_FILE" </dev/null >>"$API_LOG" 2>&1 << 'PYSERVER' &
+import sys, json, os, time, hmac, threading
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 
@@ -189,10 +138,17 @@ API_KEY = sys.argv[2]
 USER_DB = sys.argv[3]
 CFG = sys.argv[4]
 PRESET = sys.argv[5]
-RATE_FILE = sys.argv[6]
+
+RATE_LOCK = threading.Lock()
+RATE_BUCKETS = {}
+RATE_MAX = 60
+RATE_WINDOW = 60
+
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
 
 def is_process_running(proc_name):
-    # V1.2: Leitura passiva do proc em vez de subprocess execution
     try:
         for pid in os.listdir('/proc'):
             if pid.isdigit():
@@ -200,19 +156,19 @@ def is_process_running(proc_name):
                     with open(os.path.join('/proc', pid, 'comm'), 'r') as f:
                         if f.read().strip() == proc_name:
                             return True
-                except:
+                except Exception:
                     continue
-    except:
+    except Exception:
         pass
     return False
 
 def load_db():
     users = {}
     if os.path.exists(USER_DB):
-        with open(USER_DB) as f:
+        with open(USER_DB, 'r', encoding='utf-8', errors='replace') as f:
             for line in f:
                 parts = line.strip().split('|')
-                if len(parts) >= 3:
+                if len(parts) >= 3 and parts[0]:
                     users[parts[0].lower()] = {'uuid': parts[1], 'expiry': parts[2]}
     return users
 
@@ -226,82 +182,88 @@ def is_locked(nick, cfg_data):
 
 def days_left(expiry):
     try:
-        exp = datetime.strptime(expiry, '%Y-%m-%d')
-        return (exp - datetime.now()).days
-    except:
+        exp_date = datetime.strptime(expiry, '%Y-%m-%d').date()
+        return (exp_date - datetime.now().date()).days
+    except Exception:
         return -1
 
-def user_status(nick, uuid, expiry, locked):
-    if locked: return 'suspended'
-    if days_left(expiry) < 0: return 'expired'
+def user_status(expiry, locked):
+    if locked:
+        return 'suspended'
+    if days_left(expiry) < 0:
+        return 'expired'
     return 'active'
 
 def load_cfg():
     try:
-        with open(CFG) as f: return json.load(f)
-    except: return {}
+        with open(CFG, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 def load_preset():
     try:
-        with open(PRESET) as f: return json.load(f)
-    except: return {}
+        with open(PRESET, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 def check_rate_limit(ip):
-    now = int(time.time())
-    try:
-        if os.path.exists(RATE_FILE):
-            with open(RATE_FILE) as f:
-                lines = f.readlines()
-        else:
-            lines = []
+    now = time.time()
+    cutoff = now - RATE_WINDOW
+    with RATE_LOCK:
+        # Limpeza periódica para evitar crescimento de memória
+        if len(RATE_BUCKETS) > 1024:
+            stale = [k for k, v in RATE_BUCKETS.items() if not v or v[-1] <= cutoff]
+            for k in stale:
+                del RATE_BUCKETS[k]
 
-        recent = [l for l in lines if len(l.split('|')) >= 2 and int(l.split('|')[1]) > now - 120]
-        count = sum(1 for l in recent if l.startswith(f"{ip}|"))
-
-        if count >= 60:
+        timestamps = [t for t in RATE_BUCKETS.get(ip, []) if t > cutoff]
+        if len(timestamps) >= RATE_MAX:
+            RATE_BUCKETS[ip] = timestamps
             return False
-
-        with open(RATE_FILE, 'a') as f:
-            f.write(f"{ip}|{now}\n")
-        return True
-    except:
+        timestamps.append(now)
+        RATE_BUCKETS[ip] = timestamps
         return True
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        pass  # Silencia log padrão
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        sys.stdout.write(f"[{ts}] {self.client_address[0]} - {fmt % args}\n")
+        sys.stdout.flush()
 
     def send_json(self, code, data):
-        body = json.dumps(data, ensure_ascii=False).encode()
+        body = json.dumps(data, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Content-Length', len(body))
+        self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(body)
 
     def get_client_ip(self):
-        ip = self.client_address[0]
-        if self.headers.get('X-Forwarded-For'):
-            ip = self.headers.get('X-Forwarded-For').split(',')[0].strip()
-        elif self.headers.get('X-Real-IP'):
-            ip = self.headers.get('X-Real-IP')
-        return ip
+        peer_ip = self.client_address[0]
+        # Aceita cabeçalhos de encaminhamento apenas se vierem de proxy reverso local
+        if peer_ip in ('127.0.0.1', '::1'):
+            xff = self.headers.get('X-Forwarded-For')
+            if xff:
+                return xff.split(',')[0].strip()
+            xri = self.headers.get('X-Real-IP')
+            if xri:
+                return xri.strip()
+        return peer_ip
 
     def check_auth(self):
-        provided_key = self.headers.get('X-API-Key', '')
-        if len(provided_key) != len(API_KEY):
+        provided_key = self.headers.get('X-API-Key', '').strip()
+        if not provided_key or not API_KEY:
             return False
-        for i in range(len(provided_key)):
-            if provided_key[i] != API_KEY[i]:
-                return False
-        return True
+        return hmac.compare_digest(provided_key, API_KEY)
 
     def do_GET(self):
         try:
             parsed = urlparse(self.path)
             qs = parse_qs(parsed.query)
-            path = parsed.path.rstrip('/')
+            path = parsed.path.rstrip('/') or '/'
             client_ip = self.get_client_ip()
 
             if path != '/health' and not check_rate_limit(client_ip):
@@ -315,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/health':
                 self.send_json(200, {
                     'status': 'ok',
-                    'service': 'TURBONET XRAY Check API V1.2',
+                    'service': 'TURBONET XRAY Check API V1.3',
                     'version': 'auth_required'
                 })
                 return
@@ -331,20 +293,24 @@ class Handler(BaseHTTPRequestHandler):
             if path in ('/check/status', '/status'):
                 cfg = load_cfg()
                 preset = load_preset()
-                # V1.2: Chama is_process_running em vez de systemctl
                 xray_ok = is_process_running('xray') or is_process_running('xray-core')
                 users = load_db()
                 total = len(users)
-                active = sum(1 for n, u in users.items()
-                    if not is_locked(n, cfg) and days_left(u['expiry']) >= 0)
-                expired = sum(1 for u in users.values() if days_left(u['expiry']) < 0)
+                active = sum(
+                    1 for n, u in users.items()
+                    if not is_locked(n, cfg) and days_left(u['expiry']) >= 0
+                )
+                expired = sum(
+                    1 for n, u in users.items()
+                    if not is_locked(n, cfg) and days_left(u['expiry']) < 0
+                )
                 suspended = total - active - expired
 
                 self.send_json(200, {
                     'xray': 'active' if xray_ok else 'inactive',
-                    'protocol': preset.get('network',''),
-                    'port': preset.get('port',''),
-                    'domain': preset.get('domain',''),
+                    'protocol': preset.get('network', ''),
+                    'port': preset.get('port', ''),
+                    'domain': preset.get('domain', ''),
                     'users': {
                         'total': total,
                         'active': active,
@@ -375,7 +341,7 @@ class Handler(BaseHTTPRequestHandler):
                         'name': nick,
                         'uuid': u['uuid'],
                         'expiry': u['expiry'],
-                        'status': user_status(nick, u['uuid'], u['expiry'], locked),
+                        'status': user_status(u['expiry'], locked),
                         'days_left': dl,
                         'locked': locked
                     })
@@ -391,7 +357,7 @@ class Handler(BaseHTTPRequestHandler):
                                 'name': nick,
                                 'uuid': u['uuid'],
                                 'expiry': u['expiry'],
-                                'status': user_status(nick, u['uuid'], u['expiry'], locked),
+                                'status': user_status(u['expiry'], locked),
                                 'days_left': dl,
                                 'locked': locked
                             })
@@ -414,19 +380,19 @@ class Handler(BaseHTTPRequestHandler):
                     '/check/status (requer X-API-Key)'
                 ]
             })
-        except Exception as e:
-            # V1.2: Esconde detalhes do sistema se houver quebra (Security feature)
+        except Exception:
             self.send_json(500, {'error': 'internal_server_error'})
 
-HTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
+ReusableThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
 PYSERVER
 
     local server_pid=$!
-    sleep 2
+    sleep 1
 
     if kill -0 "$server_pid" 2>/dev/null; then
         echo "$server_pid" > "$API_PID_FILE"
         echo "$port" > "$API_PORT_FILE"
+        chmod 0600 "$API_PID_FILE" "$API_PORT_FILE"
         echo -e "${TXT_GREEN}✅ API protegida iniciada! PID: ${server_pid}${RESET}"
         echo ""
         echo -e " ${TXT_CYAN}Endpoints disponíveis:${RESET}"
@@ -442,13 +408,13 @@ PYSERVER
         echo -e "   GET http://${pub_ip}:${port}/check/status"
         echo ""
         echo -e " ${TXT_CYAN}Cabeçalhos necessários:${RESET}"
-        echo -e "   X-API-Key: $(cat "$API_KEY_FILE" 2>/dev/null | cut -c1-8)..."
+        echo -e "   X-API-Key: ${api_key:0:8}..."
         echo ""
         echo -e " ${TXT_RED}⚠ Certifique-se que a porta ${port} está aberta no firewall!${RESET}"
         echo ""
-        echo " Para parar: selecione [2] Parar API neste menu"
+        echo " Para parar: selecione [3] Parar API neste menu"
     else
-        echo -e "${TXT_RED}❌ Falha ao iniciar a API. Verifique logs.${RESET}"
+        echo -e "${TXT_RED}❌ Falha ao iniciar a API. Verifique os logs em [7].${RESET}"
         rm -f "$API_PID_FILE" "$API_PORT_FILE"
         return 1
     fi
@@ -460,11 +426,13 @@ _stop_api_server() {
         return 0
     fi
 
-    local pid; pid=$(cat "$API_PID_FILE")
+    local pid
+    pid=$(cat "$API_PID_FILE" 2>/dev/null || true)
 
-    if kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null
+    if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
         sleep 1
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
         echo -e "${TXT_GREEN}✅ API parada (PID ${pid}).${RESET}"
     else
         echo -e "${TXT_YELLOW}Processo já não existe.${RESET}"
@@ -479,13 +447,15 @@ _api_status() {
         return
     fi
 
-    local pid; pid=$(cat "$API_PID_FILE")
-    local port=""; [ -f "$API_PORT_FILE" ] && port=$(cat "$API_PORT_FILE")
+    local pid
+    pid=$(cat "$API_PID_FILE" 2>/dev/null || true)
+    local port=""
+    [ -f "$API_PORT_FILE" ] && port=$(cat "$API_PORT_FILE" 2>/dev/null || true)
 
-    if kill -0 "$pid" 2>/dev/null; then
+    if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
         echo -e " ${TXT_GREEN}ATIVA${RESET} — PID ${pid}, porta ${port}"
     else
-        echo -e " ${TXT_RED}PROCESSO MORTO${RESET} (PID ${pid} não existe)"
+        echo -e " ${TXT_RED}PROCESSO MORTO${RESET} (PID ${pid:-?} não existe)"
         rm -f "$API_PID_FILE" "$API_PORT_FILE"
     fi
 }
@@ -494,38 +464,35 @@ _test_api() {
     if [ ! -f "$API_PORT_FILE" ]; then
         echo -e "${TXT_RED}API não está rodando.${RESET}"; return
     fi
-    if [ ! -f "$API_KEY_FILE" ]; then
+    if [ ! -s "$API_KEY_FILE" ]; then
         echo -e "${TXT_RED}API key não encontrada.${RESET}"; return
     fi
 
     local port api_key
     port=$(cat "$API_PORT_FILE")
-    api_key=$(cat "$API_KEY_FILE")
+    api_key=$(tr -d '[:space:]' < "$API_KEY_FILE")
 
     echo -e "${TXT_CYAN}Testando API na porta ${port}...${RESET}"
     echo ""
 
-    # Testa health (público)
     echo -e "${TXT_YELLOW}[GET /health] — SEM AUTENTICAÇÃO${RESET}"
     curl -s "http://127.0.0.1:${port}/health" | python3 -m json.tool 2>/dev/null || \
     curl -s "http://127.0.0.1:${port}/health"
     echo ""
 
-    # Testa sem API key (deve falhar)
     echo -e "${TXT_YELLOW}[GET /check/status] — SEM API KEY (deve falhar 401)${RESET}"
     curl -s "http://127.0.0.1:${port}/check/status" | python3 -m json.tool 2>/dev/null || \
     curl -s "http://127.0.0.1:${port}/check/status"
     echo ""
 
-    # Testa com API key correta
     echo -e "${TXT_YELLOW}[GET /check/status] — COM API KEY CORRETA${RESET}"
     curl -s -H "X-API-Key: ${api_key}" "http://127.0.0.1:${port}/check/status" | python3 -m json.tool 2>/dev/null || \
     curl -s -H "X-API-Key: ${api_key}" "http://127.0.0.1:${port}/check/status"
     echo ""
 
-    # Testa com usuário
     if [ -s "$USER_DB" ]; then
-        local first_user; first_user=$(head -1 "$USER_DB" | cut -d'|' -f1)
+        local first_user
+        first_user=$(head -1 "$USER_DB" | cut -d'|' -f1)
         echo -e "${TXT_YELLOW}[GET /check?user=${first_user}] — COM API KEY${RESET}"
         curl -s -H "X-API-Key: ${api_key}" "http://127.0.0.1:${port}/check?user=${first_user}" | python3 -m json.tool 2>/dev/null || \
         curl -s -H "X-API-Key: ${api_key}" "http://127.0.0.1:${port}/check?user=${first_user}"
@@ -545,7 +512,7 @@ fi
 
 while true; do
     clear
-    echo -e "${TITLE_BAR} API /CHECK — TURBONET XRAY V1.2 ${RESET}"
+    echo -e "${TITLE_BAR} API /CHECK — TURBONET XRAY V1.3 ${RESET}"
     echo ""
     echo -e " Status:$(_api_status)"
     echo ""
@@ -576,7 +543,7 @@ while true; do
         3) _stop_api_server; read -rp "Enter..." ;;
         4) _test_api; read -rp "Enter..." ;;
         5)
-            if [ -f "$API_KEY_FILE" ]; then
+            if [ -s "$API_KEY_FILE" ]; then
                 echo ""
                 echo -e "${TXT_CYAN}Sua API Key:${RESET}"
                 cat "$API_KEY_FILE"
@@ -588,11 +555,11 @@ while true; do
             read -rp "Enter..."
         ;;
         6)
-            regenerate_api_key
+            regenerate_api_key || true
             read -rp "Enter..."
         ;;
         7)
-            if [ -f "$API_LOG" ]; then
+            if [ -s "$API_LOG" ]; then
                 tail -30 "$API_LOG"
             else
                 echo "Sem logs disponíveis."
