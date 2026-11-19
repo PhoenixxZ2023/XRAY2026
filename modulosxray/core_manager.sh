@@ -1,18 +1,12 @@
 #!/bin/bash
-# core_manager.sh - TURBONET XRAY V1.0 (Otimizado com Engenharia DragonCore)
+# core_manager.sh - TURBONET XRAY V1.1 (Otimizado com Engenharia DragonCore)
 # Correções aplicadas:
-#   - chmod 777 → 640/600/700 em todos os arquivos sensíveis
-#   - connection_info.txt (UUID + link) agora 600 root:root
-#   - certxray.sh agora 700 root:root — impede substituição por processo não-root
-#   - Porta API padrão 1080 com fallback dinâmico via _find_free_api_port()
-#   - Validação de shebang BOM-safe em func_install_official_core e func_xray_cert
-#   - validate_domain_or_ip rejeita loopback, broadcast e endereços reservados óbvios
-#   - REMOVIDA tag 'geosite:malware' do routing para evitar crash no geosite.dat padrão.
-# Otimizações Injetadas:
-#   - Systemd Tuning (GOMAXPROCS, LimitNOFILE, LimitNPROC)
-#   - MUX + XUDP na Rota de Saída (Jogos sem lag)
-#   - Headers Anti-Buffering e TCP NoDelay no SSHxHTTP
-#   - DNS Sinkhole (Bloqueio nativo de ADS no roteamento)
+#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
+#   - _apply_config_perms aplica 750/640 root:$XRAY_GROUP em /usr/local/etc/xray e /opt/TurbonetCoreSSL
+#   - Validação real com `xray run -test` sob o usuário do serviço antes de reiniciar
+#   - Resolvido GOMAXPROCS numérico no override.conf do systemd (sem literal $(nproc))
+#   - Checagem de shebang BOM-safe compatível com POSIX (sem dependência de grep -P)
+#   - Reaplicação automática de permissões ao reiniciar o serviço no menu [4]
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; read -rp "Enter para continuar...";' ERR
@@ -93,9 +87,63 @@ require_root() {
     fi
 }
 
+_detect_xray_owner() {
+    local svc_user=""
+    if command -v systemctl &>/dev/null; then
+        svc_user=$(systemctl show -p User --value xray 2>/dev/null || true)
+    fi
+    svc_user="${svc_user:-nobody}"
+    if ! id "$svc_user" &>/dev/null; then
+        svc_user="root"
+    fi
+    XRAY_USER="$svc_user"
+    XRAY_GROUP="$(id -gn "$XRAY_USER")"
+}
+
 _apply_config_perms() {
-    chmod 660 "$CONFIG_PATH"
-    chown root:"$XRAY_GROUP" "$CONFIG_PATH"
+    _detect_xray_owner
+    local cfg_dir
+    cfg_dir="$(dirname "$CONFIG_PATH")"
+
+    if [ -d "$cfg_dir" ]; then
+        chown -R "root:${XRAY_GROUP}" "$cfg_dir"
+        chmod 750 "$cfg_dir"
+        find "$cfg_dir" -maxdepth 1 -type f -exec chmod 640 {} +
+    fi
+
+    if [ -f "$CONFIG_PATH" ]; then
+        chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
+        chmod 640 "$CONFIG_PATH"
+    fi
+
+    if [ -f "$PRESET_FILE" ]; then
+        chown "root:${XRAY_GROUP}" "$PRESET_FILE"
+        chmod 640 "$PRESET_FILE"
+    fi
+
+    if [ -d "$SSL_DIR" ]; then
+        chown -R "root:${XRAY_GROUP}" "$SSL_DIR"
+        find "$SSL_DIR" -type d -exec chmod 750 {} +
+        find "$SSL_DIR" -type f -exec chmod 640 {} +
+    fi
+}
+
+_test_xray_config() {
+    local cfg="$1"
+    [ ! -x /usr/local/bin/xray ] && return 0
+    _detect_xray_owner
+    if command -v runuser &>/dev/null && [ "$XRAY_USER" != "root" ]; then
+        runuser -u "$XRAY_USER" -- /usr/local/bin/xray run -test -config "$cfg"
+    else
+        /usr/local/bin/xray run -test -config "$cfg"
+    fi
+}
+
+_check_shebang_bom_safe() {
+    local file="$1"
+    local first_line
+    first_line=$(LC_ALL=C head -n 1 "$file" | sed 's/^\xEF\xBB\xBF//')
+    [[ "$first_line" =~ ^#!.*(bash|sh|env[[:space:]]) ]]
 }
 
 validate_port() {
@@ -130,13 +178,13 @@ validate_domain_or_ip() {
         done
 
         local o1="${parts[0]}" o2="${parts[1]}"
-        if [ "$o1" -eq 0 ] || [ "$o1" -eq 127 ]; then return 1; fi          
-        if [ "$o1" -eq 255 ]; then return 1; fi                               
-        if [ "$o1" -eq 169 ] && [ "$o2" -eq 254 ]; then return 1; fi         
-        if (( o1 >= 224 && o1 <= 239 )); then return 1; fi                   
-        if [ "$o1" -eq 10 ]; then return 1; fi                               
-        if [ "$o1" -eq 172 ] && (( o2 >= 16 && o2 <= 31 )); then return 1; fi 
-        if [ "$o1" -eq 192 ] && [ "$o2" -eq 168 ]; then return 1; fi         
+        if [ "$o1" -eq 0 ] || [ "$o1" -eq 127 ]; then return 1; fi
+        if [ "$o1" -eq 255 ]; then return 1; fi
+        if [ "$o1" -eq 169 ] && [ "$o2" -eq 254 ]; then return 1; fi
+        if (( o1 >= 224 && o1 <= 239 )); then return 1; fi
+        if [ "$o1" -eq 10 ]; then return 1; fi
+        if [ "$o1" -eq 172 ] && (( o2 >= 16 && o2 <= 31 )); then return 1; fi
+        if [ "$o1" -eq 192 ] && [ "$o2" -eq 168 ]; then return 1; fi
 
         return 0
     fi
@@ -182,9 +230,9 @@ _verify_sha256() {
 port_in_use() {
     local port="$1"
     if command -v ss &>/dev/null; then
-        if ss -tlnp 2>/dev/null | grep -q ":${port} "; then return 0; fi
+        if ss -tlnp 2>/dev/null | grep -qE "(:|\])${port}\b"; then return 0; fi
     elif command -v netstat &>/dev/null; then
-        if netstat -tlnp 2>/dev/null | grep -q ":${port} "; then return 0; fi
+        if netstat -tlnp 2>/dev/null | grep -qE ":${port}\b"; then return 0; fi
     elif command -v lsof &>/dev/null; then
         if lsof -Pi :"$port" -sTCP:LISTEN -t &>/dev/null; then return 0; fi
     fi
@@ -229,23 +277,26 @@ func_install_official_core() {
         rm -f "$install_script"; sleep 2; return 1
     fi
 
-    if ! LC_ALL=C head -n 1 "$install_script" | grep -qP '^(\xEF\xBB\xBF)?#!.*(bash|env\s)'; then
+    if ! _check_shebang_bom_safe "$install_script"; then
         echo -e "${TXT_RED}❌ Script inválido.${RESET}"; rm -f "$install_script"; return 1
     fi
 
     chmod +x "$install_script"
     bash "$install_script" install
     rm -f "$install_script"
-    
+
     # Injeção DragonCore: Blindagem de CPU e Limites de Arquivo
+    local cpu_cores
+    cpu_cores=$(nproc 2>/dev/null || echo 1)
     mkdir -p /etc/systemd/system/xray.service.d
     cat <<EOF > /etc/systemd/system/xray.service.d/override.conf
 [Service]
 LimitNOFILE=65536
 LimitNPROC=65536
-Environment="GOMAXPROCS=\$(nproc)"
+Environment="GOMAXPROCS=${cpu_cores}"
 EOF
     systemctl daemon-reload
+    _apply_config_perms
 
     echo -e "${TXT_GREEN}Instalação e Tuning de CPU concluídos.${RESET}"
     sleep 1
@@ -266,7 +317,7 @@ func_xray_cert() {
         rm -f "$tmp"; return 1
     fi
 
-    if ! LC_ALL=C head -n 1 "$tmp" | grep -qP '^(\xEF\xBB\xBF)?#!.*(bash|env\s)'; then
+    if ! _check_shebang_bom_safe "$tmp"; then
         echo -e "${TXT_RED}❌ certxray.sh inválido.${RESET}"; rm -f "$tmp"; return 1
     fi
 
@@ -274,6 +325,7 @@ func_xray_cert() {
     chmod 700 "$cert_script"
     chown root:root "$cert_script"
     bash "$cert_script" "$dom"
+    _apply_config_perms
 }
 
 func_generate_config() {
@@ -281,6 +333,7 @@ func_generate_config() {
 
     ensure_cmd jq jq
     mkdir -p "$(dirname "$CONFIG_PATH")" "$XRAYTOOLS_DIR" "$SSL_DIR"
+    _apply_config_perms
 
     if [ "$use_tls" = "true" ]; then
         if [ ! -s "$CRT_FILE" ] || [ ! -s "$KEY_FILE" ]; then
@@ -295,11 +348,13 @@ func_generate_config() {
     fi
 
     local policy='{"levels":{"0":{"statsUserUplink":true,"statsUserDownlink":true}},"system":{"statsInboundUplink":true,"statsInboundDownlink":true}}'
-    
-    # REMOVIDO geosite:malware do routing para evitar o crash de inicialização no geosite.dat oficial.
+
+    # REMOVIDO geosite:malware do routing para evitar crash de inicialização no geosite.dat oficial.
     local routing_rules='[{"type":"field","outboundTag":"blocked","domain":["geosite:category-ads-all"]},{"type":"field","inboundTag":["api"],"outboundTag":"api"},{"type":"field","protocol":["bittorrent"],"outboundTag":"blocked"},{"type":"field","ip":["geoip:private"],"outboundTag":"blocked"}]'
 
     local stream_settings=""
+    local ssh_xhttp_enabled=false
+
     case "$network" in
         xhttp)
             echo ""
@@ -320,7 +375,7 @@ func_generate_config() {
             case "${sid_placement_opt:-1}" in
                 2) xhttp_sid_placement="header" ;;
                 3) xhttp_sid_placement="cookie" ;;
-                *)  xhttp_sid_placement="path"   ;;
+                *) xhttp_sid_placement="path"   ;;
             esac
 
             local xhttp_host_field="$domain"
@@ -328,9 +383,6 @@ func_generate_config() {
             read -rp "Host adicional CDN (Enter = usar só domínio): " extra_host
             extra_host=$(echo "${extra_host:-}" | tr -d '[:space:][:cntrl:]')
             [ -n "$extra_host" ] && xhttp_host_field="${domain},${extra_host}"
-
-            local ssh_xhttp_enabled=false
-            local ssh_path="/ssh"
 
             if [ "$xhttp_mode" = "3" ]; then
                 ssh_xhttp_enabled=true
@@ -341,80 +393,105 @@ func_generate_config() {
 
             if [ "$xhttp_mode" = "1" ]; then
                 if [ "$use_tls" = "true" ]; then
-                    stream_settings=$(jq -n                          --arg dom  "$domain"                          --arg crt  "$CRT_FILE"                          --arg key  "$KEY_FILE"                          --arg host "$xhttp_host_field"                          --arg sid  "$xhttp_sid_placement"                          '{network:"xhttp",security:"tls",
-                          sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                          tlsSettings:{serverName:$dom,
-                            certificates:[{certificateFile:$crt,keyFile:$key}],
-                            alpn:["http/1.1"],minVersion:"1.2"},
-                          xhttpSettings:{path:"/",host:$host,
-                            scMaxBufferedPosts:3,
-                            scMaxEachPostBytes:"131072",
-                            scStreamUpServerSecs:"5-15",
-                            xPaddingBytes:"0-0",
-                            sessionIDPlacement:$sid,
-                            header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                    stream_settings=$(jq -n \
+                        --arg dom  "$domain" \
+                        --arg crt  "$CRT_FILE" \
+                        --arg key  "$KEY_FILE" \
+                        --arg host "$xhttp_host_field" \
+                        --arg sid  "$xhttp_sid_placement" \
+                        '{network:"xhttp",security:"tls",
+                        sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
+                        tlsSettings:{serverName:$dom,
+                          certificates:[{certificateFile:$crt,keyFile:$key}],
+                          alpn:["http/1.1"],minVersion:"1.2"},
+                        xhttpSettings:{path:"/",host:$host,
+                          scMaxBufferedPosts:3,
+                          scMaxEachPostBytes:"131072",
+                          scStreamUpServerSecs:"5-15",
+                          xPaddingBytes:"0-0",
+                          sessionIDPlacement:$sid,
+                          header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
                 else
-                    stream_settings=$(jq -n                          --arg host "$xhttp_host_field"                          --arg sid  "$xhttp_sid_placement"                          '{network:"xhttp",security:"none",
-                          sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                          xhttpSettings:{path:"/",host:$host,
-                            scMaxBufferedPosts:3,
-                            scMaxEachPostBytes:"131072",
-                            scStreamUpServerSecs:"5-15",
-                            xPaddingBytes:"0-0",
-                            sessionIDPlacement:$sid,
-                            header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                    stream_settings=$(jq -n \
+                        --arg host "$xhttp_host_field" \
+                        --arg sid  "$xhttp_sid_placement" \
+                        '{network:"xhttp",security:"none",
+                        sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
+                        xhttpSettings:{path:"/",host:$host,
+                          scMaxBufferedPosts:3,
+                          scMaxEachPostBytes:"131072",
+                          scStreamUpServerSecs:"5-15",
+                          xPaddingBytes:"0-0",
+                          sessionIDPlacement:$sid,
+                          header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
                 fi
             elif [ "$xhttp_mode" = "3" ]; then
                 if [ "$use_tls" = "true" ]; then
-                    stream_settings=$(jq -n                          --arg dom  "$domain"                          --arg crt  "$CRT_FILE"                          --arg key  "$KEY_FILE"                          --arg host "$xhttp_host_field"                          '{network:"xhttp",security:"tls",
-                          sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                          tlsSettings:{serverName:$dom,
-                            certificates:[{certificateFile:$crt,keyFile:$key}],
-                            alpn:["h2","http/1.1"],minVersion:"1.2"},
-                          xhttpSettings:{path:"/",host:$host,
-                            scMaxBufferedPosts:10,
-                            scMaxEachPostBytes:"262144",
-                            scStreamUpServerSecs:"10-30",
-                            xPaddingBytes:"0-0",
-                            sessionIDPlacement:"header",
-                            sessionIDKey:"X-Session",
-                            header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                    stream_settings=$(jq -n \
+                        --arg dom  "$domain" \
+                        --arg crt  "$CRT_FILE" \
+                        --arg key  "$KEY_FILE" \
+                        --arg host "$xhttp_host_field" \
+                        '{network:"xhttp",security:"tls",
+                        sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
+                        tlsSettings:{serverName:$dom,
+                          certificates:[{certificateFile:$crt,keyFile:$key}],
+                          alpn:["h2","http/1.1"],minVersion:"1.2"},
+                        xhttpSettings:{path:"/",host:$host,
+                          scMaxBufferedPosts:10,
+                          scMaxEachPostBytes:"262144",
+                          scStreamUpServerSecs:"10-30",
+                          xPaddingBytes:"0-0",
+                          sessionIDPlacement:"header",
+                          sessionIDKey:"X-Session",
+                          header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
                 else
-                    stream_settings=$(jq -n                          --arg host "$xhttp_host_field"                          '{network:"xhttp",security:"none",
-                          sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                          xhttpSettings:{path:"/",host:$host,
-                            scMaxBufferedPosts:10,
-                            scMaxEachPostBytes:"262144",
-                            scStreamUpServerSecs:"10-30",
-                            xPaddingBytes:"0-0",
-                            sessionIDPlacement:"header",
-                            sessionIDKey:"X-Session",
-                            header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                    stream_settings=$(jq -n \
+                        --arg host "$xhttp_host_field" \
+                        '{network:"xhttp",security:"none",
+                        sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
+                        xhttpSettings:{path:"/",host:$host,
+                          scMaxBufferedPosts:10,
+                          scMaxEachPostBytes:"262144",
+                          scStreamUpServerSecs:"10-30",
+                          xPaddingBytes:"0-0",
+                          sessionIDPlacement:"header",
+                          sessionIDKey:"X-Session",
+                          header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
                 fi
             else
                 if [ "$use_tls" = "true" ]; then
-                    stream_settings=$(jq -n                          --arg dom  "$domain"                          --arg crt  "$CRT_FILE"                          --arg key  "$KEY_FILE"                          --arg host "$xhttp_host_field"                          --arg sid  "$xhttp_sid_placement"                          '{network:"xhttp",security:"tls",
-                          sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                          tlsSettings:{serverName:$dom,
-                            certificates:[{certificateFile:$crt,keyFile:$key}],
-                            alpn:["h2","http/1.1"],minVersion:"1.2"},
-                          xhttpSettings:{path:"/",host:$host,
-                            scMaxBufferedPosts:30,
-                            scMaxEachPostBytes:"1000000",
-                            scStreamUpServerSecs:"20-80",
-                            xPaddingBytes:"100-1000",
-                            sessionIDPlacement:$sid,
-                            header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                    stream_settings=$(jq -n \
+                        --arg dom  "$domain" \
+                        --arg crt  "$CRT_FILE" \
+                        --arg key  "$KEY_FILE" \
+                        --arg host "$xhttp_host_field" \
+                        --arg sid  "$xhttp_sid_placement" \
+                        '{network:"xhttp",security:"tls",
+                        sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
+                        tlsSettings:{serverName:$dom,
+                          certificates:[{certificateFile:$crt,keyFile:$key}],
+                          alpn:["h2","http/1.1"],minVersion:"1.2"},
+                        xhttpSettings:{path:"/",host:$host,
+                          scMaxBufferedPosts:30,
+                          scMaxEachPostBytes:"1000000",
+                          scStreamUpServerSecs:"20-80",
+                          xPaddingBytes:"100-1000",
+                          sessionIDPlacement:$sid,
+                          header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
                 else
-                    stream_settings=$(jq -n                          --arg host "$xhttp_host_field"                          --arg sid  "$xhttp_sid_placement"                          '{network:"xhttp",security:"none",
-                          sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                          xhttpSettings:{path:"/",host:$host,
-                            scMaxBufferedPosts:30,
-                            scMaxEachPostBytes:"1000000",
-                            scStreamUpServerSecs:"20-80",
-                            xPaddingBytes:"100-1000",
-                            sessionIDPlacement:$sid,
-                            header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                    stream_settings=$(jq -n \
+                        --arg host "$xhttp_host_field" \
+                        --arg sid  "$xhttp_sid_placement" \
+                        '{network:"xhttp",security:"none",
+                        sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
+                        xhttpSettings:{path:"/",host:$host,
+                          scMaxBufferedPosts:30,
+                          scMaxEachPostBytes:"1000000",
+                          scStreamUpServerSecs:"20-80",
+                          xPaddingBytes:"100-1000",
+                          sessionIDPlacement:$sid,
+                          header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
                 fi
             fi ;;
         ws)
@@ -434,7 +511,6 @@ func_generate_config() {
         vision)
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
                 '{network:"tcp",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.2"},tcpSettings:{header:{type:"none"}}}') ;;
-
         httpupgrade)
             if [ "$use_tls" = "true" ]; then
                 stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
@@ -443,15 +519,12 @@ func_generate_config() {
                 stream_settings=$(jq -n --arg dom "$domain" \
                     '{network:"httpupgrade",security:"none",httpupgradeSettings:{path:"/",host:$dom}}')
             fi ;;
-
         h2)
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
                 '{network:"h2",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],alpn:["h2"],minVersion:"1.2"},httpSettings:{path:"/",host:[$dom]}}') ;;
-
         trojan)
             stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
                 '{network:"tcp",security:"tls",tlsSettings:{serverName:$dom,certificates:[{certificateFile:$crt,keyFile:$key}],minVersion:"1.2"},tcpSettings:{header:{type:"none"}}}') ;;
-
         *)
             if [ "$use_tls" = "true" ]; then
                 stream_settings=$(jq -n --arg dom "$domain" --arg crt "$CRT_FILE" --arg key "$KEY_FILE" \
@@ -488,11 +561,8 @@ func_generate_config() {
     local tmp_config; tmp_config=$(mktemp /tmp/xray_config_XXXXXX.json)
 
     local inbound_protocol="vless"
-    local inbound_settings_key="vless"
-    local extra_settings='"decryption":"none","fallbacks":[]}'
     if [ "$network" = "trojan" ]; then
         inbound_protocol="trojan"
-        extra_settings='}'
     fi
 
     jq -n \
@@ -506,37 +576,14 @@ func_generate_config() {
         '{log:{loglevel:"warning"},stats:{},api:{services:["HandlerService","LoggerService","StatsService"],tag:"api"},policy:$pol,inbounds:[{tag:"api",port:($api|tonumber),protocol:"dokodemo-door",settings:{address:"127.0.0.1"},listen:"127.0.0.1"},{tag:"inbound-turbonet",port:($port|tonumber),protocol:$proto,settings:(if $proto=="trojan" then {clients:$clients} else {clients:$clients,decryption:"none",fallbacks:[]} end),streamSettings:$stream}],outbounds:[{protocol:"freedom",tag:"direct",mux:{enabled:true,concurrency:8,xudpConcurrency:16,xudpProxyUDP443:"reject"}},{protocol:"blackhole",tag:"blocked"},{protocol:"freedom",tag:"api"}],routing:{domainStrategy:"AsIs",rules:$rules}}' \
         > "$tmp_config"
 
-    if [ "${ssh_xhttp_enabled:-false}" = "true" ] && jq empty "$tmp_config" 2>/dev/null; then
-        local ssh_stream_settings
-        if [ "$use_tls" = "true" ]; then
-            ssh_stream_settings=$(jq -n                  --arg dom "$domain"                  --arg crt "$CRT_FILE"                  --arg key "$KEY_FILE"                  '{network:"xhttp",security:"tls",
-                  sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                  tlsSettings:{serverName:$dom,
-                    certificates:[{certificateFile:$crt,keyFile:$key}],
-                    alpn:["h2","http/1.1"],minVersion:"1.2"},
-                  xhttpSettings:{path:"/ssh",
-                    scMaxBufferedPosts:10,
-                    scMaxEachPostBytes:"262144",
-                    scStreamUpServerSecs:"10-30",
-                    xPaddingBytes:"0-0",
-                    sessionIDPlacement:"header",
-                    sessionIDKey:"X-Session",
-                    header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
-        else
-            ssh_stream_settings=$(jq -n                  '{network:"xhttp",security:"none",
-                  sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                  xhttpSettings:{path:"/ssh",
-                    scMaxBufferedPosts:10,
-                    scMaxEachPostBytes:"262144",
-                    scStreamUpServerSecs:"10-30",
-                    xPaddingBytes:"0-0",
-                    header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
-        fi
-
+    if [ "$ssh_xhttp_enabled" = "true" ] && jq empty "$tmp_config" 2>/dev/null; then
         local tmp2; tmp2=$(mktemp "${tmp_config}.ssh.XXXXXX")
-        jq --argjson ssh_stream "$ssh_stream_settings"             '(.inbounds[] | select(.tag=="inbound-turbonet") | .settings.fallbacks) =
+        jq '(.inbounds[] | select(.tag=="inbound-turbonet") | .settings.fallbacks) =
             [{"name":"","alpn":"","path":"/ssh","dest":22,"xver":0},
-             {"name":"","alpn":"","path":"","dest":22,"xver":0}]'             "$tmp_config" > "$tmp2" 2>/dev/null &&             jq empty "$tmp2" 2>/dev/null &&             mv -f "$tmp2" "$tmp_config" || rm -f "$tmp2"
+             {"name":"","alpn":"","path":"","dest":22,"xver":0}]' \
+            "$tmp_config" > "$tmp2" 2>/dev/null && \
+            jq empty "$tmp2" 2>/dev/null && \
+            mv -f "$tmp2" "$tmp_config" || rm -f "$tmp2"
         echo -e "${TXT_GREEN}✅ Fallback SSHXHTTP configurado (path /ssh → Dropbear :22)${RESET}"
     fi
 
@@ -549,10 +596,19 @@ func_generate_config() {
 
     jq -n --arg network "$network" --arg port "$port" --arg domain "$domain" --arg tls "$use_tls" \
         '{network:$network,port:$port,domain:$domain,tls:$tls}' > "$PRESET_FILE"
-    chmod 640 "$PRESET_FILE"
-    chown root:"$XRAY_GROUP" "$PRESET_FILE"
+    _apply_config_perms
 
     echo "$domain" > "$ACTIVE_DOMAIN_FILE"
+
+    if ! _test_xray_config "$CONFIG_PATH" >>"$LOG_FILE" 2>&1; then
+        echo -e "${TXT_RED}❌ Falha na validação do config.json pelo Xray:${RESET}"
+        tail -n 15 "$LOG_FILE" 2>/dev/null || true
+        if [ -f "${CONFIG_PATH}.bak" ]; then
+            mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+            _apply_config_perms
+        fi
+        read -rp "Pressione Enter..."; return 1
+    fi
 
     echo -e "Reiniciando Xray..."
     if ! systemctl restart xray >>"$LOG_FILE" 2>&1; then
@@ -566,7 +622,7 @@ func_generate_config() {
     fi
     sleep 2
 
-    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.0)"
+    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.1)"
 
     local status_show="${TXT_RED}FALHA${RESET}"
     if systemctl is-active --quiet xray 2>/dev/null; then
@@ -690,7 +746,7 @@ func_wizard_install() {
     else
         echo -e "${TXT_YELLOW}IP público da VPS ou domínio (sem TLS):${RESET}"
         read -rp "Endereço [Enter = detectar IP]: " domain_val
-        domain_val="$(echo "${domain_val:-}" | tr -d '[:space:][:cntrl:]')" 
+        domain_val="$(echo "${domain_val:-}" | tr -d '[:space:][:cntrl:]')"
         if [ -z "${domain_val:-}" ]; then
             echo -n "Detectando IP... "
             domain_val=$(curl -fsSL --max-time 10 "https://icanhazip.com" 2>/dev/null || \
@@ -707,14 +763,14 @@ func_wizard_install() {
     echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
 
     header_blue "PASSO 5/5 — PROTOCOLO"
-    echo " [1] WS         — WebSocket"
-    echo " [2] GRPC       — gRPC"
-    echo " [3] XHTTP      — XHTTP Otimizado (recomendado)"
-    echo " [4] TCP        — TCP simples"
-    echo " [5] VISION     — XTLS Vision (exige TLS)"
+    echo " [1] WS          — WebSocket"
+    echo " [2] GRPC        — gRPC"
+    echo " [3] XHTTP       — XHTTP Otimizado (recomendado)"
+    echo " [4] TCP         — TCP simples"
+    echo " [5] VISION      — XTLS Vision (exige TLS)"
     echo " [6] HTTPUPGRADE — HTTP Upgrade (boa compatibilidade)"
-    echo " [7] H2         — HTTP/2 (exige TLS)"
-    echo " [8] TROJAN     — Trojan (disfarça como HTTPS, exige TLS)"
+    echo " [7] H2          — HTTP/2 (exige TLS)"
+    echo " [8] TROJAN      — Trojan (disfarça como HTTPS, exige TLS)"
     read -rp "Opção [1-8]: " prot_opt
 
     local selected_net=""
@@ -774,7 +830,7 @@ while true; do
     clear
     echo -e "${TITLE_BAR}   CORE MANAGER — TURBONET XRAY   ${RESET}"
     echo ""
-    
+
     if systemctl is-active --quiet xray 2>/dev/null; then
         echo -e " STATUS DO SERVIÇO: ${TXT_GREEN}ATIVO E RODANDO${RESET}"
     else
@@ -796,6 +852,7 @@ while true; do
             ;;
         2)
             func_install_official_core
+            _apply_config_perms
             systemctl restart xray >/dev/null 2>&1 || true
             read -rp "Enter..."
             ;;
@@ -805,7 +862,8 @@ while true; do
             read -rp "Enter..."
             ;;
         4)
-            systemctl restart xray >/dev/null 2>&1
+            _apply_config_perms
+            systemctl restart xray >/dev/null 2>&1 || true
             sleep 1
             if systemctl is-active --quiet xray; then
                 echo -e "${TXT_GREEN}✅ Xray Rodando Perfeitamente!${RESET}"
