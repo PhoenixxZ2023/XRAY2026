@@ -1,13 +1,11 @@
 #!/bin/bash
-# onlinexray.sh - TURBONET XRAY V1.0
+# onlinexray.sh - TURBONET XRAY V1.1
 # Correções aplicadas:
-#   - Verificação de root (EUID) adicionada para leitura do config.json restrito
-#   - API_PORT fallback 10085 → 1080 (alinhado com core_manager)
-#   - bytes_human() usa awk — elimina dependência de bc
-#   - set -Eeuo pipefail — consistente com demais módulos
-#   - Delta real por ciclo (down+up separados) — coluna "DELTA CICLO" mostra valor correto
-#   - xray_ok persistido fora do loop — aviso não some entre verificações
-#   - Chamadas API reduzidas: down+up coletados uma vez por usuário por ciclo (era 4 chamadas)
+#   - Consulta única por ciclo via `xray api statsquery` + jq (elimina aspas do protojson e gargalo 2xN)
+#   - Sanitização estrita de inteiros antes da aritmética Bash sob set -Eeuo pipefail
+#   - Baseline inicial sem falso positivo de "Online" para tráfego antigo acumulado
+#   - Atualização dinâmica da lista de usuários ativos a cada 5 ciclos
+#   - Detecção da porta API por tag "api" ou protocolo "dokodemo-door" com fallback 1080
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;33mSaindo...\033[0m"; exit 0' INT TERM
@@ -70,38 +68,64 @@ fi
 if [ ! -x "$XRAY_BIN" ]; then
     echo -e "${RED}❌ xray não encontrado em $XRAY_BIN.${RESET}"; exit 1
 fi
-if ! jq -e '.inbounds[]? | select(.tag=="api")' "$CONF" >/dev/null 2>&1; then
-    echo -e "${RED}❌ Inbound API (tag: api) não configurado no Xray.${RESET}"; exit 1
+if ! jq -e '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door")' "$CONF" >/dev/null 2>&1; then
+    echo -e "${RED}❌ Inbound API não configurado no Xray.${RESET}"; exit 1
 fi
 
-# CORREÇÃO: fallback 1080 — alinhado com core_manager (porta padrão do projeto).
-API_PORT="$(jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONF" 2>/dev/null || true)"
+API_PORT="$(jq -r '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door") | .port // empty' "$CONF" 2>/dev/null | head -1 || true)"
 [ -n "${API_PORT:-}" ] || API_PORT="1080"
 
-# --- LISTA DE USUÁRIOS ATIVOS (sem LOCKED_) ---
-mapfile -t USERS < <(jq -r '
-    .inbounds[]? | select(.tag=="inbound-turbonet")
-    | .settings.clients[]?
-    | select(.email? and (.email | startswith("LOCKED_") | not))
-    | .email
-' "$CONF" 2>/dev/null | awk 'NF')
+# --- CARREGA USUÁRIOS ATIVOS (sem LOCKED_) ---
+USERS=()
+_load_users() {
+    mapfile -t USERS < <(jq -r '
+        .inbounds[]? | select(.tag=="inbound-turbonet")
+        | .settings.clients[]?
+        | select(.email? and (.email | startswith("LOCKED_") | not))
+        | .email
+    ' "$CONF" 2>/dev/null | awk 'NF')
+}
 
+_load_users
 if [ ${#USERS[@]} -eq 0 ]; then
     echo -e "${RED}Nenhum usuário ativo no inbound-turbonet.${RESET}"; exit 0
 fi
 
-# --- CONSULTA À API COM TIMEOUT ---
-_api_stat() {
-    local name="$1"
-    timeout "$API_TIMEOUT" \
-        "$XRAY_BIN" api stats \
-            -server="127.0.0.1:${API_PORT}" \
-            -name "$name" 2>/dev/null \
-        | awk '/value/ {print $2; exit}' \
-        || echo "0"
+# --- CONSULTA ÚNICA À API POR CICLO ---
+declare -A cur_down cur_up last_down last_up last_seen delta_total
+
+_poll_all_stats() {
+    cur_down=()
+    cur_up=()
+
+    local raw
+    raw=$(timeout "$API_TIMEOUT" "$XRAY_BIN" api statsquery \
+        -server="127.0.0.1:${API_PORT}" \
+        -pattern "user>>>" 2>/dev/null || echo "{}")
+
+    local stat_name stat_val u
+    while IFS='|' read -r stat_name stat_val; do
+        [ -n "${stat_name:-}" ] || continue
+        [[ "${stat_val:-}" =~ ^[0-9]+$ ]] || stat_val=0
+        case "$stat_name" in
+            *">>>traffic>>>downlink")
+                u="${stat_name#user>>>}"
+                u="${u%>>>traffic>>>downlink}"
+                cur_down["$u"]="$stat_val"
+                ;;
+            *">>>traffic>>>uplink")
+                u="${stat_name#user>>>}"
+                u="${u%>>>traffic>>>uplink}"
+                cur_up["$u"]="$stat_val"
+                ;;
+        esac
+    done < <(echo "$raw" | jq -r '
+        .stat[]? |
+        select(.name? and (.name | test("^user>>>[^>]+>>>traffic>>>(downlink|uplink)$"))) |
+        "\(.name)|\(.value // 0 | tostring | gsub("[^0-9]"; ""))"
+    ' 2>/dev/null || true)
 }
 
-# CORREÇÃO: bytes_human() usa awk — elimina dependência de bc.
 bytes_human() {
     local b="${1:-0}"
     awk -v b="$b" 'BEGIN {
@@ -112,26 +136,16 @@ bytes_human() {
     }'
 }
 
-# --- INICIALIZAÇÃO ---
-declare -A last_down last_up last_seen
-
-now="$(date +%s)"
-
+# --- BASELINE INICIAL ---
 echo -e "${CYAN}Inicializando monitor para ${#USERS[@]} usuário(s)...${RESET}"
+_poll_all_stats
 for u in "${USERS[@]}"; do
-    d=$(_api_stat "user>>>${u}>>>traffic>>>downlink")
-    up=$(_api_stat "user>>>${u}>>>traffic>>>uplink")
-    [ -n "${d:-}"  ] || d=0
-    [ -n "${up:-}" ] || up=0
-    last_down["$u"]="$d"
-    last_up["$u"]="$up"
-    # Se já tem tráfego no momento de abertura, considera online agora
-    if [ $(( d + up )) -gt 0 ]; then
-        last_seen["$u"]="$now"
-    else
-        last_seen["$u"]=0
-    fi
+    last_down["$u"]="${cur_down["$u"]:-0}"
+    last_up["$u"]="${cur_up["$u"]:-0}"
+    last_seen["$u"]=0
 done
+
+sleep 1
 
 xray_ok=true
 cycle=0
@@ -141,34 +155,28 @@ while true; do
     now="$(date +%s)"
     cycle=$(( cycle + 1 ))
 
-    # Verifica saúde do Xray a cada 5 ciclos — atualiza flag persistente
     if (( cycle % 5 == 1 )); then
         systemctl is-active --quiet xray 2>/dev/null && xray_ok=true || xray_ok=false
+        _load_users
     fi
 
-    # CORREÇÃO: coleta down e up separados uma única vez por usuário por ciclo.
-    declare -A cur_down cur_up delta_d delta_u delta_total
+    _poll_all_stats
 
     for u in "${USERS[@]}"; do
-        d=$(_api_stat "user>>>${u}>>>traffic>>>downlink")
-        up=$(_api_stat "user>>>${u}>>>traffic>>>uplink")
-        [ -n "${d:-}"  ] || d=0
-        [ -n "${up:-}" ] || up=0
+        d="${cur_down["$u"]:-0}"
+        up="${cur_up["$u"]:-0}"
+        prev_d="${last_down["$u"]:-0}"
+        prev_u="${last_up["$u"]:-0}"
 
-        cur_down["$u"]="$d"
-        cur_up["$u"]="$up"
-
-        # Delta real desde o último ciclo — robusto contra reset de contadores
-        dd=$(( d  - last_down["$u"] ))
-        du=$(( up - last_up["$u"]   ))
+        dd=$(( d  - prev_d ))
+        du=$(( up - prev_u ))
         [ "$dd" -lt 0 ] && dd="$d"
         [ "$du" -lt 0 ] && du="$up"
 
-        delta_d["$u"]="$dd"
-        delta_u["$u"]="$du"
-        delta_total["$u"]=$(( dd + du ))
+        dt=$(( dd + du ))
+        delta_total["$u"]="$dt"
 
-        if [ $(( dd + du )) -gt 0 ]; then
+        if [ "$dt" -gt 0 ]; then
             last_seen["$u"]="$now"
         fi
 
