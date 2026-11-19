@@ -1,17 +1,21 @@
 #!/bin/bash
-# unblock_user.sh - TURBONET XRAY V1.0
+# unblock_user.sh - TURBONET XRAY V1.1
 # Correções aplicadas:
-#   - _apply_config_perms() centralizada — rollbacks agora incluem chown root:nogroup
-#   - _cleanup() + trap EXIT desde o início — elimina trap tardio após mktemp
-#   - _wait_xray_active() com retry de 5s — substitui sleep 1 + is-active simples
-#   - user_input normalizado para minúsculas — consistente com add_user.sh corrigido
-#   - Verificação extra do UUID restaurado no JSON antes do restart
+#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
+#   - Permissões 750/640 root:$XRAY_GROUP aplicadas no diretório e no config.json
+#   - Validação com `xray run -test` sob o usuário do serviço antes de reiniciar
+#   - Substituído try-reload-or-restart por restart direto no fallback
+#   - Suporte completo a credenciais Trojan (32 hex chars em .password) além de UUID
+#   - Desbloqueio da conta Linux para Dropbear e SOCKS5
 
 set -Eeuo pipefail
 
 USER_DB="/opt/XrayTools/users.db"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
 LOG_FILE="/tmp/unblock_user.log"
+
+XRAY_USER="nobody"
+XRAY_GROUP="nogroup"
 
 TXT_RED='\033[1;31m'
 TXT_GREEN='\033[1;32m'
@@ -22,21 +26,52 @@ RESET='\033[0m'
 export DEBIAN_FRONTEND=noninteractive
 
 # --- CLEANUP CENTRALIZADO ---
-# CORREÇÃO: registrado no início via trap EXIT — cobre toda saída (normal, ERR, sinal).
-# Elimina o trap EXIT tardio que só protegia após o mktemp.
 _tmp_cfg=""
 _cleanup() {
-    rm -f "$_tmp_cfg"
+    [ -n "${_tmp_cfg:-}" ] && rm -f "$_tmp_cfg"
 }
 trap '_cleanup' EXIT
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
 
-# --- PERMISSÕES DO CONFIG ---
-# CORREÇÃO: centralizada — garante chmod 640 + chown root:nogroup em fluxo normal
-# e em todos os rollbacks, evitando que um rollback deixe dono errado.
+# --- DETECÇÃO DINÂMICA DE DONO E PERMISSÕES ---
+_detect_xray_owner() {
+    local svc_user=""
+    if command -v systemctl &>/dev/null; then
+        svc_user=$(systemctl show -p User --value xray 2>/dev/null || true)
+    fi
+    svc_user="${svc_user:-nobody}"
+    if ! id "$svc_user" &>/dev/null; then
+        svc_user="root"
+    fi
+    XRAY_USER="$svc_user"
+    XRAY_GROUP="$(id -gn "$XRAY_USER")"
+}
+
 _apply_config_perms() {
-    chmod 0660 "$CONFIG_PATH"
-    chown root:nogroup "$CONFIG_PATH"
+    _detect_xray_owner
+    local cfg_dir
+    cfg_dir="$(dirname "$CONFIG_PATH")"
+
+    if [ -d "$cfg_dir" ]; then
+        chown "root:${XRAY_GROUP}" "$cfg_dir"
+        chmod 750 "$cfg_dir"
+    fi
+
+    if [ -f "$CONFIG_PATH" ]; then
+        chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
+        chmod 0640 "$CONFIG_PATH"
+    fi
+}
+
+_test_xray_config() {
+    local cfg="$1"
+    [ ! -x /usr/local/bin/xray ] && return 0
+    _detect_xray_owner
+    if command -v runuser &>/dev/null && [ "$XRAY_USER" != "root" ]; then
+        runuser -u "$XRAY_USER" -- /usr/local/bin/xray run -test -config "$cfg"
+    else
+        /usr/local/bin/xray run -test -config "$cfg"
+    fi
 }
 
 # --- DETECÇÃO DE DISTRO ---
@@ -64,17 +99,16 @@ ensure_cmd() {
     esac
 }
 
-# CORREÇÃO: aceita entrada mista mas a normalização para minúsculas acontece
-# antes de qualquer busca — validate_nick só checa o formato.
 validate_nick() { [[ "${1:-}" =~ ^[a-zA-Z0-9]{5,9}$ ]]; }
 
-validate_uuid() {
-    [[ "${1:-}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+validate_credential() {
+    local c="${1:-}"
+    [[ "$c" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] && return 0
+    [[ "$c" =~ ^[0-9a-fA-F]{32}$ ]] && return 0
+    return 1
 }
 
 # --- VERIFICAÇÃO DE XRAY ATIVO COM RETRY ---
-# CORREÇÃO: tenta por até 5s antes de concluir falha.
-# sleep 1 simples anterior causava falso negativo em sistemas sob carga.
 _wait_xray_active() {
     local tries=5
     while [ "$tries" -gt 0 ]; do
@@ -139,8 +173,6 @@ if ! validate_nick "$user_input"; then
     sleep 2; exit 1
 fi
 
-# CORREÇÃO: normaliza para minúsculas antes de qualquer busca —
-# consistente com add_user.sh que grava nomes em minúsculas no DB.
 user_input=$(echo "$user_input" | tr '[:upper:]' '[:lower:]')
 
 LOCKED_NAME="LOCKED_${user_input}"
@@ -153,16 +185,16 @@ if ! jq -e --arg lock "$LOCKED_NAME" '
 fi
 
 echo "Recuperando dados originais..."
-REAL_UUID="$(awk -F'|' -v u="$user_input" '$1==u {print $2; exit}' "$USER_DB" 2>/dev/null || true)"
+REAL_CRED="$(awk -F'|' -v u="$user_input" '$1==u {print $2; exit}' "$USER_DB" 2>/dev/null || true)"
 
-if [ -z "${REAL_UUID:-}" ]; then
-    echo -e "${TXT_RED}❌ UUID original não encontrado em users.db.${RESET}"
+if [ -z "${REAL_CRED:-}" ]; then
+    echo -e "${TXT_RED}❌ Credencial original não encontrada em users.db.${RESET}"
     echo -e "${TXT_YELLOW}   O usuário pode ter sido removido do banco.${RESET}"
     sleep 3; exit 1
 fi
 
-if ! validate_uuid "$REAL_UUID"; then
-    echo -e "${TXT_RED}❌ UUID no users.db está corrompido: '${REAL_UUID}'${RESET}"
+if ! validate_credential "$REAL_CRED"; then
+    echo -e "${TXT_RED}❌ Credencial no users.db está corrompida: '${REAL_CRED}'${RESET}"
     echo -e "${TXT_YELLOW}   Recrie o usuário com add_user.sh.${RESET}"
     sleep 3; exit 1
 fi
@@ -178,12 +210,16 @@ _tmp_cfg=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")
 
 jq --arg nick   "$user_input" \
    --arg locked "$LOCKED_NAME" \
-   --arg uuid   "$REAL_UUID" '
+   --arg cred   "$REAL_CRED" '
     (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
         (if type == "array" then . else [] end)
     |
     (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
-        map(if .email == $locked then .email = $nick | .id = $uuid else . end)
+        map(if .email == $locked then
+            .email = $nick
+            | (if has("password") then .password = $cred else . end)
+            | (if has("id") then .id = $cred else . end)
+        else . end)
 ' "$CONFIG_PATH" > "$_tmp_cfg" 2>>"$LOG_FILE"
 
 if ! jq empty "$_tmp_cfg" 2>/dev/null; then
@@ -191,75 +227,64 @@ if ! jq empty "$_tmp_cfg" 2>/dev/null; then
     sleep 2; exit 1
 fi
 
-# CORREÇÃO: verificação extra — confirma que o UUID foi de fato restaurado no JSON
-# antes de aplicar, adicionando uma camada de segurança além do jq empty.
-if ! jq -e --arg nick "$user_input" --arg uuid "$REAL_UUID" '
+if ! jq -e --arg nick "$user_input" --arg cred "$REAL_CRED" '
     any(.inbounds[]? | select(.tag=="inbound-turbonet").settings.clients[]?;
-        .email == $nick and .id == $uuid)
+        .email == $nick and (.id == $cred or .password == $cred))
 ' "$_tmp_cfg" >/dev/null 2>&1; then
-    echo -e "${TXT_RED}❌ Verificação pós-geração falhou: UUID não restaurado corretamente.${RESET}"
+    echo -e "${TXT_RED}❌ Verificação pós-geração falhou: credencial não restaurada corretamente.${RESET}"
     sleep 2; exit 1
 fi
 
 mv -f "$_tmp_cfg" "$CONFIG_PATH"
-_tmp_cfg=""   # já movido — _cleanup não deve tentar remover
+_tmp_cfg=""
 _apply_config_perms
+
+# --- VALIDA SINTAXE E PERMISSÕES ANTES DE APLICAR ---
+if ! _test_xray_config "$CONFIG_PATH" >>"$LOG_FILE" 2>&1; then
+    echo -e "${TXT_RED}❌ Falha na validação do config.json pelo Xray. Revertendo...${RESET}"
+    mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+    _apply_config_perms
+    tail -n 10 "$LOG_FILE" 2>/dev/null || true
+    sleep 3; exit 1
+fi
 
 # --- HELPER: porta da API do Xray ---
 _xray_api_port() {
-    jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
+    jq -r '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
 }
 _api_remove() {
     local email="$1"
+    systemctl is-active --quiet xray 2>/dev/null || return 1
     local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
-    /usr/local/bin/xray api removeuser -server="127.0.0.1:${p}" \
-        -inboundTag="inbound-turbonet" -email="$email" >/dev/null 2>&1
-}
-_api_add() {
-    local email="$1" id="$2"
-    local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
-    local uj; uj=$(jq -n --arg id "$id" --arg e "$email" '{"id":$id,"email":$e,"level":0}')
-    /usr/local/bin/xray api adduser -server="127.0.0.1:${p}" \
-        -inboundTag="inbound-turbonet" -user="$uj" >/dev/null 2>&1
+    /usr/local/bin/xray api rmu -server="127.0.0.1:${p}" \
+        -inboundTag="inbound-turbonet" "$email" >/dev/null 2>&1
 }
 _fallback_reload() {
-    local bak_restore="${1:-}"
-    if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
-       ! systemctl restart xray >/dev/null 2>&1; then
-        echo -e "${TXT_RED}❌ Falha ao recarregar Xray. Revertendo config...${RESET}"
+    if ! systemctl restart xray >>"$LOG_FILE" 2>&1 || ! _wait_xray_active; then
+        echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}"
         mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
         _apply_config_perms
+        systemctl restart xray >/dev/null 2>&1 || true
         journalctl -u xray -n 15 --no-pager 2>/dev/null || true
         echo -e "${TXT_YELLOW}Config revertido.${RESET}"
         sleep 3; return 1
     fi
-    if ! _wait_xray_active; then
-        echo -e "${TXT_RED}❌ Xray não ficou ativo. Revertendo...${RESET}"
-        mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-        _apply_config_perms
-        systemctl restart xray >/dev/null 2>&1 || true
-        sleep 2; return 1
-    fi
     return 0
 }
 
-# Hot reload: remove LOCKED_, adiciona com UUID real via API.
-if _api_remove "LOCKED_${user_input}" && _api_add "$user_input" "$REAL_UUID"; then
-    echo -e "${TXT_GREEN}Reativado via API (sem restart).${RESET}"
-else
-    echo -e "${TXT_YELLOW}API indisponível — recarregando serviço...${RESET}"
-    _fallback_reload || exit 1
-fi
+# Remove sessão bloqueada via API e reinicia para efetivar credencial original
+_api_remove "LOCKED_${user_input}" 2>/dev/null || true
+_fallback_reload || exit 1
 
-UUID_DISPLAY="${REAL_UUID:0:8}...${REAL_UUID: -4}"
+CRED_DISPLAY="${REAL_CRED:0:8}...${REAL_CRED: -4}"
 
-# Desbloquear SSH automaticamente se Dropbear ativo
-if systemctl is-active --quiet turbonet-dropbear 2>/dev/null; then
+# Desbloquear conta local automaticamente (Dropbear / SOCKS5)
+if id "$user_input" &>/dev/null; then
     passwd -u "$user_input" 2>/dev/null || true
 fi
 
 echo ""
 echo -e "${TXT_GREEN}✅ Usuário '${user_input}' reativado com sucesso!${RESET}"
-echo -e " UUID restaurado: ${TXT_CYAN}${UUID_DISPLAY}${RESET} (completo em users.db)"
+echo -e " Credencial restaurada: ${TXT_CYAN}${CRED_DISPLAY}${RESET} (completa em users.db)"
 echo -e " Prefixo ${TXT_YELLOW}LOCKED_${RESET} removido. Conexões normalizadas."
 sleep 2
