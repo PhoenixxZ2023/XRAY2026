@@ -1,14 +1,12 @@
 #!/bin/bash
-# backup.sh - TURBONET XRAY V1.0
-# Correções aplicadas:
-#   - chmod 0600 root:root → 640 root:nogroup no config.json e preset.json pós-restore
-#   - Permissões de /opt/XrayTools/users/*.txt restauradas explicitamente (600)
-#   - tar com --no-overwrite-dir --no-same-permissions — reduz superfície de path traversal
-#   - _cleanup() centralizado via trap EXIT desde o início
-#   - rotate_backups() usa find + mapfile — sem parse de ls, seguro com nomes especiais
-#   - _wait_xray_active() com retry de 5s — substitui sleep 2 + is-active simples
-#   - SNAP_FILE registrado para cleanup em caso de abort
-#   - INTEGRAÇÃO SSH: Re-sincroniza usuários do users.db com as contas Linux após Restore
+# backup.sh - TURBONET XRAY V1.1
+# Correções aplicadas V1.1:
+#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
+#   - Permissões 750/640 root:$XRAY_GROUP aplicadas nos diretórios e arquivos do Xray/SSL
+#   - umask 077 no restore + chmod 600 root:root em todos os bancos (.db) e .api_key
+#   - Validação de tipos de entrada no tar (bloqueia symlinks e arquivos especiais) + --no-same-owner
+#   - Validação com `xray run -test` antes de reiniciar o serviço
+#   - Sincronização SSH/SOCKS5 respeita usuários expirados, LOCKED_ e /etc/shells
 
 set -Eeuo pipefail
 
@@ -16,11 +14,8 @@ set -Eeuo pipefail
 _TMPDIR_BKP=""
 _SNAP_FILE=""
 _cleanup() {
-    [ -n "$_TMPDIR_BKP" ] && rm -rf "$_TMPDIR_BKP" 2>/dev/null || true
-    # SNAP_FILE é intencional para recuperação manual — só remove se restore foi bem-sucedido
-    # (controlado pelo código principal). Aqui apenas garantimos limpeza em abort inesperado
-    # se a flag _SNAP_REMOVE_OK estiver setada.
-    [ "${_SNAP_REMOVE_OK:-0}" = "1" ] && [ -n "$_SNAP_FILE" ] && rm -f "$_SNAP_FILE" 2>/dev/null || true
+    [ -n "${_TMPDIR_BKP:-}" ] && rm -rf "$_TMPDIR_BKP" 2>/dev/null || true
+    [ "${_SNAP_REMOVE_OK:-0}" = "1" ] && [ -n "${_SNAP_FILE:-}" ] && rm -f "$_SNAP_FILE" 2>/dev/null || true
 }
 trap '_cleanup' EXIT
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; read -rp "Enter...";' ERR
@@ -33,8 +28,13 @@ RESET='\033[0m'
 TITLE_BAR='\033[1;47;34m'
 
 BACKUP_DIR="/root/backups"
+CONFIG_PATH="/usr/local/etc/xray/config.json"
+XRAY_BIN="/usr/local/bin/xray"
 MAX_BACKUPS=5
 _SNAP_REMOVE_OK=0
+
+XRAY_USER="nobody"
+XRAY_GROUP="nogroup"
 
 require_root() {
     if [ "${EUID:-$(id -u)}" -ne 0 ]; then
@@ -46,8 +46,38 @@ require_root() {
 require_root
 mkdir -p "$BACKUP_DIR"
 
-# --- VERIFICAÇÃO DE XRAY ATIVO COM RETRY ---
-# Padrão adotado em todos os módulos corrigidos — substitui sleep fixo + is-active simples.
+# --- DETECÇÃO DINÂMICA DE DONO E PERMISSÕES ---
+_detect_xray_owner() {
+    local svc_user=""
+    if command -v systemctl &>/dev/null; then
+        svc_user=$(systemctl show -p User --value xray 2>/dev/null || true)
+    fi
+    svc_user="${svc_user:-nobody}"
+    if ! id "$svc_user" &>/dev/null; then
+        svc_user="root"
+    fi
+    XRAY_USER="$svc_user"
+    XRAY_GROUP="$(id -gn "$XRAY_USER")"
+}
+
+_apply_config_perms() {
+    local f="$1"
+    _detect_xray_owner
+    chmod 0640 "$f"
+    chown "root:${XRAY_GROUP}" "$f"
+}
+
+_test_xray_config() {
+    local cfg="$1"
+    [ ! -x "$XRAY_BIN" ] && return 0
+    _detect_xray_owner
+    if command -v runuser &>/dev/null && [ "$XRAY_USER" != "root" ]; then
+        runuser -u "$XRAY_USER" -- "$XRAY_BIN" run -test -config "$cfg"
+    else
+        "$XRAY_BIN" run -test -config "$cfg"
+    fi
+}
+
 _wait_xray_active() {
     local tries=5
     while [ "$tries" -gt 0 ]; do
@@ -58,31 +88,34 @@ _wait_xray_active() {
     return 1
 }
 
-# --- PERMISSÕES DO CONFIG ---
-# CORREÇÃO: centralizada — 640 root:nogroup em todo restore.
-# 600 root:root anterior impedia que o Xray (nobody/nogroup) lesse o config.
-_apply_config_perms() {
-    local f="$1"
-    chmod 0640 "$f"
-    chown root:nogroup "$f"
+_ensure_false_shell() {
+    if [ -f /etc/shells ] && ! grep -qxF "/bin/false" /etc/shells 2>/dev/null; then
+        echo "/bin/false" >> /etc/shells
+    fi
 }
 
-# --- VALIDAÇÃO DE PATHS NO TAR (whitelist rigorosa) ---
+# --- VALIDAÇÃO DE PATHS E TIPOS NO TAR (whitelist rigorosa) ---
 is_safe_tar() {
     local tarfile="$1"
-    local entry
-    while IFS= read -r entry; do
+    local line mode entry
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        mode="${line%% *}"
+        # Permite apenas arquivos regulares (-) e diretórios (d); rejeita symlinks (l) e dispositivos
+        [[ "$mode" =~ ^[-d] ]] || return 1
+
+        entry=$(echo "$line" | awk '{print $NF}')
         entry="${entry#./}"
         [ -n "$entry" ] || continue
         [[ "$entry" != /* ]]       || return 1   # path absoluto
         [[ "$entry" != *".."* ]] || return 1   # traversal
         case "$entry" in
-            opt/XrayTools|opt/XrayTools/*)             ;;
-            usr/local/etc/xray|usr/local/etc/xray/*)  ;;
-            opt/TurbonetCoreSSL|opt/TurbonetCoreSSL/*)    ;;
+            opt/XrayTools|opt/XrayTools/*)              ;;
+            usr/local/etc/xray|usr/local/etc/xray/*)    ;;
+            opt/TurbonetCoreSSL|opt/TurbonetCoreSSL/*)  ;;
             *) return 1 ;;
         esac
-    done < <(tar -tzf "$tarfile" 2>/dev/null)
+    done < <(tar -tvzf "$tarfile" 2>/dev/null)
     return 0
 }
 
@@ -115,12 +148,9 @@ verify_tar_integrity() {
 }
 
 # --- ROTAÇÃO DE BACKUPS ANTIGOS ---
-# CORREÇÃO: usa find + mapfile em vez de ls — seguro com nomes de arquivo
-# que contenham espaços ou caracteres especiais.
 rotate_backups() {
     local dir="$1" max="$2"
     local -a all_backups
-    # sort -z ordena por nome (cronológico dado o timestamp no nome)
     mapfile -d '' all_backups < <(find "$dir" -maxdepth 1 -name "*.tar.gz" -print0 | sort -z)
     local count="${#all_backups[@]}"
     if [ "$count" -gt "$max" ]; then
@@ -166,7 +196,7 @@ case "${opt:-0}" in
     _TMPDIR_BKP=$(mktemp -d)
 
     mkdir -p "$_TMPDIR_BKP/opt/XrayTools"
-    for f in users.db limits.db usage.db session.db active_domain; do
+    for f in users.db limits.db usage.db session.db active_domain .api_key; do
         [ -f "/opt/XrayTools/$f" ] && cp -f "/opt/XrayTools/$f" "$_TMPDIR_BKP/opt/XrayTools/$f"
     done
     [ -d "/opt/XrayTools/users" ] && \
@@ -260,7 +290,7 @@ case "${opt:-0}" in
     echo -n "Validando conteúdo do backup... "
     if ! is_safe_tar "$FILE"; then
         echo -e "${TXT_RED}RECUSADO${RESET}"
-        echo -e "${TXT_RED}❌ Backup contém paths não permitidos (possível archive malicioso).${RESET}"
+        echo -e "${TXT_RED}❌ Backup contém paths ou tipos de arquivo não permitidos.${RESET}"
         exit 1
     fi
     echo -e "${TXT_GREEN}OK${RESET}"
@@ -271,7 +301,8 @@ case "${opt:-0}" in
     read -rp "Confirmar RESTORE? [s/N]: " ok
     [[ "${ok:-n}" =~ ^[Ss]$ ]] || { echo "Cancelado."; exit 0; }
 
-    # Snapshot do estado atual — intencional para recuperação manual se restore falhar
+    umask 077
+
     echo ""
     echo "Criando snapshot do estado atual (segurança)..."
     SNAP_PATHS=( "opt/XrayTools" "usr/local/etc/xray" )
@@ -289,14 +320,11 @@ case "${opt:-0}" in
     systemctl stop xray    >/dev/null 2>&1 || true
     systemctl stop botxray >/dev/null 2>&1 || true
 
-    # CORREÇÃO: flags de segurança adicionais no tar.
-    # --no-overwrite-dir: não sobrescreve permissões de diretórios existentes.
-    # --no-same-permissions: usa umask em vez das permissões do arquivo original —
-    # permissões são aplicadas explicitamente abaixo com valores conhecidos.
     echo "Restaurando arquivos..."
     if ! tar -xzf "$FILE" -C / \
             --no-overwrite-dir \
             --no-same-permissions \
+            --no-same-owner \
             2>/dev/null; then
         echo -e "${TXT_RED}❌ Falha ao extrair backup.${RESET}"
         if [ -n "${_SNAP_FILE:-}" ] && [ -f "$_SNAP_FILE" ]; then
@@ -304,21 +332,29 @@ case "${opt:-0}" in
             tar -xzf "$_SNAP_FILE" -C / \
                 --no-overwrite-dir \
                 --no-same-permissions \
+                --no-same-owner \
                 >/dev/null 2>&1 || true
             echo -e "${TXT_YELLOW}Estado anterior restaurado do snapshot.${RESET}"
         fi
         exit 1
     fi
 
-    # CORREÇÃO: permissões explícitas após restore — tar pode restaurar
-    # permissões do backup, que podem diferir do padrão atual do projeto.
     echo "Aplicando permissões..."
-    chmod 700  /opt/XrayTools                                       2>/dev/null || true
-    chmod 600  /opt/XrayTools/users.db                              2>/dev/null || true
-    chown root:root /opt/XrayTools/users.db                         2>/dev/null || true
+    _detect_xray_owner
 
-    # CORREÇÃO: 640 root:nogroup — Xray (nobody/nogroup) precisa ler o config.
-    # Versão anterior usava 600 root:root — Xray não conseguia ler após restore.
+    chmod 700 /opt/XrayTools 2>/dev/null || true
+    chown root:root /opt/XrayTools 2>/dev/null || true
+    for db_f in users.db limits.db usage.db session.db active_domain .api_key; do
+        if [ -f "/opt/XrayTools/$db_f" ]; then
+            chmod 600 "/opt/XrayTools/$db_f"
+            chown root:root "/opt/XrayTools/$db_f"
+        fi
+    done
+
+    if [ -d /usr/local/etc/xray ]; then
+        chown "root:${XRAY_GROUP}" /usr/local/etc/xray
+        chmod 750 /usr/local/etc/xray
+    fi
     if [ -f /usr/local/etc/xray/config.json ]; then
         _apply_config_perms /usr/local/etc/xray/config.json
     fi
@@ -326,10 +362,9 @@ case "${opt:-0}" in
         _apply_config_perms /usr/local/etc/xray/preset.json
     fi
 
-    # CORREÇÃO: arquivos individuais de usuário — UUID e links VLESS.
-    # Não estavam incluídos no bloco de permissões original.
     if [ -d /opt/XrayTools/users ]; then
         chmod 700 /opt/XrayTools/users
+        chown root:root /opt/XrayTools/users
         find /opt/XrayTools/users -maxdepth 1 -name "*.txt" \
             -exec chmod 600 {} \; \
             -exec chown root:root {} \; 2>/dev/null || true
@@ -337,31 +372,64 @@ case "${opt:-0}" in
 
     if [ -d /opt/TurbonetCoreSSL ]; then
         chmod 750 /opt/TurbonetCoreSSL
-        chown root:nogroup /opt/TurbonetCoreSSL                  2>/dev/null || true
-        chmod 644 /opt/TurbonetCoreSSL/fullchain.pem              2>/dev/null || true
-        chown root:root /opt/TurbonetCoreSSL/fullchain.pem        2>/dev/null || true
-        chmod 640 /opt/TurbonetCoreSSL/privkey.pem                2>/dev/null || true
-        chown root:nogroup /opt/TurbonetCoreSSL/privkey.pem       2>/dev/null || true
+        chown "root:${XRAY_GROUP}" /opt/TurbonetCoreSSL 2>/dev/null || true
+        if [ -f /opt/TurbonetCoreSSL/fullchain.pem ]; then
+            chmod 644 /opt/TurbonetCoreSSL/fullchain.pem
+            chown root:root /opt/TurbonetCoreSSL/fullchain.pem
+        fi
+        if [ -f /opt/TurbonetCoreSSL/privkey.pem ]; then
+            chmod 640 /opt/TurbonetCoreSSL/privkey.pem
+            chown "root:${XRAY_GROUP}" /opt/TurbonetCoreSSL/privkey.pem
+        fi
+    fi
+
+    if [ -f "$CONFIG_PATH" ]; then
+        _test_xray_config "$CONFIG_PATH" >/dev/null 2>&1 || \
+            echo -e "${TXT_YELLOW}⚠  Aviso: validação do config.json retornou alerta.${RESET}"
     fi
 
     echo "Reiniciando serviços..."
     systemctl restart xray    >/dev/null 2>&1 || true
     systemctl restart botxray >/dev/null 2>&1 || true
 
-    # CORREÇÃO: _wait_xray_active() com retry de 5s — substitui sleep 2 fixo.
     echo ""
     local_xray_status="${TXT_RED}FALHA${RESET}"
     if _wait_xray_active; then
         local_xray_status="${TXT_GREEN}ATIVO${RESET}"
     fi
 
-    # INTEGRAÇÃO SSH: Re-sincronizar usuários e senhas para Dropbear/SOCKS5
-    echo "Sincronizando usuários de SSH (Dropbear/SOCKS5)..."
+    # INTEGRAÇÃO SSH/SOCKS5: Re-sincronizar usuários respeitando vencimento e LOCKED_
+    echo "Sincronizando usuários locais (SSH/SOCKS5)..."
     if [ -s /opt/XrayTools/users.db ]; then
+        _ensure_false_shell
+        today_ts=$(date -d "$(date +%F)" +%s)
+
         while IFS='|' read -r nick uuid expiry pass limit _rest; do
             [ -n "${nick:-}" ] && [ -n "${pass:-}" ] || continue
+            exp_ts=$(date -d "${expiry:-2000-01-01}" +%s 2>/dev/null || echo 0)
+
+            if [ "$exp_ts" -lt "$today_ts" ]; then
+                id "$nick" &>/dev/null && userdel -f "$nick" 2>/dev/null || true
+                continue
+            fi
+
+            is_locked=false
+            if [ -s "$CONFIG_PATH" ] && command -v jq &>/dev/null; then
+                jq -e --arg lock "LOCKED_${nick}" '
+                    any(.inbounds[]? | select(.tag=="inbound-turbonet").settings.clients[]?;
+                        .email == $lock)
+                ' "$CONFIG_PATH" >/dev/null 2>&1 && is_locked=true
+            fi
+
             id "$nick" &>/dev/null || useradd -M -s /bin/false "$nick" 2>/dev/null || true
             echo "${nick}:${pass}" | chpasswd 2>/dev/null || true
+
+            if [ "$is_locked" = true ]; then
+                passwd -l "$nick" >/dev/null 2>&1 || true
+            else
+                usermod -U "$nick" >/dev/null 2>&1 || true
+                chage -E -1 "$nick" >/dev/null 2>&1 || true
+            fi
         done < /opt/XrayTools/users.db
         echo -e "${TXT_GREEN}✅ Contas locais Linux sincronizadas com o banco.${RESET}"
     fi
@@ -378,7 +446,6 @@ case "${opt:-0}" in
             echo -e "${TXT_YELLOW}Snapshot disponível para recuperação manual: ${_SNAP_FILE}${RESET}"
         fi
     else
-        # Remove snapshot apenas se restore e restart foram bem-sucedidos
         _SNAP_REMOVE_OK=1
     fi
     echo "-----------------------------------------"
