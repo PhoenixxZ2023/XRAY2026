@@ -1,14 +1,12 @@
 #!/bin/bash
-# limiterxray.sh - TURBONET XRAY V1.3 (Com Guilhotina de Sessões)
-# Correções aplicadas V1.2:
-# - PORTA API DINÂMICA: Detecta automaticamente do config.json
-# - Corrigido conflito de porta entre limiter e core_manager
-# - Função func_get_api_port() agora é chamada ANTES de cada operação
-# - Porta default apenas como fallback se não encontrar no config
-#
-# Melhorias V1.3 (Segurança e Zero Downtime):
-# - HOT RELOAD NO BLOQUEIO: Não dá restart no Xray, bloqueia/desbloqueia via API silenciosamente
-# - GUILHOTINA SSH/SOCKS5: Derruba conexões ativas na hora do estouro da cota (pkill + chage)
+# limiterxray.sh - TURBONET XRAY V1.4 (Com Guilhotina de Sessões)
+# Correções aplicadas V1.4:
+# - Parsing seguro da API com jq + sanitização numérica (elimina crash com aspas do protojson)
+# - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
+# - Permissões 750/640 root:$XRAY_GROUP no diretório e no config.json + validação `xray run -test`
+# - Suporte completo a Trojan (.password) além de VLESS/VMess (.id) no bloqueio/desbloqueio
+# - Substituído try-reload-or-restart por restart direto com verificação _wait_xray_active
+# - Guilhotina com pkill -KILL para encerramento imediato de sessões SSH/SOCKS5
 
 set -Eeuo pipefail
 
@@ -17,7 +15,9 @@ set -Eeuo pipefail
 # ================================================================
 _TMP_FILES=()
 _cleanup() {
-    for f in "${_TMP_FILES[@]:-}"; do rm -f "$f" 2>/dev/null || true; done
+    for f in "${_TMP_FILES[@]:-}"; do
+        [ -n "$f" ] && rm -f "$f" 2>/dev/null || true
+    done
 }
 trap '_cleanup' EXIT
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
@@ -31,10 +31,11 @@ USER_DB="/opt/XrayTools/users.db"
 LOG_FILE="/tmp/limiterxray.log"
 LOCK_FILE="/tmp/limiterxray.lock"
 
-# ⚠️ CORREÇÃO V1.2: Porta API detectada dinamicamente do config.json
-# Este valor default só é usado se a detecção falhar
+XRAY_USER="nobody"
+XRAY_GROUP="nogroup"
+
 XRAY_API_PORT_DEFAULT="1080"
-XRAY_API_PORT=""  # Será detectada dinamicamente
+XRAY_API_PORT=""
 XRAY_API_TIMEOUT=5
 
 TITLE_BAR='\033[1;47;34m'
@@ -47,15 +48,13 @@ RESET='\033[0m'
 export DEBIAN_FRONTEND=noninteractive
 
 # ================================================================
-# DETECÇÃO AUTOMÁTICA DE PORTA API (CORREÇÃO V1.2)
+# DETECÇÃO AUTOMÁTICA DE PORTA API
 # ================================================================
-
-# Detecta porta da API do config.json automaticamente
 _detect_api_port() {
     local detected_port=""
 
     if [ -f "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null; then
-        detected_port=$(jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1)
+        detected_port=$(jq -r '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1)
     fi
 
     if [ -n "${detected_port:-}" ] && [[ "$detected_port" =~ ^[0-9]+$ ]]; then
@@ -63,7 +62,6 @@ _detect_api_port() {
         return 0
     fi
 
-    # Fallback: usa porta padrão do XRAY_API_PORT_DEFAULT
     XRAY_API_PORT="$XRAY_API_PORT_DEFAULT"
     return 1
 }
@@ -132,14 +130,59 @@ acquire_lock() {
     fi
 }
 
-release_lock() { flock -u 9; rm -f "$LOCK_FILE"; }
+release_lock() { flock -u 9 2>/dev/null || true; rm -f "$LOCK_FILE"; }
 
 # ================================================================
-# PERMISSÕES DO CONFIG
+# DETECÇÃO DINÂMICA DE DONO, PERMISSÕES E VALIDAÇÃO DO CONFIG
 # ================================================================
+_detect_xray_owner() {
+    local svc_user=""
+    if command -v systemctl &>/dev/null; then
+        svc_user=$(systemctl show -p User --value xray 2>/dev/null || true)
+    fi
+    svc_user="${svc_user:-nobody}"
+    if ! id "$svc_user" &>/dev/null; then
+        svc_user="root"
+    fi
+    XRAY_USER="$svc_user"
+    XRAY_GROUP="$(id -gn "$XRAY_USER")"
+}
+
 _apply_config_perms() {
-    chmod 0640 "$CONFIG_PATH"
-    chown root:nogroup "$CONFIG_PATH"
+    _detect_xray_owner
+    local cfg_dir
+    cfg_dir="$(dirname "$CONFIG_PATH")"
+
+    if [ -d "$cfg_dir" ]; then
+        chown "root:${XRAY_GROUP}" "$cfg_dir"
+        chmod 750 "$cfg_dir"
+    fi
+
+    if [ -f "$CONFIG_PATH" ]; then
+        chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
+        chmod 0640 "$CONFIG_PATH"
+    fi
+}
+
+_test_xray_config() {
+    local cfg="$1"
+    [ ! -x "$XRAY_BIN" ] && return 0
+    _detect_xray_owner
+    if command -v runuser &>/dev/null && [ "$XRAY_USER" != "root" ]; then
+        runuser -u "$XRAY_USER" -- "$XRAY_BIN" run -test -config "$cfg"
+    else
+        "$XRAY_BIN" run -test -config "$cfg"
+    fi
+}
+
+_wait_xray_active() {
+    local tries=5
+    while [ "$tries" -gt 0 ]; do
+        systemctl is-active --quiet xray 2>/dev/null && return 0
+        sleep 1
+        tries=$((tries - 1))
+    done
+    return 1
 }
 
 # ================================================================
@@ -148,33 +191,26 @@ _apply_config_perms() {
 : > "$LOG_FILE"
 mkdir -p "/opt/XrayTools"
 touch "$LIMITS_DB" "$USAGE_DB" "$SESSION_DB" "$USER_DB"
-chmod 0600 "$LIMITS_DB" "$USAGE_DB" "$SESSION_DB"
+chmod 0600 "$LIMITS_DB" "$USAGE_DB" "$SESSION_DB" "$USER_DB"
 ensure_cmd jq jq
 
-# ⚠️ CORREÇÃO V1.2: Detecta porta API automaticamente ao iniciar
-_detect_api_port && echo -e "${TXT_GREEN}✅ Porta API detectada: $XRAY_API_PORT${RESET}" \
-|| echo -e "${TXT_YELLOW}⚠ Porta API não encontrada no config, usando fallback: $XRAY_API_PORT_DEFAULT${RESET}"
+if [ "${1:-}" != "--cron" ]; then
+    _detect_api_port && echo -e "${TXT_GREEN}✅ Porta API detectada: $XRAY_API_PORT${RESET}" \
+    || echo -e "${TXT_YELLOW}⚠ Porta API não encontrada no config, usando fallback: $XRAY_API_PORT_DEFAULT${RESET}"
+else
+    _detect_api_port || true
+fi
 
 header_limit() {
     clear
-    echo -e "${TITLE_BAR} CONTROLE DE CONSUMO (PERSISTENTE) — V1.3 ${RESET}"
+    echo -e "${TITLE_BAR} CONTROLE DE CONSUMO (PERSISTENTE) — V1.4 ${RESET}"
     echo ""
     echo -e " ${TXT_CYAN}Porta API: ${XRAY_API_PORT}${RESET}"
     echo ""
 }
 
-# ⚠️ CORREÇÃO V1.2: func_get_api_port() agora detecta do config.json
 func_get_api_port() {
-    if [ -f "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null; then
-        local p
-        p=$(jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null || true)
-        if [ -n "${p:-}" ]; then
-            XRAY_API_PORT="$p"
-            return 0
-        fi
-    fi
-    XRAY_API_PORT="$XRAY_API_PORT_DEFAULT"
-    return 1
+    _detect_api_port
 }
 
 is_user_locked() {
@@ -198,6 +234,7 @@ get_real_uuid_from_db() {
 
 func_bytes_to_human() {
     local b=${1:-0}
+    [[ "$b" =~ ^[0-9]+$ ]] || b=0
     awk -v b="$b" 'BEGIN {
         if (b >= 1073741824) printf "%.2f GB\n", b / 1073741824
         else if (b >= 1048576) printf "%.2f MB\n", b / 1048576
@@ -226,6 +263,7 @@ db_set_value() {
     local file="$1" nick="$2" value="$3"
     db_delete_key "$file" "$nick"
     echo "$nick|$value" >> "$file"
+    chmod 0600 "$file"
 }
 
 # ================================================================
@@ -252,47 +290,53 @@ safe_config_write() {
 }
 
 # ================================================================
-# FUNÇÕES DA API XRAY (HOT RELOAD)
+# FUNÇÕES DA API XRAY
 # ================================================================
 _api_remove() {
     local email="$1"
-    "$XRAY_BIN" api removeuser -server="127.0.0.1:$XRAY_API_PORT" \
-        -inboundTag="inbound-turbonet" -email="$email" >/dev/null 2>&1
-}
-
-_api_add() {
-    local email="$1" id="$2"
-    local uj; uj=$(jq -n --arg id "$id" --arg e "$email" '{"id":$id,"email":$e,"level":0}')
-    "$XRAY_BIN" api adduser -server="127.0.0.1:$XRAY_API_PORT" \
-        -inboundTag="inbound-turbonet" -user="$uj" >/dev/null 2>&1
+    systemctl is-active --quiet xray 2>/dev/null || return 1
+    [ -z "${XRAY_API_PORT:-}" ] && func_get_api_port || true
+    "$XRAY_BIN" api rmu -server="127.0.0.1:$XRAY_API_PORT" \
+        -inboundTag="inbound-turbonet" "$email" >/dev/null 2>&1
 }
 
 apply_config_change_and_reload() {
-    if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
-       ! systemctl restart xray >/dev/null 2>&1; then
-        echo -e "${TXT_RED}❌ Falha ao recarregar Xray. Revertendo config...${RESET}" >&2
+    if ! _test_xray_config "$CONFIG_PATH" >>"$LOG_FILE" 2>&1; then
+        echo -e "${TXT_RED}❌ Validação do config.json falhou. Revertendo...${RESET}" >&2
         if [ -f "${CONFIG_PATH}.bak" ]; then
             mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
             _apply_config_perms
         fi
         return 1
     fi
+
+    if ! systemctl restart xray >>"$LOG_FILE" 2>&1 || ! _wait_xray_active; then
+        echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}" >&2
+        if [ -f "${CONFIG_PATH}.bak" ]; then
+            mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+            _apply_config_perms
+            systemctl restart xray >/dev/null 2>&1 || true
+        fi
+        return 1
+    fi
+    return 0
 }
 
 # ================================================================
-# CHAMADA À API COM TIMEOUT
-# ⚠️ CORREÇÃO V1.2: Usa XRAY_API_PORT detectado dinamicamente
+# CHAMADA À API COM TIMEOUT E PARSING SEGURO
 # ================================================================
 xray_api_stat() {
     local name="$1"
-    # ⚠️ Garante que a porta está definida antes de usar
-    [ -z "$XRAY_API_PORT" ] && func_get_api_port
-    timeout "$XRAY_API_TIMEOUT" \
+    [ -z "${XRAY_API_PORT:-}" ] && func_get_api_port || true
+    local raw val
+    raw=$(timeout "$XRAY_API_TIMEOUT" \
         "$XRAY_BIN" api stats \
         -server="127.0.0.1:$XRAY_API_PORT" \
-        -name "$name" 2>/dev/null \
-        | awk '/value/ {print $2; exit}' \
-        || echo "0"
+        -name "$name" 2>/dev/null || echo "{}")
+
+    val=$(echo "$raw" | jq -r '.stat.value // 0' 2>/dev/null | tr -cd '0-9')
+    [[ "${val:-}" =~ ^[0-9]+$ ]] || val=0
+    echo "$val"
 }
 
 # ================================================================
@@ -310,7 +354,6 @@ func_set_limit() {
         read -rp "Enter..."; return
     fi
 
-    # Normaliza para minúsculas
     local nick
     nick=$(echo "$nick_raw" | tr '[:upper:]' '[:lower:]')
 
@@ -319,8 +362,7 @@ func_set_limit() {
         read -rp "Enter..."; return
     fi
 
-    # ⚠️ CORREÇÃO V1.2: Detecta porta API antes de operar
-    func_get_api_port
+    func_get_api_port || true
 
     local is_locked=false
     if is_user_locked "$nick"; then
@@ -331,8 +373,8 @@ func_set_limit() {
     fi
 
     read -rp "Limite em GB: " gb_limit
-    if ! [[ "${gb_limit:-}" =~ ^[0-9]+$ ]]; then
-        echo "Inválido."; sleep 1; return
+    if ! [[ "${gb_limit:-}" =~ ^[0-9]+$ ]] || [ "$gb_limit" -lt 1 ] || [ "$gb_limit" -gt 1048576 ]; then
+        echo -e "${TXT_RED}❌ Limite inválido (use entre 1 e 1048576 GB).${RESET}"; sleep 1; return
     fi
 
     local bytes_limit=$(( gb_limit * 1073741824 ))
@@ -346,34 +388,36 @@ func_set_limit() {
     fi
 
     if [ "$is_locked" = true ]; then
-        local real_uuid
-        real_uuid="$(get_real_uuid_from_db "$nick")"
-        if [ -n "${real_uuid:-}" ]; then
+        local real_cred
+        real_cred="$(get_real_uuid_from_db "$nick")"
+        if [ -n "${real_cred:-}" ]; then
             acquire_lock
-            safe_config_write \
+            if safe_config_write \
                 '(.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
                 (if type=="array" then . else [] end)
                 |
                 (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
-                map(if .email == $locked then .email = $nick | .id = $uuid else . end)' \
-                --arg nick "$nick" --arg locked "LOCKED_$nick" --arg uuid "$real_uuid"
-            
-            # ⚠️ V1.3: Hot Reload
-            if _api_remove "LOCKED_${nick}" && _api_add "$nick" "$real_uuid"; then
-                echo -e "${TXT_GREEN}✅ Usuário desbloqueado silenciosamente!${RESET}"
-            else
-                apply_config_change_and_reload && echo -e "${TXT_GREEN}✅ Usuário desbloqueado!${RESET}"
+                map(if .email == $locked then
+                    .email = $nick
+                    | (if has("password") then .password = $cred else . end)
+                    | (if has("id") then .id = $cred else . end)
+                else . end)' \
+                --arg nick "$nick" --arg locked "LOCKED_$nick" --arg cred "$real_cred"; then
+
+                _api_remove "LOCKED_${nick}" 2>/dev/null || true
+                if apply_config_change_and_reload; then
+                    echo -e "${TXT_GREEN}✅ Usuário desbloqueado!${RESET}"
+                fi
             fi
-            
-            # ⚠️ V1.3: SSH/SOCKS5 Unlock Total
+
             if id "$nick" &>/dev/null; then
                 usermod -U "$nick" 2>/dev/null || true
                 chage -E -1 "$nick" 2>/dev/null || true
             fi
-            
+
             release_lock
         else
-            echo -e "${TXT_YELLOW}⚠ UUID real não encontrado. Desbloqueio manual necessário.${RESET}"
+            echo -e "${TXT_YELLOW}⚠ Credencial real não encontrada. Desbloqueio manual necessário.${RESET}"
         fi
     fi
 
@@ -382,18 +426,17 @@ func_set_limit() {
 }
 
 func_view_usage() {
-    # ⚠️ CORREÇÃO V1.2: Detecta porta API antes de operar
-    func_get_api_port
+    func_get_api_port || true
     header_limit
     printf "%-14s | %-12s | %-12s | %s\n" "USUÁRIO" "USADO" "LIMITE" "STATUS"
     echo "-----------------------------------------------------------"
 
     local all_nicks=()
     while IFS='|' read -r name _; do
-        [ -n "$name" ] && all_nicks+=("$name")
+        [ -n "${name:-}" ] && all_nicks+=("$name")
     done < "$USER_DB"
     while IFS='|' read -r name _; do
-        [ -n "$name" ] || continue
+        [ -n "${name:-}" ] || continue
         local found=0
         for n in "${all_nicks[@]:-}"; do [ "$n" = "$name" ] && found=1 && break; done
         [ "$found" -eq 0 ] && all_nicks+=("$name")
@@ -402,10 +445,12 @@ func_view_usage() {
     for nick in "${all_nicks[@]:-}"; do
         [ -n "$nick" ] || continue
         local usage_total limit_bytes
-        usage_total="$(db_get_value "$USAGE_DB" "$nick")"; [ -n "${usage_total:-}" ] || usage_total=0
+        usage_total="$(db_get_value "$USAGE_DB" "$nick")"
+        [[ "${usage_total:-}" =~ ^[0-9]+$ ]] || usage_total=0
         limit_bytes="$(db_get_value "$LIMITS_DB" "$nick")"
+
         local limit_h status
-        if [ -z "${limit_bytes:-}" ]; then
+        if [ -z "${limit_bytes:-}" ] || ! [[ "$limit_bytes" =~ ^[0-9]+$ ]] || [ "$limit_bytes" -le 0 ]; then
             limit_h="Sem limite"
             status="${TXT_GREEN}Livre${RESET}"
         else
@@ -438,7 +483,6 @@ func_remove_limit() {
         echo -e "${TXT_RED}❌ Nick inválido.${RESET}"; sleep 1; return
     fi
 
-    # Normaliza para minúsculas
     local nick
     nick=$(echo "$nick_raw" | tr '[:upper:]' '[:lower:]')
 
@@ -447,31 +491,32 @@ func_remove_limit() {
     db_delete_key "$SESSION_DB" "$nick"
 
     if [ -s "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null && is_user_locked "$nick" 2>/dev/null; then
-        local real_uuid
-        real_uuid="$(get_real_uuid_from_db "$nick")"
-        if [ -n "${real_uuid:-}" ]; then
+        local real_cred
+        real_cred="$(get_real_uuid_from_db "$nick")"
+        if [ -n "${real_cred:-}" ]; then
             acquire_lock
-            safe_config_write \
+            if safe_config_write \
                 '(.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
                 (if type=="array" then . else [] end)
                 |
                 (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
-                map(if .email == $locked then .email = $nick | .id = $uuid else . end)' \
-                --arg nick "$nick" --arg locked "LOCKED_$nick" --arg uuid "$real_uuid"
-            
-            # ⚠️ V1.3: Hot Reload
-            if _api_remove "LOCKED_${nick}" && _api_add "$nick" "$real_uuid"; then
-                echo -e "${TXT_GREEN}✅ Limite removido e usuário desbloqueado silenciosamente!${RESET}"
-            else
-                apply_config_change_and_reload
+                map(if .email == $locked then
+                    .email = $nick
+                    | (if has("password") then .password = $cred else . end)
+                    | (if has("id") then .id = $cred else . end)
+                else . end)' \
+                --arg nick "$nick" --arg locked "LOCKED_$nick" --arg cred "$real_cred"; then
+
+                _api_remove "LOCKED_${nick}" 2>/dev/null || true
+                apply_config_change_and_reload && \
+                    echo -e "${TXT_GREEN}✅ Limite removido e usuário desbloqueado!${RESET}"
             fi
-            
-            # ⚠️ V1.3: SSH/SOCKS5 Unlock Total
+
             if id "$nick" &>/dev/null; then
                 usermod -U "$nick" 2>/dev/null || true
                 chage -E -1 "$nick" 2>/dev/null || true
             fi
-            
+
             release_lock
         fi
     fi
@@ -483,8 +528,7 @@ func_remove_limit() {
 func_check_and_block() {
     local MODE="$1"
 
-    # ⚠️ CORREÇÃO V1.2: Detecta porta API antes de OPERAR
-    func_get_api_port
+    func_get_api_port || true
 
     [ "$MODE" != "--cron" ] && {
         header_limit
@@ -496,9 +540,9 @@ func_check_and_block() {
         return 1
     fi
 
-    if ! jq -e '.inbounds[]? | select(.tag=="api")' "$CONFIG_PATH" >/dev/null 2>&1; then
+    if ! jq -e '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door")' "$CONFIG_PATH" >/dev/null 2>&1; then
         [ "$MODE" != "--cron" ] && {
-            echo -e "${TXT_RED}❌ Inbound API não configurado (tag: api).${RESET}"
+            echo -e "${TXT_RED}❌ Inbound API não configurado.${RESET}"
             read -rp "Enter..."
         }
         return 1
@@ -508,7 +552,6 @@ func_check_and_block() {
     local blocked_count=0
     local config_changed=false
 
-    # tmpfiles registrados para cleanup via trap EXIT
     local tmp_usage tmp_session
     tmp_usage=$(mktemp "${USAGE_DB}.work.XXXXXX")
     tmp_session=$(mktemp "${SESSION_DB}.work.XXXXXX")
@@ -519,18 +562,22 @@ func_check_and_block() {
 
     while IFS='|' read -r nick limit_bytes; do
         [ -n "${nick:-}" ] || continue
+        [[ "${limit_bytes:-}" =~ ^[0-9]+$ ]] || continue
+        [ "$limit_bytes" -le 0 ] && continue
         is_user_locked "$nick" 2>/dev/null && continue
 
         local down up
         down=$(xray_api_stat "user>>>${nick}>>>traffic>>>downlink")
         up=$(xray_api_stat "user>>>${nick}>>>traffic>>>uplink")
-        [ -n "${down:-}" ] || down=0
-        [ -n "${up:-}" ] || up=0
+        [[ "${down:-}" =~ ^[0-9]+$ ]] || down=0
+        [[ "${up:-}" =~ ^[0-9]+$ ]] || up=0
 
         local current_session=$(( down + up ))
         local last_session historical_usage
-        last_session="$(db_get_value "$tmp_session" "$nick")"; [ -n "${last_session:-}" ] || last_session=0
-        historical_usage="$(db_get_value "$tmp_usage" "$nick")"; [ -n "${historical_usage:-}" ] || historical_usage=0
+        last_session="$(db_get_value "$tmp_session" "$nick")"
+        [[ "${last_session:-}" =~ ^[0-9]+$ ]] || last_session=0
+        historical_usage="$(db_get_value "$tmp_usage" "$nick")"
+        [[ "${historical_usage:-}" =~ ^[0-9]+$ ]] || historical_usage=0
 
         local delta
         if [ "$current_session" -lt "$last_session" ]; then
@@ -551,11 +598,12 @@ func_check_and_block() {
                 [ "$MODE" != "--cron" ] && \
                 echo -e "${TXT_RED}❌ $nick estourou. Bloqueando...${RESET}"
 
-                local fake_uuid
+                local fake_uuid fake_pass
                 fake_uuid=$(generate_uuid) || {
                     echo -e "${TXT_RED}❌ UUID falhou para $nick.${RESET}" >&2
                     continue
                 }
+                fake_pass=$(tr -dc 'a-f0-9' < /dev/urandom | head -c 32)
 
                 local tmp_block
                 tmp_block=$(mktemp "${CONFIG_PATH}.block.XXXXXX")
@@ -563,29 +611,32 @@ func_check_and_block() {
                     --arg nick "$nick" \
                     --arg locked "LOCKED_$nick" \
                     --arg fake "$fake_uuid" \
+                    --arg fakepass "$fake_pass" \
                     '(.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
                     (if type=="array" then . else [] end)
                     |
                     (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
-                    map(if .email == $nick then .email = $locked | .id = $fake else . end)' \
+                    map(if .email == $nick then
+                        .email = $locked
+                        | (if has("password") then .password = $fakepass else . end)
+                        | (if has("id") then .id = $fake else . end)
+                    else . end)' \
                     "$CONFIG_PATH" > "$tmp_block" 2>>"$LOG_FILE" \
                     && jq empty "$tmp_block" 2>/dev/null; then
                     cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
                     mv -f "$tmp_block" "$CONFIG_PATH"
                     _apply_config_perms
-                    
-                    # ⚠️ V1.3: Hot Reload (evita restart completo)
-                    if ! _api_remove "$nick" || ! _api_add "LOCKED_${nick}" "$fake_uuid"; then
-                        config_changed=true
-                    fi
-                    
-                    # ⚠️ V1.3: Bloqueio SSH (Guilhotina: Trava senha e derruba conexões ativas)
+                    config_changed=true
+
+                    _api_remove "$nick" 2>/dev/null || true
+
+                    # Guilhotina SSH/SOCKS5: trava conta e derruba conexões ativas
                     if id "$nick" &>/dev/null; then
                         usermod -L "$nick" 2>/dev/null || true
                         chage -E 0 "$nick" 2>/dev/null || true
-                        pkill -u "$nick" 2>/dev/null || true
+                        pkill -KILL -u "$nick" 2>/dev/null || true
                     fi
-                    
+
                     blocked_count=$(( blocked_count + 1 ))
                 else
                     rm -f "$tmp_block"
@@ -599,6 +650,7 @@ func_check_and_block() {
     # Promove cópias de trabalho para DBs reais
     mv -f "$tmp_usage" "$USAGE_DB"
     mv -f "$tmp_session" "$SESSION_DB"
+    _TMP_FILES=()
 
     chmod 0600 "$USAGE_DB" "$SESSION_DB"
 
@@ -619,8 +671,7 @@ func_check_and_block() {
 # ENTRY POINT
 # ================================================================
 if [ "${1:-}" = "--cron" ]; then
-    # ⚠️ CORREÇÃO V1.2: Detecta porta API também no modo cron
-    func_get_api_port
+    func_get_api_port || true
     func_check_and_block "--cron"
     exit 0
 fi
