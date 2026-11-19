@@ -1,13 +1,11 @@
 #!/bin/bash
-# renew_user.sh - TURBONET XRAY V1.2 (PRO)
-# Módulo de Renovação Inteligente com Integração Total
-#
-# Funcionalidades:
-# - Cálculo inteligente de datas (soma a partir de hoje se já estiver vencido)
-# - Desbloqueio Automático (Remove LOCKED_ via API Hot Reload se suspenso)
-# - Reset de franquia de dados opcional (Integração com limiterxray)
-# - Desbloqueio nativo do SSH/SOCKS5 (passwd -u)
-# - Atualização atômica segura (awk + mktemp)
+# renew_user.sh - TURBONET XRAY V1.3 (PRO)
+# Correções aplicadas:
+#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
+#   - Permissões 750/640 root:$XRAY_GROUP aplicadas no diretório e no config.json
+#   - Validação com `xray run -test` sob o usuário do serviço e rollback automático
+#   - Suporte completo a credenciais Trojan (.password) além de VLESS/VMess (.id)
+#   - Validação numérica de dias (1-3650) e de bytes no usage.db
 
 set -Eeuo pipefail
 
@@ -15,7 +13,7 @@ set -Eeuo pipefail
 _TMP_FILES=()
 _cleanup() {
     for f in "${_TMP_FILES[@]:-}"; do
-        rm -f "$f" 2>/dev/null || true
+        [ -n "$f" ] && rm -f "$f" 2>/dev/null || true
     done
 }
 trap '_cleanup' EXIT
@@ -26,6 +24,9 @@ USAGE_DB="/opt/XrayTools/usage.db"
 SESSION_DB="/opt/XrayTools/session.db"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
 XRAY_BIN="/usr/local/bin/xray"
+
+XRAY_USER="nobody"
+XRAY_GROUP="nogroup"
 
 TXT_GREEN='\033[1;32m'
 TXT_RED='\033[1;31m'
@@ -52,34 +53,73 @@ command -v awk >/dev/null 2>&1 || { echo -e "${TXT_RED}❌ 'awk' não instalado.
 # Carrega sanitização se disponível
 [ -f "/usr/local/bin/sanitize.sh" ] && source /usr/local/bin/sanitize.sh
 
+# --- DETECÇÃO DINÂMICA DE DONO E PERMISSÕES ---
+_detect_xray_owner() {
+    local svc_user=""
+    if command -v systemctl &>/dev/null; then
+        svc_user=$(systemctl show -p User --value xray 2>/dev/null || true)
+    fi
+    svc_user="${svc_user:-nobody}"
+    if ! id "$svc_user" &>/dev/null; then
+        svc_user="root"
+    fi
+    XRAY_USER="$svc_user"
+    XRAY_GROUP="$(id -gn "$XRAY_USER")"
+}
+
+_apply_config_perms() {
+    _detect_xray_owner
+    local cfg_dir
+    cfg_dir="$(dirname "$CONFIG_PATH")"
+
+    if [ -d "$cfg_dir" ]; then
+        chown "root:${XRAY_GROUP}" "$cfg_dir"
+        chmod 750 "$cfg_dir"
+    fi
+
+    if [ -f "$CONFIG_PATH" ]; then
+        chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
+        chmod 0640 "$CONFIG_PATH"
+    fi
+}
+
+_test_xray_config() {
+    local cfg="$1"
+    [ ! -x "$XRAY_BIN" ] && return 0
+    _detect_xray_owner
+    if command -v runuser &>/dev/null && [ "$XRAY_USER" != "root" ]; then
+        runuser -u "$XRAY_USER" -- "$XRAY_BIN" run -test -config "$cfg"
+    else
+        "$XRAY_BIN" run -test -config "$cfg"
+    fi
+}
+
+_wait_xray_active() {
+    local tries=5
+    while [ "$tries" -gt 0 ]; do
+        systemctl is-active --quiet xray 2>/dev/null && return 0
+        sleep 1
+        tries=$((tries - 1))
+    done
+    return 1
+}
+
 # --- HELPERS DA API XRAY ---
 _xray_api_port() {
-    jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
+    jq -r '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
 }
 
 _api_remove() {
     local email="$1"
+    systemctl is-active --quiet xray 2>/dev/null || return 1
     local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
-    "$XRAY_BIN" api removeuser -server="127.0.0.1:${p}" \
-        -inboundTag="inbound-turbonet" -email="$email" >/dev/null 2>&1
-}
-
-_api_add() {
-    local email="$1" id="$2"
-    local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
-    local uj; uj=$(jq -n --arg id "$id" --arg e "$email" '{"id":$id,"email":$e,"level":0}')
-    "$XRAY_BIN" api adduser -server="127.0.0.1:${p}" \
-        -inboundTag="inbound-turbonet" -user="$uj" >/dev/null 2>&1
-}
-
-_apply_config_perms() {
-    chmod 0640 "$CONFIG_PATH"
-    chown root:nogroup "$CONFIG_PATH"
+    "$XRAY_BIN" api rmu -server="127.0.0.1:${p}" \
+        -inboundTag="inbound-turbonet" "$email" >/dev/null 2>&1
 }
 
 # --- INTERFACE ---
 clear
-echo -e "${TITLE_BAR}   RENOVAR USUÁRIO (V1.2 PRO)   ${RESET}"
+echo -e "${TITLE_BAR}   RENOVAR USUÁRIO (V1.3 PRO)   ${RESET}"
 echo ""
 
 read -rp "Nick do usuário (0 para voltar): " nick_raw
@@ -87,7 +127,7 @@ read -rp "Nick do usuário (0 para voltar): " nick_raw
 
 nick=$(echo "$nick_raw" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
 
-if ! grep -q "^${nick}|" "$USER_DB" 2>/dev/null; then
+if [ -z "$nick" ] || ! grep -q "^${nick}|" "$USER_DB" 2>/dev/null; then
     echo -e "${TXT_RED}❌ Usuário '${nick}' não encontrado no sistema.${RESET}"
     sleep 2; exit 1
 fi
@@ -97,24 +137,24 @@ IFS='|' read -r db_nick db_uuid data_atual db_pass db_limit _rest < <(grep "^${n
 
 # Verifica se está suspenso/bloqueado no config.json
 is_locked=false
-if jq -e --arg lock "LOCKED_${nick}" '
+if [ -s "$CONFIG_PATH" ] && jq -e --arg lock "LOCKED_${nick}" '
     any(.inbounds[]? | select(.tag=="inbound-turbonet").settings.clients[]?; .email == $lock)
 ' "$CONFIG_PATH" >/dev/null 2>&1; then
     is_locked=true
 fi
 
 # Cálculo Inteligente de Data
-hoje_ts=$(date +%s)
-exp_ts=$(date -d "$data_atual" +%s 2>/dev/null || echo 0)
+hoje_ts=$(date -d "$(date +%F)" +%s)
+exp_ts=$(date -d "${data_atual:-1970-01-01}" +%s 2>/dev/null || echo 0)
 
 status_txt="${TXT_GREEN}ATIVO${RESET}"
 data_base="$data_atual"
 
 if [ "$is_locked" = true ]; then
     status_txt="${TXT_RED}BLOQUEADO / SUSPENSO${RESET}"
+    [ "$exp_ts" -lt "$hoje_ts" ] && data_base=$(date +%F)
 elif [ "$exp_ts" -lt "$hoje_ts" ]; then
     status_txt="${TXT_YELLOW}VENCIDO${RESET}"
-    # Se está vencido, a nova data baseia-se em hoje, para não "comer" dias do cliente
     data_base=$(date +%F)
 fi
 
@@ -128,6 +168,7 @@ echo ""
 read -rp "Quantos dias deseja adicionar? [Enter = 30]: " dias
 dias="${dias:-30}"
 [[ "$dias" =~ ^[0-9]+$ ]] || dias=30
+(( dias < 1 || dias > 3650 )) && dias=30
 
 nova_data=$(date -d "${data_base} +${dias} days" +%F 2>/dev/null || date -d "+${dias} days" +%F)
 
@@ -137,7 +178,8 @@ echo ""
 # Reset de Consumo de Dados (Integração Limiter)
 reset_usage="n"
 if [ -f "$USAGE_DB" ] && grep -q "^${nick}|" "$USAGE_DB" 2>/dev/null; then
-    uso_bytes=$(awk -F'|' -v n="$nick" '$1==n {print $2}' "$USAGE_DB")
+    uso_bytes=$(awk -F'|' -v n="$nick" '$1==n {print $2; exit}' "$USAGE_DB" 2>/dev/null || echo 0)
+    [[ "${uso_bytes:-0}" =~ ^[0-9]+$ ]] || uso_bytes=0
     uso_mb=$(( uso_bytes / 1048576 ))
     echo -e "Este usuário consumiu ${TXT_CYAN}${uso_mb} MB${RESET} na franquia atual."
     read -rp "Deseja ZERAR o consumo de dados (GB) dele? [S/n]: " reset_usage
@@ -159,28 +201,44 @@ mv -f "$tmp_db" "$USER_DB"
 chmod 0600 "$USER_DB"
 chown root:root "$USER_DB"
 
-# 2. Desbloqueio Xray (Hot Reload) - Caso estivesse suspenso
+# 2. Desbloqueio Xray - Caso estivesse suspenso
 if [ "$is_locked" = true ]; then
     echo "Identificado usuário suspenso. Restaurando acesso Xray..."
-    
+
     cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
     tmp_cfg=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")
     _TMP_FILES+=("$tmp_cfg")
-    
-    jq --arg nick "$nick" --arg locked "LOCKED_$nick" --arg uuid "$db_uuid" '
+
+    jq --arg nick "$nick" --arg locked "LOCKED_$nick" --arg cred "$db_uuid" '
         (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
-            map(if .email == $locked then .email = $nick | .id = $uuid else . end)
+            (if type == "array" then . else [] end)
+        |
+        (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
+            map(if .email == $locked then
+                .email = $nick
+                | (if has("password") then .password = $cred else . end)
+                | (if has("id") then .id = $cred else . end)
+            else . end)
     ' "$CONFIG_PATH" > "$tmp_cfg"
-    
+
     if jq empty "$tmp_cfg" 2>/dev/null; then
         mv -f "$tmp_cfg" "$CONFIG_PATH"
         _apply_config_perms
-        
-        if _api_remove "LOCKED_${nick}" && _api_add "$nick" "$db_uuid"; then
-            echo -e "  ↳ ${TXT_GREEN}Acesso restaurado via API (Sem queda de conexões)${RESET}"
+
+        if _test_xray_config "$CONFIG_PATH" >/dev/null 2>&1; then
+            _api_remove "LOCKED_${nick}" 2>/dev/null || true
+            if systemctl restart xray >/dev/null 2>&1 && _wait_xray_active; then
+                echo -e "  ↳ ${TXT_GREEN}Acesso Xray restaurado com sucesso.${RESET}"
+            else
+                echo -e "  ↳ ${TXT_RED}Falha ao reiniciar Xray. Revertendo config...${RESET}"
+                mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+                _apply_config_perms
+                systemctl restart xray >/dev/null 2>&1 || true
+            fi
         else
-            echo -e "  ↳ ${TXT_YELLOW}API indisponível, recarregando serviço...${RESET}"
-            systemctl reload-or-restart xray >/dev/null 2>&1 || true
+            echo -e "  ↳ ${TXT_RED}Validação do config falhou. Revertendo...${RESET}"
+            mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+            _apply_config_perms
         fi
     else
         echo -e "  ↳ ${TXT_RED}Erro ao restaurar JSON. Acesso Xray não desbloqueado.${RESET}"
@@ -206,7 +264,7 @@ if [[ "${reset_usage}" =~ ^[Ss]$ ]]; then
     echo -e "  ↳ ${TXT_GREEN}Consumo de dados zerado.${RESET}"
 fi
 
-# 4. Desbloqueio SSH/SOCKS5 Local (Garante que senhas Linux voltem a funcionar)
+# 4. Desbloqueio SSH/SOCKS5 Local
 if id "$nick" &>/dev/null; then
     passwd -u "$nick" 2>/dev/null || true
     echo -e "  ↳ ${TXT_GREEN}Acesso SSH/SOCKS5 local habilitado.${RESET}"
