@@ -1,14 +1,11 @@
 #!/bin/bash
-# remover_user.sh - TURBONET XRAY V1.0
+# remover_user.sh - TURBONET XRAY V1.1
 # Correções aplicadas:
-#   - chmod 777 → _apply_config_perms() (640 root:nogroup) nos 3 pontos
-#   - _cleanup() + trap EXIT desde o início — elimina trap tardio após mktemp
-#   - _wait_xray_active() com retry de 5s — substitui sleep 1 + is-active simples
-#   - identifier normalizado para minúsculas quando não é UUID — evita dessincronização DB/config
-#   - chmod 600 explícito no USER_DB após mv
-#   - Flag file_removed para exibição correta do arquivo apagado
-#   - UUID truncado na listagem inicial — não expõe credencial completa no terminal
-#   - INTEGRAÇÃO SSH: Remove o usuário local do Linux para bloquear acesso ao Dropbear e SOCKS5
+#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
+#   - Permissões 750/640 root:$XRAY_GROUP aplicadas no diretório e no config.json
+#   - Validação com `xray run -test` sob o usuário do serviço antes de reiniciar
+#   - Substituído try-reload-or-restart por restart direto no fallback
+#   - Suporte a credenciais Trojan (32 hex chars) além de nome e UUID
 
 set -Eeuo pipefail
 
@@ -16,6 +13,9 @@ CONFIG_PATH="/usr/local/etc/xray/config.json"
 USER_DB="/opt/XrayTools/users.db"
 CONN_INFO_DIR="/opt/XrayTools/users"
 LOG_FILE="/tmp/remover_user.log"
+
+XRAY_USER="nobody"
+XRAY_GROUP="nogroup"
 
 TXT_GREEN='\033[1;32m'
 TXT_RED='\033[1;31m'
@@ -30,15 +30,51 @@ export DEBIAN_FRONTEND=noninteractive
 _tmp_cfg=""
 _tmp_db=""
 _cleanup() {
-    rm -f "$_tmp_cfg" "$_tmp_db"
+    [ -n "${_tmp_cfg:-}" ] && rm -f "$_tmp_cfg"
+    [ -n "${_tmp_db:-}" ] && rm -f "$_tmp_db"
 }
 trap '_cleanup' EXIT
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
 
-# --- PERMISSÕES DO CONFIG ---
+# --- DETECÇÃO DINÂMICA DE DONO E PERMISSÕES ---
+_detect_xray_owner() {
+    local svc_user=""
+    if command -v systemctl &>/dev/null; then
+        svc_user=$(systemctl show -p User --value xray 2>/dev/null || true)
+    fi
+    svc_user="${svc_user:-nobody}"
+    if ! id "$svc_user" &>/dev/null; then
+        svc_user="root"
+    fi
+    XRAY_USER="$svc_user"
+    XRAY_GROUP="$(id -gn "$XRAY_USER")"
+}
+
 _apply_config_perms() {
-    chmod 0640 "$CONFIG_PATH"
-    chown root:nogroup "$CONFIG_PATH"
+    _detect_xray_owner
+    local cfg_dir
+    cfg_dir="$(dirname "$CONFIG_PATH")"
+
+    if [ -d "$cfg_dir" ]; then
+        chown "root:${XRAY_GROUP}" "$cfg_dir"
+        chmod 750 "$cfg_dir"
+    fi
+
+    if [ -f "$CONFIG_PATH" ]; then
+        chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
+        chmod 0640 "$CONFIG_PATH"
+    fi
+}
+
+_test_xray_config() {
+    local cfg="$1"
+    [ ! -x /usr/local/bin/xray ] && return 0
+    _detect_xray_owner
+    if command -v runuser &>/dev/null && [ "$XRAY_USER" != "root" ]; then
+        runuser -u "$XRAY_USER" -- /usr/local/bin/xray run -test -config "$cfg"
+    else
+        /usr/local/bin/xray run -test -config "$cfg"
+    fi
 }
 
 # --- DETECÇÃO DE DISTRO ---
@@ -70,6 +106,7 @@ validate_identifier() {
     local id="$1"
     [[ "$id" =~ ^[a-zA-Z0-9]{5,9}$ ]] && return 0
     [[ "$id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] && return 0
+    [[ "$id" =~ ^[0-9a-fA-F]{32}$ ]] && return 0
     return 1
 }
 
@@ -110,7 +147,7 @@ echo ""
 if [ -s "$USER_DB" ]; then
     echo -e "${TXT_CYAN}Usuários cadastrados:${RESET}"
     echo "-----------------------------------------"
-    printf "%-12s %-14s %-12s\n" "NOME" "UUID" "EXPIRA"
+    printf "%-12s %-14s %-12s\n" "NOME" "CREDENCIAL" "EXPIRA"
     echo "-----------------------------------------"
     while IFS='|' read -r name uuid expiry _rest; do
         printf "%-12s %-14s %-12s\n" "$name" "${uuid:0:8}..." "$expiry"
@@ -122,25 +159,23 @@ else
     echo ""
 fi
 
-read -rp "Nome ou UUID para remover (0 para voltar): " identifier
+read -rp "Nome ou UUID/Senha para remover (0 para voltar): " identifier
 
 [ "${identifier:-0}" = "0" ] || [ -z "${identifier:-}" ] && exit 0
 
 if ! validate_identifier "$identifier"; then
-    echo -e "${TXT_RED}❌ Identificador inválido. Use o nome (5-9 chars) ou UUID completo.${RESET}"
+    echo -e "${TXT_RED}❌ Identificador inválido. Use o nome (5-9 chars), UUID ou senha Trojan.${RESET}"
     sleep 2; exit 1
 fi
 
-if [[ ! "$identifier" =~ ^[0-9a-fA-F]{8}- ]]; then
-    identifier=$(echo "$identifier" | tr '[:upper:]' '[:lower:]')
-fi
+identifier=$(echo "$identifier" | tr '[:upper:]' '[:lower:]')
 
 # Confirma existência antes de agir
 found_in_config=0
 if jq -e --arg id "$identifier" '
     .inbounds[]? | select(.tag=="inbound-turbonet")
     | .settings.clients[]?
-    | select(.id == $id or .email == $id)
+    | select(.id == $id or .password == $id or .email == $id)
 ' "$CONFIG_PATH" >/dev/null 2>&1; then
     found_in_config=1
 fi
@@ -165,7 +200,7 @@ if [ -z "$nick_real" ] && [ "$found_in_config" -eq 1 ]; then
     nick_real=$(jq -r --arg id "$identifier" '
         .inbounds[]? | select(.tag=="inbound-turbonet")
         | .settings.clients[]?
-        | select(.id == $id or .email == $id)
+        | select(.id == $id or .password == $id or .email == $id)
         | .email // ""
     ' "$CONFIG_PATH" 2>/dev/null | head -1 || echo "")
 fi
@@ -187,7 +222,7 @@ jq --arg id "$identifier" '
     (if type == "array" then . else [] end)
   |
   (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
-    map(select(.id != $id and .email != $id))
+    map(select(.id != $id and .password != $id and .email != $id))
 ' "$CONFIG_PATH" > "$_tmp_cfg"
 
 if ! jq empty "$_tmp_cfg" 2>/dev/null; then
@@ -202,46 +237,49 @@ mv -f "$_tmp_cfg" "$CONFIG_PATH"
 _tmp_cfg=""
 _apply_config_perms
 
+# --- VALIDA SINTAXE E PERMISSÕES ANTES DE APLICAR ---
+if ! _test_xray_config "$CONFIG_PATH" >>"$LOG_FILE" 2>&1; then
+    echo -e "${TXT_RED}❌ Falha na validação do config.json pelo Xray. Revertendo...${RESET}"
+    mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+    _apply_config_perms
+    tail -n 10 "$LOG_FILE" 2>/dev/null || true
+    sleep 3; exit 1
+fi
+
 # --- HELPER: porta da API do Xray ---
 _xray_api_port() {
-    jq -r '.inbounds[]? | select(.tag=="api") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
+    jq -r '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
 }
 _api_remove() {
     local email="$1"
+    systemctl is-active --quiet xray 2>/dev/null || return 1
     local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
-    /usr/local/bin/xray api removeuser -server="127.0.0.1:${p}" \
-        -inboundTag="inbound-turbonet" -email="$email" >/dev/null 2>&1
+    /usr/local/bin/xray api rmu -server="127.0.0.1:${p}" \
+        -inboundTag="inbound-turbonet" "$email" >/dev/null 2>&1
 }
 _fallback_reload() {
-    local bak_restore="${1:-}"
-    if ! systemctl try-reload-or-restart xray >/dev/null 2>&1 && \
-       ! systemctl restart xray >/dev/null 2>&1; then
-        echo -e "${TXT_RED}❌ Falha ao recarregar Xray. Revertendo config...${RESET}"
+    if ! systemctl restart xray >>"$LOG_FILE" 2>&1 || ! _wait_xray_active; then
+        echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}"
         mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
         _apply_config_perms
+        systemctl restart xray >/dev/null 2>&1 || true
         journalctl -u xray -n 15 --no-pager 2>/dev/null || true
         echo -e "${TXT_YELLOW}Config revertido.${RESET}"
         sleep 3; return 1
     fi
-    if ! _wait_xray_active; then
-        echo -e "${TXT_RED}❌ Xray não ficou ativo. Revertendo...${RESET}"
-        mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-        _apply_config_perms
-        systemctl restart xray >/dev/null 2>&1 || true
-        sleep 2; return 1
-    fi
     return 0
 }
 
-# Hot reload: remove via API (sem restart). Fallback: reload do serviço.
-if _api_remove "$identifier" 2>/dev/null; then
+# Hot reload: remove via API (sem restart). Fallback: restart do serviço.
+target_email="${nick_real:-$identifier}"
+if _api_remove "$target_email" 2>/dev/null; then
     echo -e "${TXT_GREEN}Removido via API (sem restart).${RESET}"
 else
-    echo -e "${TXT_YELLOW}API indisponível — recarregando serviço...${RESET}"
+    echo -e "${TXT_YELLOW}Aplicando remoção via reinício do Xray...${RESET}"
     _fallback_reload || exit 1
 fi
 
-# --- SÓ AGORA ATUALIZA O DB (após restart confirmado) ---
+# --- SÓ AGORA ATUALIZA O DB (após aplicação confirmada) ---
 if [ "$found_in_db" -eq 1 ] && [ -s "$USER_DB" ]; then
     _tmp_db=$(mktemp "${USER_DB}.tmp.XXXXXX")
     awk -F'|' -v id="$identifier" '($1!=id && $2!=id){print $0}' "$USER_DB" > "$_tmp_db"
@@ -262,7 +300,6 @@ fi
 # --- INTEGRAÇÃO SSH: REMOVER USUÁRIO DO SISTEMA (Dropbear/SOCKS5) ---
 ssh_removed=0
 if [ -n "$nick_real" ] && id "$nick_real" &>/dev/null; then
-    # -f força a deleção mesmo que o usuário esteja logado ativamente
     userdel -f "$nick_real" 2>/dev/null || true
     ssh_removed=1
 fi
@@ -274,10 +311,10 @@ clear
 if [ "$removed_config" -gt 0 ] || [ "$found_in_db" -eq 1 ]; then
     echo -e "${TXT_GREEN}✅ Usuário '${nick_real:-$identifier}' removido com sucesso.${RESET}"
     echo "-----------------------------------------"
-    [ "$removed_config" -gt 0 ] && echo -e " Config:  ${TXT_GREEN}removido do Xray${RESET}"
-    [ "$found_in_db"    -eq 1 ] && echo -e " DB:      ${TXT_GREEN}removido do banco${RESET}"
-    [ "$file_removed"   -eq 1 ] && echo -e " Arquivo: ${TXT_GREEN}${CONN_INFO_DIR}/${nick_real}.txt apagado${RESET}"
-    [ "$ssh_removed"    -eq 1 ] && echo -e " SSH/SOCKS:${TXT_GREEN}acesso local bloqueado${RESET}"
+    [ "$removed_config" -gt 0 ] && echo -e " Config:   ${TXT_GREEN}removido do Xray${RESET}"
+    [ "$found_in_db"    -eq 1 ] && echo -e " DB:       ${TXT_GREEN}removido do banco${RESET}"
+    [ "$file_removed"   -eq 1 ] && echo -e " Arquivo:  ${TXT_GREEN}${CONN_INFO_DIR}/${nick_real}.txt apagado${RESET}"
+    [ "$ssh_removed"    -eq 1 ] && echo -e " SSH/SOCKS:${TXT_GREEN} acesso local bloqueado${RESET}"
     echo "-----------------------------------------"
 else
     echo -e "${TXT_RED}⚠  Nenhum dado removido (usuário não estava no config).${RESET}"
