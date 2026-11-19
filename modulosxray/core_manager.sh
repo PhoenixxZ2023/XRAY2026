@@ -1,12 +1,12 @@
 #!/bin/bash
-# core_manager.sh - TURBONET XRAY V1.1 (Otimizado com Engenharia DragonCore)
-# Correções aplicadas:
-#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
-#   - _apply_config_perms aplica 750/640 root:$XRAY_GROUP em /usr/local/etc/xray e /opt/TurbonetCoreSSL
-#   - Validação real com `xray run -test` sob o usuário do serviço antes de reiniciar
-#   - Resolvido GOMAXPROCS numérico no override.conf do systemd (sem literal $(nproc))
-#   - Checagem de shebang BOM-safe compatível com POSIX (sem dependência de grep -P)
-#   - Reaplicação automática de permissões ao reiniciar o serviço no menu [4]
+# core_manager.sh - TURBONET XRAY V1.2 (Otimizado com Engenharia DragonCore)
+# Correções aplicadas V1.2:
+#   - Removido mux inválido do outbound freedom (evita falha de startup no Xray-core)
+#   - Corrigido xhttpSettings para o schema oficial do Xray-core ("headers" no plural)
+#   - Removido fallbacks incompatíveis no transporte xhttp (orienta uso do Proxy 80)
+#   - Preserva usuários ativos/bloqueados do users.db ao regenerar config.json (ou cria admin sincronizado)
+#   - Fallback automático de routing rules caso geoip.dat/geosite.dat não existam
+#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner) e permissões 750/640
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; read -rp "Enter para continuar...";' ERR
@@ -14,6 +14,7 @@ trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; 
 CONFIG_PATH="/usr/local/etc/xray/config.json"
 PRESET_FILE="/usr/local/etc/xray/preset.json"
 XRAYTOOLS_DIR="/opt/XrayTools"
+USER_DB="${XRAYTOOLS_DIR}/users.db"
 ACTIVE_DOMAIN_FILE="${XRAYTOOLS_DIR}/active_domain"
 CONN_INFO_FILE="${XRAYTOOLS_DIR}/connection_info.txt"
 LOG_FILE="/tmp/core_manager.log"
@@ -25,8 +26,6 @@ CRT_FILE="$SSL_DIR/fullchain.pem"
 XRAY_USER="nobody"
 XRAY_GROUP="nogroup"
 
-# Porta API configurável via variável de ambiente.
-# Padrão 1080 — porta padrão do projeto TURBONET XRAY.
 API_PORT="${XRAY_API_PORT:-1080}"
 
 _validate_repo_base() {
@@ -293,6 +292,8 @@ func_install_official_core() {
 [Service]
 LimitNOFILE=65536
 LimitNPROC=65536
+Restart=on-failure
+RestartSec=3
 Environment="GOMAXPROCS=${cpu_cores}"
 EOF
     systemctl daemon-reload
@@ -328,11 +329,133 @@ func_xray_cert() {
     _apply_config_perms
 }
 
+# Constrói lista de clientes preservando usuários existentes no users.db ou criando admin inicial
+_build_initial_clients_and_sample() {
+    local network="$1"
+    local sample_cred=""
+    local tmp_clients
+    tmp_clients=$(mktemp /tmp/xray_clients_XXXXXX.json)
+    echo "[]" > "$tmp_clients"
+
+    # Captura mapa de usuários bloqueados do config atual (se houver)
+    declare -A old_locked
+    if [ -s "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null; then
+        while IFS= read -r lemail; do
+            [ -n "$lemail" ] && old_locked["${lemail#LOCKED_}"]=1
+        done < <(jq -r '.inbounds[]? | select(.tag=="inbound-turbonet") | .settings.clients[]? | select(.email? and (.email | startswith("LOCKED_"))) | .email' "$CONFIG_PATH" 2>/dev/null || true)
+    fi
+
+    local imported=0
+    if [ -s "$USER_DB" ]; then
+        while IFS='|' read -r nick cred expiry _rest; do
+            nick="${nick//$'\r'/}"
+            cred="${cred//$'\r'/}"
+            [ -n "${nick:-}" ] && [ -n "${cred:-}" ] || continue
+
+            # Verifica compatibilidade da credencial com o protocolo escolhido
+            if [ "$network" = "trojan" ]; then
+                [[ "$cred" =~ ^[0-9a-fA-F]{32}$ ]] || continue
+            else
+                [[ "$cred" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || continue
+            fi
+
+            local email_out="$nick"
+            local cred_out="$cred"
+            if [ "${old_locked[$nick]:-0}" = "1" ]; then
+                email_out="LOCKED_${nick}"
+                if [ "$network" = "trojan" ]; then
+                    cred_out=$(generate_trojan_password)
+                else
+                    cred_out=$(generate_uuid)
+                fi
+            else
+                [ -z "$sample_cred" ] && sample_cred="$cred"
+            fi
+
+            if [ "$network" = "trojan" ]; then
+                jq --arg pwd "$cred_out" --arg em "$email_out" \
+                    '. + [{"password":$pwd,"email":$em,"level":0}]' "$tmp_clients" > "${tmp_clients}.new" && mv -f "${tmp_clients}.new" "$tmp_clients"
+            elif [ "$network" = "vision" ]; then
+                jq --arg id "$cred_out" --arg em "$email_out" \
+                    '. + [{"id":$id,"email":$em,"level":0,"flow":"xtls-rprx-vision"}]' "$tmp_clients" > "${tmp_clients}.new" && mv -f "${tmp_clients}.new" "$tmp_clients"
+            else
+                jq --arg id "$cred_out" --arg em "$email_out" \
+                    '. + [{"id":$id,"email":$em,"level":0}]' "$tmp_clients" > "${tmp_clients}.new" && mv -f "${tmp_clients}.new" "$tmp_clients"
+            fi
+            imported=$((imported + 1))
+        done < "$USER_DB"
+    fi
+
+    if [ "$imported" -eq 0 ]; then
+        local default_nick="admin"
+        local default_exp
+        default_exp=$(date -d "+30 days" +%F 2>/dev/null || date +%F)
+        local default_pass
+        default_pass=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 10)
+
+        if [ "$network" = "trojan" ]; then
+            sample_cred=$(generate_trojan_password)
+            jq -n --arg pwd "$sample_cred" --arg em "$default_nick" \
+                '[{"password":$pwd,"email":$em,"level":0}]' > "$tmp_clients"
+        elif [ "$network" = "vision" ]; then
+            sample_cred=$(generate_uuid)
+            jq -n --arg id "$sample_cred" --arg em "$default_nick" \
+                '[{"id":$id,"email":$em,"level":0,"flow":"xtls-rprx-vision"}]' > "$tmp_clients"
+        else
+            sample_cred=$(generate_uuid)
+            jq -n --arg id "$sample_cred" --arg em "$default_nick" \
+                '[{"id":$id,"email":$em,"level":0}]' > "$tmp_clients"
+        fi
+
+        mkdir -p "$XRAYTOOLS_DIR"
+        echo "${default_nick}|${sample_cred}|${default_exp}|${default_pass}|0" >> "$USER_DB"
+        chmod 600 "$USER_DB"
+        chown root:root "$USER_DB"
+    elif [ -z "$sample_cred" ]; then
+        if [ "$network" = "trojan" ]; then
+            sample_cred=$(generate_trojan_password)
+        else
+            sample_cred=$(generate_uuid)
+        fi
+    fi
+
+    local clients_out
+    clients_out=$(cat "$tmp_clients")
+    rm -f "$tmp_clients"
+    printf '%s\n%s\n' "$sample_cred" "$clients_out"
+}
+
+_build_routing_rules() {
+    local has_geosite=false has_geoip=false
+    if [ -s "/usr/local/share/xray/geosite.dat" ] || [ -s "/usr/local/bin/geosite.dat" ]; then
+        has_geosite=true
+    fi
+    if [ -s "/usr/local/share/xray/geoip.dat" ] || [ -s "/usr/local/bin/geoip.dat" ]; then
+        has_geoip=true
+    fi
+
+    local rules='[{"type":"field","inboundTag":["api"],"outboundTag":"api"},{"type":"field","protocol":["bittorrent"],"outboundTag":"blocked"}'
+
+    if [ "$has_geosite" = true ]; then
+        rules+=',{"type":"field","outboundTag":"blocked","domain":["geosite:category-ads-all"]}'
+    fi
+
+    if [ "$has_geoip" = true ]; then
+        rules+=',{"type":"field","ip":["geoip:private"],"outboundTag":"blocked"}'
+    else
+        rules+=',{"type":"field","ip":["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","127.0.0.0/8"],"outboundTag":"blocked"}'
+    fi
+
+    rules+=']'
+    echo "$rules"
+}
+
 func_generate_config() {
     local port="$1" network="$2" domain="$3" use_tls="$4"
 
     ensure_cmd jq jq
     mkdir -p "$(dirname "$CONFIG_PATH")" "$XRAYTOOLS_DIR" "$SSL_DIR"
+    chmod 700 "$XRAYTOOLS_DIR"
     _apply_config_perms
 
     if [ "$use_tls" = "true" ]; then
@@ -348,12 +471,10 @@ func_generate_config() {
     fi
 
     local policy='{"levels":{"0":{"statsUserUplink":true,"statsUserDownlink":true}},"system":{"statsInboundUplink":true,"statsInboundDownlink":true}}'
-
-    # REMOVIDO geosite:malware do routing para evitar crash de inicialização no geosite.dat oficial.
-    local routing_rules='[{"type":"field","outboundTag":"blocked","domain":["geosite:category-ads-all"]},{"type":"field","inboundTag":["api"],"outboundTag":"api"},{"type":"field","protocol":["bittorrent"],"outboundTag":"blocked"},{"type":"field","ip":["geoip:private"],"outboundTag":"blocked"}]'
+    local routing_rules
+    routing_rules=$(_build_routing_rules)
 
     local stream_settings=""
-    local ssh_xhttp_enabled=false
 
     case "$network" in
         xhttp)
@@ -361,22 +482,9 @@ func_generate_config() {
             echo -e "${TXT_CYAN}Modo XHTTP:${RESET}"
             echo " [1] HTTP Injection / Operadora BR (chip sem dados)"
             echo " [2] Direto / CDN (conexão direta ou via Azion/Vercel)"
-            echo " [3] SSHXHTTP (SSH dentro do XHTTP — porta /ssh separada)"
+            echo " [3] SSHXHTTP (SSH via Proxy Porta 80 junto com XHTTP)"
             read -rp "Modo [1/2/3, Enter=1]: " xhttp_mode
             xhttp_mode="${xhttp_mode:-1}"
-
-            echo ""
-            echo -e "${TXT_CYAN}SessionID Placement (como o ID de sessão é transmitido):${RESET}"
-            echo " [1] path   — padrão (URL path) — compatível com todos os apps"
-            echo " [2] header — CDN-friendly (X-Session header) — melhor com Azion/Vercel"
-            echo " [3] cookie — para proxies que reescrevem URL"
-            read -rp "Placement [1/2/3, Enter=1]: " sid_placement_opt
-            local xhttp_sid_placement=""
-            case "${sid_placement_opt:-1}" in
-                2) xhttp_sid_placement="header" ;;
-                3) xhttp_sid_placement="cookie" ;;
-                *) xhttp_sid_placement="path"   ;;
-            esac
 
             local xhttp_host_field="$domain"
             echo ""
@@ -385,10 +493,9 @@ func_generate_config() {
             [ -n "$extra_host" ] && xhttp_host_field="${domain},${extra_host}"
 
             if [ "$xhttp_mode" = "3" ]; then
-                ssh_xhttp_enabled=true
                 echo ""
-                echo -e "${TXT_YELLOW}SSHXHTTP: path SSH será /ssh (VLESS em /)${RESET}"
-                echo -e " Configure o app em modo SSH com path: ${TXT_CYAN}/ssh${RESET}"
+                echo -e "${TXT_YELLOW}Nota: O transporte XHTTP não usa fallbacks na porta 443.${RESET}"
+                echo -e " Para usar SSH junto, ative o ${TXT_CYAN}Proxy Unificado (Porta 80)${RESET} no módulo SSH Fallback."
             fi
 
             if [ "$xhttp_mode" = "1" ]; then
@@ -398,7 +505,6 @@ func_generate_config() {
                         --arg crt  "$CRT_FILE" \
                         --arg key  "$KEY_FILE" \
                         --arg host "$xhttp_host_field" \
-                        --arg sid  "$xhttp_sid_placement" \
                         '{network:"xhttp",security:"tls",
                         sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
                         tlsSettings:{serverName:$dom,
@@ -409,12 +515,10 @@ func_generate_config() {
                           scMaxEachPostBytes:"131072",
                           scStreamUpServerSecs:"5-15",
                           xPaddingBytes:"0-0",
-                          sessionIDPlacement:$sid,
-                          header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                          headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
                 else
                     stream_settings=$(jq -n \
                         --arg host "$xhttp_host_field" \
-                        --arg sid  "$xhttp_sid_placement" \
                         '{network:"xhttp",security:"none",
                         sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
                         xhttpSettings:{path:"/",host:$host,
@@ -422,8 +526,7 @@ func_generate_config() {
                           scMaxEachPostBytes:"131072",
                           scStreamUpServerSecs:"5-15",
                           xPaddingBytes:"0-0",
-                          sessionIDPlacement:$sid,
-                          header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                          headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
                 fi
             elif [ "$xhttp_mode" = "3" ]; then
                 if [ "$use_tls" = "true" ]; then
@@ -442,9 +545,7 @@ func_generate_config() {
                           scMaxEachPostBytes:"262144",
                           scStreamUpServerSecs:"10-30",
                           xPaddingBytes:"0-0",
-                          sessionIDPlacement:"header",
-                          sessionIDKey:"X-Session",
-                          header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                          headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
                 else
                     stream_settings=$(jq -n \
                         --arg host "$xhttp_host_field" \
@@ -455,9 +556,7 @@ func_generate_config() {
                           scMaxEachPostBytes:"262144",
                           scStreamUpServerSecs:"10-30",
                           xPaddingBytes:"0-0",
-                          sessionIDPlacement:"header",
-                          sessionIDKey:"X-Session",
-                          header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                          headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
                 fi
             else
                 if [ "$use_tls" = "true" ]; then
@@ -466,7 +565,6 @@ func_generate_config() {
                         --arg crt  "$CRT_FILE" \
                         --arg key  "$KEY_FILE" \
                         --arg host "$xhttp_host_field" \
-                        --arg sid  "$xhttp_sid_placement" \
                         '{network:"xhttp",security:"tls",
                         sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
                         tlsSettings:{serverName:$dom,
@@ -477,12 +575,10 @@ func_generate_config() {
                           scMaxEachPostBytes:"1000000",
                           scStreamUpServerSecs:"20-80",
                           xPaddingBytes:"100-1000",
-                          sessionIDPlacement:$sid,
-                          header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                          headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
                 else
                     stream_settings=$(jq -n \
                         --arg host "$xhttp_host_field" \
-                        --arg sid  "$xhttp_sid_placement" \
                         '{network:"xhttp",security:"none",
                         sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
                         xhttpSettings:{path:"/",host:$host,
@@ -490,8 +586,7 @@ func_generate_config() {
                           scMaxEachPostBytes:"1000000",
                           scStreamUpServerSecs:"20-80",
                           xPaddingBytes:"100-1000",
-                          sessionIDPlacement:$sid,
-                          header:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                          headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
                 fi
             fi ;;
         ws)
@@ -534,24 +629,13 @@ func_generate_config() {
             fi ;;
     esac
 
-    local credential=""
-    local clients_json=""
-    if [ "$network" = "trojan" ]; then
-        credential=$(generate_trojan_password)
-        if [ -z "$credential" ]; then
-            echo -e "${TXT_RED}❌ Falha ao gerar senha Trojan.${RESET}"; return 1
-        fi
-        clients_json=$(jq -n --arg pwd "$credential" '[{"password":$pwd,"level":0}]')
-    else
-        credential=$(generate_uuid)
-        if [ -z "$credential" ]; then
-            echo -e "${TXT_RED}❌ Falha ao gerar UUID.${RESET}"; return 1
-        fi
-        if [ "$network" = "vision" ]; then
-            clients_json=$(jq -n --arg uuid "$credential" '[{"id":$uuid,"level":0,"flow":"xtls-rprx-vision"}]')
-        else
-            clients_json=$(jq -n --arg uuid "$credential" '[{"id":$uuid,"level":0}]')
-        fi
+    local client_bundle credential clients_json
+    client_bundle=$(_build_initial_clients_and_sample "$network")
+    credential=$(echo "$client_bundle" | sed -n '1p')
+    clients_json=$(echo "$client_bundle" | sed -n '2p')
+
+    if [ -z "${credential:-}" ] || [ -z "${clients_json:-}" ]; then
+        echo -e "${TXT_RED}❌ Falha ao gerar credenciais iniciais.${RESET}"; return 1
     fi
 
     if [ -f "$CONFIG_PATH" ]; then
@@ -573,19 +657,8 @@ func_generate_config() {
         --argjson rules    "$routing_rules" \
         --argjson clients  "$clients_json" \
         --arg     proto    "$inbound_protocol" \
-        '{log:{loglevel:"warning"},stats:{},api:{services:["HandlerService","LoggerService","StatsService"],tag:"api"},policy:$pol,inbounds:[{tag:"api",port:($api|tonumber),protocol:"dokodemo-door",settings:{address:"127.0.0.1"},listen:"127.0.0.1"},{tag:"inbound-turbonet",port:($port|tonumber),protocol:$proto,settings:(if $proto=="trojan" then {clients:$clients} else {clients:$clients,decryption:"none",fallbacks:[]} end),streamSettings:$stream}],outbounds:[{protocol:"freedom",tag:"direct",mux:{enabled:true,concurrency:8,xudpConcurrency:16,xudpProxyUDP443:"reject"}},{protocol:"blackhole",tag:"blocked"},{protocol:"freedom",tag:"api"}],routing:{domainStrategy:"AsIs",rules:$rules}}' \
+        '{log:{loglevel:"warning"},stats:{},api:{services:["HandlerService","LoggerService","StatsService"],tag:"api"},policy:$pol,inbounds:[{tag:"api",port:($api|tonumber),protocol:"dokodemo-door",settings:{address:"127.0.0.1"},listen:"127.0.0.1"},{tag:"inbound-turbonet",port:($port|tonumber),protocol:$proto,settings:(if $proto=="trojan" then {clients:$clients} else {clients:$clients,decryption:"none",fallbacks:[]} end),streamSettings:$stream}],outbounds:[{protocol:"freedom",tag:"direct"},{protocol:"blackhole",tag:"blocked"},{protocol:"freedom",tag:"api"}],routing:{domainStrategy:"AsIs",rules:$rules}}' \
         > "$tmp_config"
-
-    if [ "$ssh_xhttp_enabled" = "true" ] && jq empty "$tmp_config" 2>/dev/null; then
-        local tmp2; tmp2=$(mktemp "${tmp_config}.ssh.XXXXXX")
-        jq '(.inbounds[] | select(.tag=="inbound-turbonet") | .settings.fallbacks) =
-            [{"name":"","alpn":"","path":"/ssh","dest":22,"xver":0},
-             {"name":"","alpn":"","path":"","dest":22,"xver":0}]' \
-            "$tmp_config" > "$tmp2" 2>/dev/null && \
-            jq empty "$tmp2" 2>/dev/null && \
-            mv -f "$tmp2" "$tmp_config" || rm -f "$tmp2"
-        echo -e "${TXT_GREEN}✅ Fallback SSHXHTTP configurado (path /ssh → Dropbear :22)${RESET}"
-    fi
 
     if ! jq empty "$tmp_config" 2>/dev/null; then
         echo -e "${TXT_RED}❌ Config JSON inválido.${RESET}"; rm -f "$tmp_config"; return 1
@@ -594,11 +667,13 @@ func_generate_config() {
     mv -f "$tmp_config" "$CONFIG_PATH"
     _apply_config_perms
 
-    jq -n --arg network "$network" --arg port "$port" --arg domain "$domain" --arg tls "$use_tls" \
-        '{network:$network,port:$port,domain:$domain,tls:$tls}' > "$PRESET_FILE"
+    jq -n --arg network "$network" --arg proto "$inbound_protocol" --arg port "$port" --arg domain "$domain" --arg tls "$use_tls" \
+        '{network:$network,protocol:$proto,port:$port,domain:$domain,tls:$tls}' > "$PRESET_FILE"
     _apply_config_perms
 
     echo "$domain" > "$ACTIVE_DOMAIN_FILE"
+    chmod 600 "$ACTIVE_DOMAIN_FILE"
+    chown root:root "$ACTIVE_DOMAIN_FILE"
 
     if ! _test_xray_config "$CONFIG_PATH" >>"$LOG_FILE" 2>&1; then
         echo -e "${TXT_RED}❌ Falha na validação do config.json pelo Xray:${RESET}"
@@ -622,7 +697,7 @@ func_generate_config() {
     fi
     sleep 2
 
-    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.1)"
+    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2)"
 
     local status_show="${TXT_RED}FALHA${RESET}"
     if systemctl is-active --quiet xray 2>/dev/null; then
@@ -637,10 +712,10 @@ func_generate_config() {
     echo -e "STATUS: $status_show"
     echo ""
     echo "========================================="
-    echo -e " ${TXT_YELLOW}PROTOCOLO:${RESET}   ${TXT_CYAN}${network^^}${RESET}"
-    echo -e " ${TXT_YELLOW}DOMÍNIO/SNI:${RESET} ${TXT_CYAN}${domain}${RESET}"
-    echo -e " ${TXT_YELLOW}PORTA:${RESET}       ${TXT_CYAN}${port}${RESET}"
-    echo -e " ${TXT_YELLOW}API INTERNA:${RESET} ${TXT_CYAN}127.0.0.1:${api_port}${RESET}"
+    echo -e " ${TXT_YELLOW}PROTOCOLO:${RESET}    ${TXT_CYAN}${network^^}${RESET}"
+    echo -e " ${TXT_YELLOW}DOMÍNIO/SNI:${RESET}  ${TXT_CYAN}${domain}${RESET}"
+    echo -e " ${TXT_YELLOW}PORTA:${RESET}        ${TXT_CYAN}${port}${RESET}"
+    echo -e " ${TXT_YELLOW}API INTERNA:${RESET}  ${TXT_CYAN}127.0.0.1:${api_port}${RESET}"
     echo -e " ${TXT_YELLOW}CRIPTOGRAFIA:${RESET} ${tls_msg}"
     echo "========================================="
     echo ""
@@ -760,7 +835,9 @@ func_wizard_install() {
     fi
 
     mkdir -p "$XRAYTOOLS_DIR"
+    chmod 700 "$XRAYTOOLS_DIR"
     echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
+    chmod 600 "$ACTIVE_DOMAIN_FILE"
 
     header_blue "PASSO 5/5 — PROTOCOLO"
     echo " [1] WS          — WebSocket"
