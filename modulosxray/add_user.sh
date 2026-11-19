@@ -1,12 +1,11 @@
 #!/bin/bash
-# add_user.sh - TURBONET XRAY V1.4 (PRO)
-# Correções aplicadas:
-#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
-#   - Permissões 750/640 root:$XRAY_GROUP aplicadas no diretório e no config.json
-#   - Validação com `xray run -test` sob o usuário do serviço antes de reiniciar
-#   - Substituído try-reload-or-restart por restart direto (evita falha silenciosa quando inativo)
-#   - Suporte completo a Trojan (password), Vision (xtls-rprx-vision), HTTPUpgrade e H2
-#   - Bloqueio do caractere '|' na senha para proteger a estrutura do users.db
+# add_user.sh - TURBONET XRAY V1.5 (PRO)
+# Correções aplicadas V1.5:
+#   - Proteção contra colisão/sobrescrita de contas reais do Linux (bloqueio de nomes reservados + checagem de shell /bin/false e UID >= 1000)
+#   - Garante /bin/false em /etc/shells para compatibilidade total com OpenSSH, Dropbear e SOCKS5
+#   - Checagem de duplicidade no config.json inclui entradas bloqueadas (LOCKED_<nick>)
+#   - Leitura dinâmica do path do XHTTP/WS/HTTPUpgrade/H2 no config.json ao gerar o link
+#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner) e validação `xray run -test`
 
 set -Eeuo pipefail
 
@@ -28,6 +27,11 @@ RESET='\033[0m'
 TITLE_BAR='\033[1;47;34m'
 
 export DEBIAN_FRONTEND=noninteractive
+
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo -e "${TXT_RED}❌ Execute como root!${RESET}"
+    exit 1
+fi
 
 # --- CLEANUP CENTRALIZADO ---
 _tmp_cfg=""
@@ -112,6 +116,43 @@ ensure_cmd() {
     esac
 }
 
+# --- VALIDAÇÃO DE CONTA LINUX / SHELL ---
+_is_reserved_username() {
+    case "$1" in
+        root|admin|ubuntu|debian|centos|oracle|fedora|alpine|arch|nobody|nogroup|daemon|games|proxy|sshd|dropbear|xray|postgres|mysql|redis|docker|systemd|sysadmin|operator|guest)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+_ensure_false_shell() {
+    if [ -f /etc/shells ] && ! grep -qxF "/bin/false" /etc/shells 2>/dev/null; then
+        echo "/bin/false" >> /etc/shells
+    fi
+}
+
+_sync_linux_account() {
+    local nick="$1" pass="$2"
+    _ensure_false_shell
+
+    if getent passwd "$nick" >/dev/null 2>&1; then
+        local uid shell
+        uid=$(id -u "$nick" 2>/dev/null || echo 0)
+        shell=$(getent passwd "$nick" | cut -d: -f7)
+        if [ "$uid" -lt 1000 ] || [ "$shell" != "/bin/false" ]; then
+            echo -e "${TXT_YELLOW}⚠  Conta Linux '${nick}' pertence ao sistema — senha local não alterada.${RESET}"
+            return 0
+        fi
+    else
+        useradd -M -s /bin/false "$nick" 2>/dev/null || return 0
+    fi
+
+    echo "${nick}:${pass}" | chpasswd 2>/dev/null || true
+    usermod -U "$nick" >/dev/null 2>&1 || true
+    chage -E -1 "$nick" >/dev/null 2>&1 || true
+}
+
 # --- UUID COM FALLBACK E VALIDAÇÃO ---
 generate_uuid() {
     local u=""
@@ -137,6 +178,18 @@ generate_trojan_password() {
     else
         tr -dc 'a-f0-9' < /dev/urandom | head -c 32
     fi
+}
+
+_get_stream_path_encoded() {
+    local raw_path="/"
+    if [ -s "$CONFIG_PATH" ]; then
+        raw_path=$(jq -r '
+            .inbounds[]? | select(.tag=="inbound-turbonet") | .streamSettings |
+            (.xhttpSettings.path // .wsSettings.path // .httpupgradeSettings.path // .httpSettings.path // "/")
+        ' "$CONFIG_PATH" 2>/dev/null | head -1)
+    fi
+    [ -z "${raw_path:-}" ] && raw_path="/"
+    jq -rn --arg p "$raw_path" '$p | @uri'
 }
 
 # --- GERAÇÃO DO LINK A PARTIR DO PRESET ---
@@ -170,14 +223,17 @@ generate_link() {
     local sec="none"
     [ "$tls" = "true" ] && sec="tls"
 
+    local enc_path
+    enc_path=$(_get_stream_path_encoded)
+
     local link=""
     case "$network" in
         grpc)        link="vless://${cred}@${domain}:${port}?security=${sec}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#${nick}" ;;
-        ws)          link="vless://${cred}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#${nick}" ;;
-        xhttp)       link="vless://${cred}@${domain}:${port}?mode=auto&path=%2F&security=${sec}&encryption=none&host=${domain}&type=xhttp&sni=${domain}#${nick}" ;;
+        ws)          link="vless://${cred}@${domain}:${port}?path=${enc_path}&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#${nick}" ;;
+        xhttp)       link="vless://${cred}@${domain}:${port}?mode=auto&path=${enc_path}&security=${sec}&encryption=none&host=${domain}&type=xhttp&sni=${domain}#${nick}" ;;
         vision)      link="vless://${cred}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#${nick}" ;;
-        httpupgrade) link="vless://${cred}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=httpupgrade&sni=${domain}#${nick}" ;;
-        h2)          link="vless://${cred}@${domain}:${port}?path=%2F&security=tls&encryption=none&host=${domain}&type=h2&sni=${domain}#${nick}" ;;
+        httpupgrade) link="vless://${cred}@${domain}:${port}?path=${enc_path}&security=${sec}&encryption=none&host=${domain}&type=httpupgrade&sni=${domain}#${nick}" ;;
+        h2)          link="vless://${cred}@${domain}:${port}?path=${enc_path}&security=tls&encryption=none&host=${domain}&type=h2&sni=${domain}#${nick}" ;;
         trojan)      link="trojan://${cred}@${domain}:${port}?security=tls&sni=${domain}&type=tcp#${nick}" ;;
         *)           link="vless://${cred}@${domain}:${port}?security=${sec}&encryption=none&type=tcp&sni=${domain}#${nick}" ;;
     esac
@@ -199,6 +255,7 @@ _wait_xray_active() {
 : > "$LOG_FILE"
 ensure_cmd jq jq
 mkdir -p "$(dirname "$USER_DB")" "$CONN_INFO_DIR"
+chmod 0700 "$(dirname "$USER_DB")" "$CONN_INFO_DIR"
 touch "$USER_DB"
 chmod 0600 "$USER_DB"
 
@@ -234,13 +291,18 @@ fi
 
 nick=$(echo "$raw_nick" | tr '[:upper:]' '[:lower:]')
 
+if _is_reserved_username "$nick"; then
+    echo -e "${TXT_RED}❌ O nome '${nick}' é reservado pelo sistema. Escolha outro.${RESET}"
+    sleep 2; exit 1
+fi
+
 if grep -q "^${nick}|" "$USER_DB" 2>/dev/null; then
     echo -e "${TXT_RED}❌ Usuário '${nick}' já existe no banco de dados.${RESET}"
     sleep 2; exit 1
 fi
 
 if jq -e --arg nick "$nick" \
-    '.inbounds[]? | select(.tag=="inbound-turbonet") | .settings.clients[]? | select(.email==$nick)' \
+    '.inbounds[]? | select(.tag=="inbound-turbonet") | .settings.clients[]? | select(.email==$nick or .email==("LOCKED_" + $nick))' \
     "$CONFIG_PATH" >/dev/null 2>&1; then
     echo -e "${TXT_RED}❌ Usuário '${nick}' já existe no config.json.${RESET}"
     sleep 2; exit 1
@@ -343,8 +405,15 @@ fi
 # --- GRAVA NO DB ---
 echo "${nick}|${uuid}|${expiry}|${user_pass}|${conn_limit}" >> "$USER_DB"
 chmod 0600 "$USER_DB"
+chown root:root "$USER_DB"
 
 link=$(generate_link "$uuid" "$nick")
+
+if [ "$conn_limit" -eq 0 ]; then
+    limit_display="Ilimitado"
+else
+    limit_display="${conn_limit} conexões simultâneas"
+fi
 
 user_file="${CONN_INFO_DIR}/${nick}.txt"
 {
@@ -352,19 +421,16 @@ user_file="${CONN_INFO_DIR}/${nick}.txt"
     echo "# Criado em: $(date '+%Y-%m-%d %H:%M:%S')"
     echo "NOME=${nick}"
     echo "UUID=${uuid}"
+    echo "SENHA=${user_pass}"
     echo "EXPIRA=${expiry}"
+    echo "LIMITE=${limit_display}"
     [ -n "$link" ] && echo "LINK=${link}"
 } > "$user_file"
 chmod 0600 "$user_file"
+chown root:root "$user_file"
 
-# --- INTEGRAÇÃO SSH/SOCKS5: CRIAR USUÁRIO NO LINUX AUTOMATICAMENTE ---
-if systemctl is-active --quiet turbonet-dropbear 2>/dev/null || systemctl is-active --quiet turbonet-socks5 2>/dev/null; then
-    if ! id "$nick" &>/dev/null; then
-        useradd -M -s /bin/false "$nick" 2>/dev/null || true
-    fi
-    echo "${nick}:${user_pass}" | chpasswd 2>/dev/null || true
-    echo -e "${TXT_GREEN}✅ Conta local configurada (Acesso liberado ao SSH e SOCKS5).${RESET}"
-fi
+# --- INTEGRAÇÃO SSH/SOCKS5/CHECKUSER: CRIAR CONTA LOCAL RESTRITA ---
+_sync_linux_account "$nick" "$user_pass"
 
 # --- RESULTADO ---
 clear
@@ -374,7 +440,7 @@ echo -e " 👤 Nome:     ${TXT_CYAN}${nick}${RESET}"
 echo -e " 🔑 Credenc.: ${TXT_YELLOW}${uuid}${RESET}"
 echo -e " 🔐 Senha:    ${TXT_YELLOW}${user_pass}${RESET}"
 echo -e " 📅 Expira:   ${expiry} (${days} dias)"
-echo -e " 🔗 Limite:   ${conn_limit} conexões simultâneas"
+echo -e " 🔗 Limite:   ${limit_display}"
 if [ -n "$link" ]; then
     echo "-----------------------------------------"
     echo -e " 🌐 Link:\n${TXT_BLUE}${link}${RESET}"
