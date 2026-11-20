@@ -20,6 +20,10 @@ Execute como **root** na sua VPS:
 bash <(wget -qO- https://raw.githubusercontent.com/PhoenixxZ2023/XRAY2026/main/installxray.sh)
 ```
 
+````
+bash <(curl -fsSL https://raw.githubusercontent.com/PhoenixxZ2023/XRAY2026/main/installxray.sh)
+````
+
 Após instalar, acesse o painel a qualquer momento com:
 
 ```bash
