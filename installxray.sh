@@ -1,24 +1,13 @@
 #!/bin/bash
-# installxray.sh - Instalador Premium V1.0 (Modular Launcher)
-# Correções aplicadas:
-# - Race condition: backup executado em sequência antes da limpeza
-# - Validação de shebang mais robusta (suporte a BOM UTF-8)
-# - Falha no backup agora logada (sem silenciar com || true cego)
-# - _get_packages retorna array para evitar word splitting em nomes futuros
-# - fun_bar: substituição de seq por printf para evitar subprocessos
-# - Lock atômico: utilizando set -C e redirecionamento (noclobber)
+# installxray.sh - Instalador Premium V1.1 (Modular Launcher)
+# Correções aplicadas V1.1:
+#   - Adicionado `|| true` na consulta de .sha256 opcional dentro de _verify_sha256 (evita falha com pipefail)
+#   - Lock protegido com flag _LOCK_ACQUIRED (evita que segunda instância apague o lock da primeira ao sair)
+#   - Verificação de root movida para antes da criação do LOCK_FILE
+#   - Download atômico via mktemp + validação de shebang/BOM sem dependência de `grep -P`
+#   - Reconexão automática de /dev/tty antes de `exec "$SHORTCUT"` para suportar instalação via `curl | bash`
+
 set -Eeuo pipefail
-
-# --- TRAP DE SAÍDA ---
-LOCK_FILE="/tmp/xray-install.lock"
-LOG_FILE="/tmp/xray-install.log"
-
-trap '_cleanup' EXIT
-
-_cleanup() {
-    tput cnorm 2>/dev/null || true
-    rm -f "$LOCK_FILE"
-}
 
 # --- CORES ---
 VERMELHO='\033[1;31m'
@@ -27,13 +16,32 @@ AMARELO='\033[1;33m'
 AZUL='\033[1;34m'
 RESET='\033[0m'
 
+# --- VERIFICAÇÃO DE ROOT ---
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo -e "${VERMELHO}❌ Execute como root!${RESET}"
+    exit 1
+fi
+
+# --- TRAP DE SAÍDA E LOCK ---
+LOCK_FILE="/tmp/xray-install.lock"
+LOG_FILE="/tmp/xray-install.log"
+_LOCK_ACQUIRED=0
+
+_cleanup() {
+    tput cnorm 2>/dev/null || true
+    if [ "$_LOCK_ACQUIRED" -eq 1 ]; then
+        rm -f "$LOCK_FILE"
+    fi
+}
+trap '_cleanup' EXIT
+
 # --- CONFIGURAÇÃO ---
 REPO_OWNER="PhoenixxZ2023"
 REPO_NAME="XRAY2026"
 
 _validate_ref() {
     local ref="$1"
-    if [[ ! "$ref" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+    if [[ ! "$ref" =~ ^[a-zA-Z0-9._/-]{1,128}$ ]]; then
         echo -e "${VERMELHO}❌ REPO_REF inválido: '${ref}'. Use branch, tag ou commit hash válido.${RESET}"
         exit 1
     fi
@@ -51,6 +59,7 @@ MENU_BACKUP="/usr/local/bin/menuxray.sh.bak"
 SHORTCUT="/usr/bin/xray-menu"
 
 # --- DETECÇÃO DE DISTRO ---
+PKG_MANAGER=""
 _detect_pkg_manager() {
     if command -v apt-get &>/dev/null; then
         PKG_MANAGER="apt"
@@ -72,7 +81,7 @@ _install_packages() {
         apt)
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -y -qq >>"$LOG_FILE" 2>&1
-            apt-get install -y -qq "${packages[@]}" > /dev/null 2>>"$LOG_FILE"
+            apt-get install -y -qq "${packages[@]}" >/dev/null 2>>"$LOG_FILE"
             ;;
         dnf|yum)
             "$PKG_MANAGER" install -y "${packages[@]}" >>"$LOG_FILE" 2>&1
@@ -97,26 +106,28 @@ fun_bar() {
     local text="$2"
     local delay=0.1
     local percent=0
-    
-    tput civis || true
-    
+
+    tput civis 2>/dev/null || true
+
     while kill -0 "$pid" 2>/dev/null; do
-        if [ "$percent" -lt 95 ]; then percent=$((percent + 1)); fi
+        if [ "$percent" -lt 95 ]; then
+            percent=$((percent + 1))
+        fi
         local filled=$((percent / 5))
         local unfilled=$((20 - filled))
-        
+
         printf "\r${AZUL}[%s]${RESET} [" "$text"
         printf '%*s' "$filled" | tr ' ' '#'
         printf '%*s' "$unfilled" | tr ' ' '.'
         printf "] ${AMARELO}%d%%${RESET} " "$percent"
         sleep "$delay"
     done
-    
+
     local exit_code=0
     wait "$pid" 2>/dev/null || exit_code=$?
-    
-    tput cnorm || true
-    
+
+    tput cnorm 2>/dev/null || true
+
     if [ "$exit_code" -eq 0 ]; then
         printf "\r${AZUL}[%s]${RESET} [" "$text"
         printf '%*s' 20 | tr ' ' '#'
@@ -130,34 +141,45 @@ fun_bar() {
     fi
 }
 
+# --- VALIDAÇÃO DE SHEBANG (COM SUPORTE A BOM UTF-8) ---
+_check_shebang_bom_safe() {
+    local file="$1"
+    local first_line
+    first_line=$(LC_ALL=C head -n 1 "$file" | sed 's/^\xEF\xBB\xBF//')
+    [[ "$first_line" =~ ^#!.*(bash|sh|env[[:space:]]) ]]
+}
+
 # --- VERIFICAÇÃO DE INTEGRIDADE ---
 _verify_sha256() {
     local file="$1"
     local sha256_url="$2"
     local expected_sha256
-    
+
     expected_sha256=$(curl -fLsS --retry 3 --retry-delay 1 \
         --max-time 15 --connect-timeout 5 \
-        "$sha256_url" 2>>"$LOG_FILE" | awk '{print $1}')
-        
+        "$sha256_url" 2>>"$LOG_FILE" | awk '{print $1}' || true)
+
     if [ -z "$expected_sha256" ]; then
-        echo -e "${AMARELO}⚠ Arquivo de hash não encontrado em ${sha256_url} — verificação ignorada.${RESET}"
+        echo -e "${AMARELO}AVISO (hash ausente — verificação ignorada)${RESET}"
         return 0
     fi
-    
+
     local actual_sha256
     actual_sha256=$(sha256sum "$file" | awk '{print $1}')
-    
+
     if [ "$expected_sha256" != "$actual_sha256" ]; then
+        echo -e "${VERMELHO}FALHOU!${RESET}"
         echo -e "${VERMELHO}❌ Falha na verificação de integridade!${RESET}"
         echo -e "   Esperado: ${expected_sha256}"
         echo -e "   Obtido:   ${actual_sha256}"
-        rm -f "$file"
         return 1
     fi
+
+    echo -e "${VERDE}OK${RESET}"
+    return 0
 }
 
-# --- LOCK: Evita execuções paralelas de forma Atômica ---
+# --- LOCK ATÔMICO ---
 if [ -e "$LOCK_FILE" ]; then
     lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0) ))
     if [ "$lock_age" -gt 600 ]; then
@@ -169,30 +191,26 @@ if [ -e "$LOCK_FILE" ]; then
         exit 1
     fi
 fi
-# Criacao atômica de arquivo usando noclobber
+
 set -C
-echo $$ > "$LOCK_FILE" 2>/dev/null || {
+if ! echo $$ > "$LOCK_FILE" 2>/dev/null; then
+    set +C
     echo -e "${VERMELHO}❌ Falha ao adquirir exclusividade de instalação.${RESET}"
     exit 1
-}
+fi
 set +C
+_LOCK_ACQUIRED=1
 
 # --- INICIALIZAÇÃO ---
 clear
 : > "$LOG_FILE"
 
 echo -e "${AZUL}==================================================${RESET}"
-echo -e "${AMARELO}🚀 TURBONET XRAY MODULAR - LAUNCHER V1.0${RESET}"
+echo -e "${AMARELO}🚀 TURBONET XRAY MODULAR - LAUNCHER V1.1${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
 echo -e " Ref: ${VERDE}${REPO_REF}${RESET}"
 echo -e " Log: ${VERDE}${LOG_FILE}${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
-
-# --- VERIFICAÇÃO DE ROOT ---
-if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    echo -e "${VERMELHO}❌ Execute como root!${RESET}"
-    exit 1
-fi
 
 # --- DETECÇÃO DE SISTEMA ---
 _detect_pkg_manager
@@ -226,7 +244,7 @@ fi
 
 # --- 3) LIMPEZA ANTIGA ---
 (
-    rm -f /bin/menuxray.sh /usr/local/bin/menuxray.sh
+    rm -f /bin/menuxray.sh
     rm -f /bin/limiterxray.sh /usr/local/bin/limiterxray.sh
     rm -f /bin/botxray.sh /usr/local/bin/botxray.sh
     rm -f /bin/xray-menu /usr/bin/xray-menu
@@ -234,60 +252,56 @@ fi
 ) >>"$LOG_FILE" 2>&1 &
 fun_bar $! "Limpando Instalações Antigas" || true
 
-# --- 4) DOWNLOAD DO MENU COM VERIFICAÇÃO DE INTEGRIDADE ---
+# --- 4) DOWNLOAD DO MENU EM ARQUIVO TEMPORÁRIO ---
+TMP_MENU=$(mktemp /tmp/menuxray_dl_XXXXXX)
 (
     curl -fLsS \
         --retry 3 \
         --retry-delay 2 \
         --max-time 60 \
         --connect-timeout 10 \
-        -o "$MENU_PATH" \
+        -o "$TMP_MENU" \
         "$MENU_URL" >>"$LOG_FILE" 2>&1
-        
-    if [ ! -s "$MENU_PATH" ]; then
+
+    if [ ! -s "$TMP_MENU" ]; then
         echo "Arquivo baixado está vazio" >>"$LOG_FILE"
-        exit 1
-    fi
-    
-    if ! LC_ALL=C head -n 1 "$MENU_PATH" | grep -qP '^(\xEF\xBB\xBF)?#!.*(bash|env\s)'; then
-        echo "Arquivo baixado não parece um shell script válido" >>"$LOG_FILE"
         exit 1
     fi
 ) >>"$LOG_FILE" 2>&1 &
 PID_DOWNLOAD=$!
 
 fun_bar "$PID_DOWNLOAD" "Baixando Menu Maestro" || {
+    rm -f "$TMP_MENU"
     echo -e "${VERMELHO}❌ Erro Crítico: Não foi possível baixar o menuxray.sh${RESET}"
     echo -e "   URL: ${MENU_URL}"
     echo -e "   Ref: ${REPO_REF}"
     echo -e "   Log: ${LOG_FILE}"
-    if [ -f "$MENU_BACKUP" ]; then
-        cp -f "$MENU_BACKUP" "$MENU_PATH"
-        echo -e "${AMARELO}⚠ Versão anterior restaurada.${RESET}"
-    fi
     exit 1
 }
+
+if ! _check_shebang_bom_safe "$TMP_MENU"; then
+    rm -f "$TMP_MENU"
+    echo -e "${VERMELHO}❌ Arquivo baixado não parece um shell script válido.${RESET}"
+    exit 1
+fi
 
 # --- 5) VERIFICAÇÃO DE INTEGRIDADE (SHA256) ---
 echo -ne "${AZUL}[Verificando Integridade]${RESET} ... "
-_verify_sha256 "$MENU_PATH" "$SHA256_URL" || {
-    echo -e "${VERMELHO}❌ Arquivo comprometido ou corrompido.${RESET}"
-    if [ -f "$MENU_BACKUP" ]; then
-        cp -f "$MENU_BACKUP" "$MENU_PATH"
-        echo -e "${AMARELO}⚠ Versão anterior restaurada.${RESET}"
-    fi
+if ! _verify_sha256 "$TMP_MENU" "$SHA256_URL"; then
+    rm -f "$TMP_MENU"
     exit 1
-}
-echo -e "${VERDE}OK${RESET}"
+fi
 
-# --- 6) PERMISSÕES E SYMLINK ---
+# --- 6) INSTALAÇÃO ATÔMICA, PERMISSÕES E SYMLINK ---
+mkdir -p "$(dirname "$MENU_PATH")"
+mv -f "$TMP_MENU" "$MENU_PATH"
 chmod 0755 "$MENU_PATH"
 chown root:root "$MENU_PATH"
 ln -sf "$MENU_PATH" "$SHORTCUT"
 
 echo ""
 echo -e "${AZUL}==================================================${RESET}"
-echo -e "${VERDE}🎉 SISTEMA MODULAR PRONTO! (V1.0)${RESET}"
+echo -e "${VERDE}🎉 SISTEMA MODULAR PRONTO! (V1.1)${RESET}"
 echo -e "${AZUL}==================================================${RESET}"
 echo -e " Acesso: ${VERDE}xray-menu${RESET}"
 echo -e " Log:    ${VERDE}${LOG_FILE}${RESET}"
@@ -303,4 +317,8 @@ if [ ! -x "$SHORTCUT" ]; then
     exit 1
 fi
 
-exec "$SHORTCUT"
+if [ ! -t 0 ] && [ -r /dev/tty ]; then
+    exec "$SHORTCUT" < /dev/tty
+else
+    exec "$SHORTCUT"
+fi
