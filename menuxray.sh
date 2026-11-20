@@ -1,17 +1,13 @@
 #!/bin/bash
-# menuxray.sh - TURBONET XRAY V1.0
-# Correções aplicadas:
-#   - Aritmética de cache segura com set -e (substituído ((...)) por [...])
-#   - Validação de shebang robusta com suporte a BOM UTF-8
-#   - Opção 99 reutiliza run_module() — elimina ~80 linhas de lógica duplicada
-#   - FORCE_UPDATE sem export — não vaza para subshells/módulos filhos
-#   - trap ERR não dispara em comandos esperados (systemctl, jq empty)
-#   - LOG_FILE com rotação de 512KB ao iniciar
+# menuxray.sh - TURBONET XRAY V1.1
+# Correções aplicadas V1.1:
+#   - Proteção contra encerramento do menu via set -Eeuo pipefail quando módulos ou confirmações retornam != 0
+#   - Adicionado `|| true` na consulta de .sha256 opcional dentro de _verify_module_hash (evita falha com pipefail)
+#   - Validação de shebang + BOM UTF-8 sem dependência de `grep -P` (_check_shebang_bom_safe)
+#   - Adicionado `gerenciar_xray.sh` na lista de atualização em lote da opção [99]
+#   - Invalidação imediata do cache de status após execução de módulo e contagem segura de usuários
 
 set -Eeuo pipefail
-
-# CORREÇÃO: trap ERR só reporta erros genuínos. Comandos que podem falhar
-# com intenção (systemctl, jq) devem usar || true/|| echo localmente.
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
 
 export DEBIAN_FRONTEND=noninteractive
@@ -56,20 +52,23 @@ _CACHED_XRAY_ACTIVE=""
 _CACHED_BOT_ACTIVE=""
 _CACHED_NET=""
 _CACHED_PORT=""
-_CACHED_USERS=""
+_CACHED_USERS="0"
 
 _refresh_status_cache() {
     local now
     now=$(date +%s)
 
-    # CORREÇÃO: substituído (( expr >= n )) por [ $((expr)) -ge n ]
-    # Com set -e ativo, (( resultado == 0 )) retorna exit code 1 e dispara o trap ERR.
     if [ $((now - _STATUS_CACHE_TIME)) -ge "$_STATUS_CACHE_TTL" ]; then
-        # CORREÇÃO: || echo "inactive" evita que set -e/trap ERR dispare quando
-        # systemctl retorna 3 (serviço inativo) — comportamento esperado, não erro.
         _CACHED_XRAY_ACTIVE=$(systemctl is-active xray 2>/dev/null || echo "inactive")
         _CACHED_BOT_ACTIVE=$(systemctl is-active botxray 2>/dev/null || echo "inactive")
-        _CACHED_USERS=$([ -f "$USER_DB" ] && wc -l < "$USER_DB" 2>/dev/null || echo "0")
+
+        if [ -s "$USER_DB" ]; then
+            _CACHED_USERS=$(grep -c '|' "$USER_DB" 2>/dev/null || true)
+            _CACHED_USERS="${_CACHED_USERS:-0}"
+        else
+            _CACHED_USERS="0"
+        fi
+
         _CACHED_NET=""
         _CACHED_PORT=""
 
@@ -79,11 +78,11 @@ _refresh_status_cache() {
                 _CACHED_PORT=$(jq -r '.port // empty' "$PRESET_FILE" 2>/dev/null || echo "")
             fi
             if [ -z "$_CACHED_NET" ] && [ -f "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null; then
-                _CACHED_NET=$(jq -r '.inbounds[] | select(.tag=="inbound-turbonet").streamSettings.network // empty' \
+                _CACHED_NET=$(jq -r '.inbounds[]? | select(.tag=="inbound-turbonet") | .streamSettings.network // empty' \
                     "$CONFIG_PATH" 2>/dev/null || echo "")
             fi
             if [ -z "$_CACHED_PORT" ] && [ -f "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null; then
-                _CACHED_PORT=$(jq -r '.inbounds[] | select(.tag=="inbound-turbonet").port // empty' \
+                _CACHED_PORT=$(jq -r '.inbounds[]? | select(.tag=="inbound-turbonet") | .port // empty' \
                     "$CONFIG_PATH" 2>/dev/null || echo "")
             fi
         fi
@@ -150,14 +149,23 @@ ensure_deps() {
 # --- INICIALIZAÇÃO DO SISTEMA ---
 init_system() {
     mkdir -p "$XRAY_DIR" "$LOCAL_BIN"
-    touch "$USER_DB"
+    if [ ! -f "$USER_DB" ]; then
+        touch "$USER_DB"
+        chmod 0600 "$USER_DB"
+    fi
 
-    # CORREÇÃO: rotação de log — mantém últimos 512KB para evitar crescimento
-    # ilimitado em /tmp entre sessões num servidor de uso intenso.
     if [ -f "$LOG_FILE" ] && [ "$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt 524288 ]; then
-        tail -c 524288 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE" || true
+        tail -c 524288 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv -f "${LOG_FILE}.tmp" "$LOG_FILE" || true
     fi
     : >> "$LOG_FILE"
+}
+
+# --- VALIDAÇÃO DE SHEBANG (COM SUPORTE A BOM UTF-8) ---
+_check_shebang_bom_safe() {
+    local file="$1"
+    local first_line
+    first_line=$(LC_ALL=C head -n 1 "$file" | sed 's/^\xEF\xBB\xBF//')
+    [[ "$first_line" =~ ^#!.*(bash|sh|env[[:space:]]) ]]
 }
 
 # --- VERIFICAÇÃO DE INTEGRIDADE DO MÓDULO ---
@@ -168,7 +176,7 @@ _verify_module_hash() {
     local expected
 
     expected=$(curl -fLsS --max-time 10 --connect-timeout 5 \
-        "$sha256_url" 2>/dev/null | awk '{print $1}')
+        "$sha256_url" 2>/dev/null | awk '{print $1}' || true)
 
     if [ -z "$expected" ]; then
         echo -e "${TXT_YELLOW}⚠  Hash não encontrado para ${module_name} — verificação ignorada.${RESET}" >&2
@@ -194,8 +202,6 @@ run_module() {
     local description="$2"
     local local_path="${LOCAL_BIN}/${script_name}"
 
-    # CORREÇÃO: FORCE_UPDATE consultado sem export — variável de ambiente local ao processo.
-    # Usar `FORCE_UPDATE=1 run_module ...` na chamada quando necessário.
     if [ "${FORCE_UPDATE:-0}" = "1" ] || [ ! -s "$local_path" ]; then
         echo -e "${TXT_YELLOW}Baixando módulo: ${description}...${RESET}"
         local tmp_path
@@ -221,9 +227,7 @@ run_module() {
             return 1
         fi
 
-        # CORREÇÃO: validação de shebang com suporte a BOM UTF-8 (0xEF 0xBB 0xBF).
-        # Usa grep com LC_ALL=C para tratar bytes brutos sem problemas de locale.
-        if ! LC_ALL=C head -n 1 "$tmp_path" | grep -qP '^(\xEF\xBB\xBF)?#!.*(bash|env\s)'; then
+        if ! _check_shebang_bom_safe "$tmp_path"; then
             echo -e "${TXT_RED}❌ Arquivo ${script_name} não parece um shell script válido.${RESET}"
             rm -f "$tmp_path"
             sleep 2
@@ -245,8 +249,6 @@ run_module() {
 }
 
 # --- DOWNLOAD DE MÓDULO (SEM EXECUTAR) ---
-# Usado pela opção 99 — baixa e valida o módulo mas NÃO executa.
-# Evita o travamento causado por run_module que sempre executa o script após download.
 download_module() {
     local script_name="$1"
     local local_path="${LOCAL_BIN}/${script_name}"
@@ -256,7 +258,13 @@ download_module() {
 
     echo -ne "${TXT_YELLOW}Atualizando ${script_name}...${RESET} "
 
-    if ! curl -fLsS             --retry 3             --retry-delay 2             --max-time 60             --connect-timeout 10             -o "$tmp_path"             "${MODULES_URL}/${script_name}" 2>>"$LOG_FILE"; then
+    if ! curl -fLsS \
+            --retry 3 \
+            --retry-delay 2 \
+            --max-time 60 \
+            --connect-timeout 10 \
+            -o "$tmp_path" \
+            "${MODULES_URL}/${script_name}" 2>>"$LOG_FILE"; then
         echo -e "${TXT_RED}FALHOU (download)${RESET}"
         rm -f "$tmp_path"
         return 1
@@ -268,7 +276,7 @@ download_module() {
         return 1
     fi
 
-    if ! LC_ALL=C head -n 1 "$tmp_path" | grep -qP '^(\xEF\xBB\xBF)?#!.*(bash|env\s)'; then
+    if ! _check_shebang_bom_safe "$tmp_path"; then
         echo -e "${TXT_RED}FALHOU (shebang inválido)${RESET}"
         rm -f "$tmp_path"
         return 1
@@ -290,8 +298,8 @@ download_module() {
 _confirm_destructive() {
     local msg="$1"
     echo -e "${TXT_YELLOW}⚠  ${msg}${RESET}"
-    read -rp "Confirmar? [s/N]: " confirm
-    case "$confirm" in
+    read -rp "Confirmar? [s/N]: " confirm || true
+    case "${confirm:-n}" in
         s|S|sim|Sim|SIM) return 0 ;;
         *) echo "Operação cancelada."; sleep 1; return 1 ;;
     esac
@@ -302,7 +310,7 @@ menu_display() {
     clear
     _refresh_status_cache
 
-    echo -e "${TITLE_BAR}        TURBONET XRAY MANAGER (V1.0)        ${RESET}"
+    echo -e "${TITLE_BAR}        TURBONET XRAY MANAGER (V1.1)        ${RESET}"
     echo ""
 
     local status_txt="${TXT_RED}DESATIVADO${RESET}"
@@ -323,7 +331,9 @@ menu_display() {
     echo "-----------------------------------------"
     echo -e " ${TXT_CYAN}STATUS XRAY:${RESET}      $status_txt"
     echo -e " ${TXT_CYAN}USUÁRIOS:${RESET}         ${_CACHED_USERS}"
-    [ -n "$protocol_line" ] && echo -e "$protocol_line"
+    if [ -n "$protocol_line" ]; then
+        echo -e "$protocol_line"
+    fi
     echo -e " ${TXT_CYAN}BOT TELEGRAM:${RESET}     $bot_status"
     echo "-----------------------------------------"
     echo ""
@@ -350,51 +360,50 @@ menu_display() {
     echo -e "${TXT_YELLOW}[99] ATUALIZAR MÓDULOS (FORÇA DOWNLOAD)${RESET}"
     echo -e "${TXT_CYAN}[00] SAIR${RESET}"
     echo "-----------------------------------------"
-    read -rp "Opção: " choice
+    read -rp "Opção: " choice || { echo ""; exit 0; }
 
-    case "$choice" in
-        1|01) run_module "add_user.sh"          "Criar Usuário" ;;
-        2|02) run_module "remover_user.sh"      "Remover Usuário" ;;
-        3|03) run_module "lista_users.sh"       "Listar Usuários" ;;
-        4|04) run_module "core_manager.sh"      "Gerenciador Xray" ;;
+    case "${choice:-}" in
+        1|01) run_module "add_user.sh"          "Criar Usuário" || true ;;
+        2|02) run_module "remover_user.sh"      "Remover Usuário" || true ;;
+        3|03) run_module "lista_users.sh"       "Listar Usuários" || true ;;
+        4|04) run_module "core_manager.sh"      "Gerenciador Xray" || true ;;
         5|05)
-            _confirm_destructive "Isso removerá todos os usuários expirados." \
-                && run_module "remover_expirados.sh" "Limpeza"
+            if _confirm_destructive "Isso removerá todos os usuários expirados."; then
+                run_module "remover_expirados.sh" "Limpeza" || true
+            fi
             ;;
         6|06)
-            _confirm_destructive "Isso DESINSTALARÁ completamente o Xray do sistema." \
-                && run_module "uninstall.sh" "Desinstalador"
+            if _confirm_destructive "Isso DESINSTALARÁ completamente o Xray do sistema."; then
+                run_module "uninstall.sh" "Desinstalador" || true
+            fi
             ;;
-        7|07) run_module "limiterxray.sh"       "Limitador" ;;
-        8|08) run_module "botxray.sh"           "Instalador Bot" ;;
-        9|09) run_module "backup.sh"            "Backup System" ;;
-        10)   run_module "block_user.sh"        "Bloqueio" ;;
-        11)   run_module "unblock_user.sh"      "Desbloqueio" ;;
-        12)   run_module "onlinexray.sh"        "Monitor" ;;
-        13)   run_module "bbr.sh"               "Ativar BBR" ;;
-        14)   run_module "check_api.sh"         "API Check" ;;
-        15)   run_module "vercel_relay.sh"      "CDN Relay Vercel" ;;
-        16)   run_module "checkuser.sh"         "CheckUser" ;;
-        17)   run_module "udpgw.sh"             "UDPGW" ;;
-        18)   run_module "ssh_fallback.sh"      "SSH Fallback" ;;
-        19)   run_module "renew_user.sh"        "Renovar Usuário" ;;
-        20) run_module "gerenciar_xray.sh"      "Gerenciar Serviço" ;;
+        7|07) run_module "limiterxray.sh"       "Limitador" || true ;;
+        8|08) run_module "botxray.sh"           "Instalador Bot" || true ;;
+        9|09) run_module "backup.sh"            "Backup System" || true ;;
+        10)   run_module "block_user.sh"        "Bloqueio" || true ;;
+        11)   run_module "unblock_user.sh"      "Desbloqueio" || true ;;
+        12)   run_module "onlinexray.sh"        "Monitor" || true ;;
+        13)   run_module "bbr.sh"               "Ativar BBR" || true ;;
+        14)   run_module "check_api.sh"         "API Check" || true ;;
+        15)   run_module "vercel_relay.sh"      "CDN Relay Vercel" || true ;;
+        16)   run_module "checkuser.sh"         "CheckUser" || true ;;
+        17)   run_module "udpgw.sh"             "UDPGW" || true ;;
+        18)   run_module "ssh_fallback.sh"      "SSH Fallback" || true ;;
+        19)   run_module "renew_user.sh"        "Renovar Usuário" || true ;;
+        20)   run_module "gerenciar_xray.sh"    "Gerenciar Serviço" || true ;;
         99)
-            # Usa download_module() — baixa e valida SEM executar.
-            # run_module() sempre executa o script após download, travando em módulos
-            # que aguardam input do usuário (botxray.sh, backup.sh, etc.)
             clear
             echo -e "${TXT_YELLOW}================================================${RESET}"
             echo -e "${TXT_YELLOW}   ATUALIZANDO TODOS OS MÓDULOS               ${RESET}"
             echo -e "${TXT_YELLOW}================================================${RESET}"
             echo ""
-            _STATUS_CACHE_TIME=0
 
             local modules=(
                 add_user.sh remover_user.sh lista_users.sh core_manager.sh
                 remover_expirados.sh uninstall.sh limiterxray.sh botxray.sh
                 backup.sh block_user.sh unblock_user.sh onlinexray.sh
-                certxray.sh bbr.sh check_api.sh vercel_relay.sh checkuser.sh udpgw.sh ssh_fallback.sh renew_user.sh
+                certxray.sh bbr.sh check_api.sh vercel_relay.sh checkuser.sh
+                udpgw.sh ssh_fallback.sh renew_user.sh gerenciar_xray.sh
             )
 
             local ok=0 fail=0
@@ -421,6 +430,8 @@ menu_display() {
             sleep 1
             ;;
     esac
+
+    _STATUS_CACHE_TIME=0
 }
 
 # --- INICIALIZAÇÃO ---
@@ -428,7 +439,6 @@ require_root
 ensure_deps
 init_system
 
-# Loop principal — menu_display nunca se chama recursivamente
 while true; do
     menu_display
 done
