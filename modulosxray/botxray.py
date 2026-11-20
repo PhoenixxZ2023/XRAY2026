@@ -1,39 +1,44 @@
 """
-botxray.py - TURBONET XRAY V1.4 (PRO + HÍBRIDO)
-Correções e Integrações:
-  - save_config(): escrita atômica via tmpfile + os.replace() + chmod 0o640
-  - core_delete_user(): USER_DB atômico via tmpfile + os.replace()
-  - restart_xray(): retorna bool, loga stderr em caso de falha
-  - nick normalizado para minúsculas em input_handler
-  - generate_link(): sem fallback para inbounds[0] — erro explícito se inbound não encontrado
-  - Backup Python gera SHA256 em blocos para evitar estouro de memória
-  - useradd, userdel, passwd -l, passwd -u nativos no Python (Sincronia Híbrida SSH).
-  - GUILHOTINA SSH: pkill e chage implementados no block, unblock e renew.
-  - RELATÓRIO DE CONSUMO: Integração nativa lendo as bases do limiterxray.sh.
+botxray.py - TURBONET XRAY V1.4.1 (PRO + HÍBRIDO)
+Correções V1.4.1:
+- save_config(): ajusta grupo via os.chown(..., -1, target_gid) antes do os.replace() (compatível com User=botxray)
+- generate_link(): lê /opt/XrayTools/active_domain e preset.json quando tlsSettings.serverName está vazio (perfil SSHorizon)
+- sync_ssh_user(): delega useradd/chpasswd/userdel/usermod/chage/pkill/passwd ao wrapper setuid /usr/local/bin/wrap_ssh_sync
+- Suporte completo a VLESS (xhttp, ws, grpc, tcp, vision, httpupgrade, h2) e Trojan no reload_xray_user e generate_link
+- Validação de intervalo de dias (1..3650), sanitização estrita de nicknames e criação de USER_DB com chmod 0600
 """
 
-import os
-import json
-import uuid
-import hashlib
-import logging
-import subprocess
-import asyncio
-import re
-import urllib.request
-from datetime import datetime, timedelta
-import tempfile
-import shutil
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, ContextTypes, ConversationHandler,
-    MessageHandler, filters, CallbackQueryHandler
-)
-import io
+from __future__ import annotations
 
-# --- CONFIGURACAO VIA VARIAVEIS DE AMBIENTE ---
-_token = os.environ.get("BOT_TOKEN", "")
-_admin = os.environ.get("ADMIN_ID", "")
+import grp
+import hashlib
+import io
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import urllib.request
+import uuid
+from datetime import datetime, timedelta
+from typing import List, Optional, Tuple
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
+
+# --- CONFIGURAÇÃO VIA VARIÁVEIS DE AMBIENTE ---
+_token = os.environ.get("BOT_TOKEN", "").strip()
+_admin = os.environ.get("ADMIN_ID", "").strip()
 if not _token or not _admin:
     raise EnvironmentError(
         "BOT_TOKEN e ADMIN_ID devem estar definidos.\n"
@@ -45,15 +50,18 @@ try:
 except ValueError:
     raise EnvironmentError(f"ADMIN_ID deve ser inteiro, obtido: '{_admin}'")
 
-CONFIG_PATH  = "/usr/local/etc/xray/config.json"
-USER_DB      = "/opt/XrayTools/users.db"
-USAGE_DB     = "/opt/XrayTools/usage.db"
-LIMITS_DB    = "/opt/XrayTools/limits.db"
-XRAY_SERVICE = "xray"
+CONFIG_PATH        = "/usr/local/etc/xray/config.json"
+PRESET_PATH        = "/usr/local/etc/xray/preset.json"
+USER_DB            = "/opt/XrayTools/users.db"
+USAGE_DB           = "/opt/XrayTools/usage.db"
+LIMITS_DB          = "/opt/XrayTools/limits.db"
+ACTIVE_DOMAIN_FILE = "/opt/XrayTools/active_domain"
+SSH_SYNC_WRAPPER   = "/usr/local/bin/wrap_ssh_sync"
+XRAY_SERVICE       = "xray"
 
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
@@ -73,7 +81,98 @@ logger = logging.getLogger(__name__)
 # FUNÇÕES DE SISTEMA
 # =============================================================
 
-def reload_xray_user(action: str, nick: str, user_uuid: str, inbound_tag: str = "inbound-turbonet") -> bool:
+def _is_valid_nick(nick: str, strict_create: bool = False) -> bool:
+    if not nick or nick == "root":
+        return False
+    if strict_create:
+        return bool(re.match(r"^[a-z0-9]{5,9}$", nick))
+    return bool(re.match(r"^[a-z0-9_-]{2,32}$", nick))
+
+
+def _ensure_private_file(path: str, mode: int = 0o600) -> None:
+    if not os.path.exists(path):
+        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, mode)
+        os.close(fd)
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def sync_ssh_user(action: str, nick: str, password: str = "") -> bool:
+    """Sincroniza conta Linux (SSH/SOCKS5) via wrapper setuid quando não-root."""
+    if not _is_valid_nick(nick):
+        return False
+
+    try:
+        if os.geteuid() != 0 and os.path.exists(SSH_SYNC_WRAPPER):
+            stdin_bytes = f"{password}\n".encode("utf-8") if action == "create" else None
+            res = subprocess.run(
+                [SSH_SYNC_WRAPPER, action, nick],
+                input=stdin_bytes,
+                check=False,
+                capture_output=True,
+                timeout=10,
+            )
+            if res.returncode != 0:
+                logger.warning(
+                    "sync_ssh_user (%s %s) retornou %d: %s",
+                    action,
+                    nick,
+                    res.returncode,
+                    res.stderr.decode(errors="replace").strip(),
+                )
+                return False
+            return True
+
+        if action == "create":
+            pwd = password or nick
+            subprocess.run(["useradd", "-M", "-s", "/bin/false", nick], check=False, stderr=subprocess.DEVNULL)
+            subprocess.run(["chpasswd"], input=f"{nick}:{pwd}\n".encode("utf-8"), check=False, stderr=subprocess.DEVNULL)
+        elif action == "delete":
+            subprocess.run(["pkill", "-9", "-u", nick], check=False, stderr=subprocess.DEVNULL)
+            subprocess.run(["userdel", "-r", "-f", nick], check=False, stderr=subprocess.DEVNULL)
+        elif action == "block":
+            subprocess.run(["usermod", "-L", nick], check=False, stderr=subprocess.DEVNULL)
+            subprocess.run(["chage", "-E", "0", nick], check=False, stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-9", "-u", nick], check=False, stderr=subprocess.DEVNULL)
+        elif action in ("unblock", "renew"):
+            subprocess.run(["usermod", "-U", nick], check=False, stderr=subprocess.DEVNULL)
+            subprocess.run(["chage", "-E", "-1", nick], check=False, stderr=subprocess.DEVNULL)
+            subprocess.run(["passwd", "-u", nick], check=False, stderr=subprocess.DEVNULL)
+        return True
+    except Exception as e:
+        logger.error("sync_ssh_user erro (%s %s): %s", action, nick, e)
+        return False
+
+
+def _get_inbound_profile(data: dict) -> Tuple[str, str]:
+    """Retorna (protocol, network) do inbound-turbonet."""
+    inbound = next(
+        (i for i in data.get("inbounds", []) if i.get("tag") == "inbound-turbonet"),
+        None,
+    )
+    if not inbound:
+        return "vless", "xhttp"
+    proto = inbound.get("protocol", "vless")
+    net = inbound.get("streamSettings", {}).get("network", "tcp")
+    return proto, net
+
+
+def _build_client_obj(nick: str, cred: str, proto: str, net: str) -> dict:
+    if proto == "trojan":
+        return {"password": cred, "email": nick, "level": 0}
+    if net == "tcp":
+        data = load_config()
+        if data:
+            inb = next((i for i in data.get("inbounds", []) if i.get("tag") == "inbound-turbonet"), {})
+            existing = inb.get("settings", {}).get("clients", [])
+            if any(c.get("flow") == "xtls-rprx-vision" for c in existing):
+                return {"id": cred, "email": nick, "level": 0, "flow": "xtls-rprx-vision"}
+    return {"id": cred, "email": nick, "level": 0}
+
+
+def reload_xray_user(action: str, nick: str, user_cred: str, inbound_tag: str = "inbound-turbonet") -> bool:
     try:
         data = load_config()
         if not data:
@@ -93,20 +192,21 @@ def reload_xray_user(action: str, nick: str, user_uuid: str, inbound_tag: str = 
             return False
 
         if action == "add":
-            user_json = json.dumps({
-                "id": user_uuid,
-                "email": nick,
-                "level": 0
-            })
-            cmd = [xray_bin, "api", "adduser",
-                   f"-server=127.0.0.1:{api_port}",
-                   f"-inboundTag={inbound_tag}",
-                   f"-user={user_json}"]
+            proto, net = _get_inbound_profile(data)
+            user_json = json.dumps(_build_client_obj(nick, user_cred, proto, net))
+            cmd = [
+                xray_bin, "api", "adduser",
+                f"-server=127.0.0.1:{api_port}",
+                f"-inboundTag={inbound_tag}",
+                f"-user={user_json}",
+            ]
         elif action == "remove":
-            cmd = [xray_bin, "api", "removeuser",
-                   f"-server=127.0.0.1:{api_port}",
-                   f"-inboundTag={inbound_tag}",
-                   f"-email={nick}"]
+            cmd = [
+                xray_bin, "api", "removeuser",
+                f"-server=127.0.0.1:{api_port}",
+                f"-inboundTag={inbound_tag}",
+                f"-email={nick}",
+            ]
         else:
             return False
 
@@ -114,16 +214,18 @@ def reload_xray_user(action: str, nick: str, user_uuid: str, inbound_tag: str = 
         if result.returncode == 0:
             logger.info("reload_xray_user: %s '%s' via API OK", action, nick)
             return True
-        else:
-            logger.warning("reload_xray_user %s falhou: %s",
-                          action, result.stderr.decode(errors="replace").strip())
-            return False
+        logger.warning(
+            "reload_xray_user %s falhou: %s",
+            action,
+            result.stderr.decode(errors="replace").strip(),
+        )
+        return False
     except Exception as e:
         logger.error("reload_xray_user erro: %s", e)
         return False
 
 
-def load_config() -> 'Optional[dict]':
+def load_config() -> Optional[dict]:
     if not os.path.exists(CONFIG_PATH):
         return None
     try:
@@ -135,18 +237,28 @@ def load_config() -> 'Optional[dict]':
 
 
 def save_config(data: dict) -> bool:
-    tmp_path = CONFIG_PATH + f".tmp.{os.getpid()}"
+    cfg_dir = os.path.dirname(CONFIG_PATH)
+    tmp_path = os.path.join(cfg_dir, f".config.json.tmp.{os.getpid()}")
+
+    target_gid = -1
+    try:
+        target_gid = os.stat(cfg_dir).st_gid
+    except OSError:
+        try:
+            target_gid = grp.getgrnam("nogroup").gr_gid
+        except KeyError:
+            target_gid = -1
+
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        os.chmod(tmp_path, 0o640)
+        if target_gid != -1:
+            try:
+                os.chown(tmp_path, -1, target_gid)
+            except OSError as e:
+                logger.warning("save_config: não foi possível ajustar grupo %s: %s", target_gid, e)
         os.replace(tmp_path, CONFIG_PATH)
-        os.chmod(CONFIG_PATH, 0o660)
-        try:
-            import grp
-            gid = grp.getgrnam("nogroup").gr_gid
-            os.chown(CONFIG_PATH, 0, gid)
-        except Exception as e:
-            logger.warning("save_config: não foi possível restaurar chown root:nogroup: %s", e)
         return True
     except PermissionError as e:
         logger.error("save_config: sem permissão: %s", e)
@@ -156,7 +268,8 @@ def save_config(data: dict) -> bool:
         return False
     finally:
         try:
-            os.remove(tmp_path)
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         except OSError:
             pass
 
@@ -171,19 +284,42 @@ def get_ip() -> str:
     return "127.0.0.1"
 
 
+def _get_active_domain() -> str:
+    if os.path.exists(ACTIVE_DOMAIN_FILE):
+        try:
+            with open(ACTIVE_DOMAIN_FILE, "r", encoding="utf-8") as f:
+                dom = f.read().strip()
+                if dom:
+                    return dom
+        except OSError:
+            pass
+
+    if os.path.exists(PRESET_PATH):
+        try:
+            with open(PRESET_PATH, "r", encoding="utf-8") as f:
+                preset = json.load(f)
+                dom = (preset.get("domain") or "").strip()
+                if dom:
+                    return dom
+        except Exception:
+            pass
+
+    return get_ip()
+
+
 def bytes_to_human(b: int) -> str:
     if b >= 1073741824:
         return f"{b / 1073741824:.2f} GB"
-    elif b >= 1048576:
+    if b >= 1048576:
         return f"{b / 1048576:.2f} MB"
-    else:
-        return f"{b / 1024:.2f} KB"
+    return f"{b / 1024:.2f} KB"
+
 
 # =============================================================
 # GERADOR DE LINKS E RELATÓRIOS
 # =============================================================
 
-def generate_link(client_uuid: str, client_email: str) -> str:
+def generate_link(client_cred: str, client_email: str) -> str:
     try:
         data = load_config()
         if not data:
@@ -197,63 +333,89 @@ def generate_link(client_uuid: str, client_email: str) -> str:
             return "❌ inbound-turbonet não encontrado no config."
 
         port     = inbound["port"]
+        protocol = inbound.get("protocol", "vless")
         stream   = inbound["streamSettings"]
         network  = stream["network"]
         security = stream["security"]
 
-        sni = ""
+        sni  = ""
         host = ""
         if security == "tls":
             tls = stream.get("tlsSettings", {})
-            sni  = tls.get("serverName", "")
+            sni = (tls.get("serverName") or "").strip()
+            if not sni:
+                sni = _get_active_domain()
             host = sni
-
-        if not host:
-            host = get_ip()
+            if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host):
+                sni = ""
+        else:
+            host = _get_active_domain()
             sni  = ""
+
+        sec_param = "security=tls" if security == "tls" else "security=none"
+
+        if protocol == "trojan":
+            return (
+                f"trojan://{client_cred}@{host}:{port}"
+                f"?{sec_param}&sni={sni}&type=tcp#{client_email}"
+            )
 
         if network == "tcp":
             clients = inbound.get("settings", {}).get("clients", [])
-            client  = next((c for c in clients if c.get("id") == client_uuid), {})
+            client  = next((c for c in clients if c.get("id") == client_cred), {})
             flow    = client.get("flow", "")
             if flow == "xtls-rprx-vision":
                 return (
-                    f"vless://{client_uuid}@{host}:{port}"
+                    f"vless://{client_cred}@{host}:{port}"
                     f"?security=tls&encryption=none&type=tcp"
                     f"&headerType=none&flow={flow}&sni={sni}#{client_email}"
                 )
-            sec_param = "security=tls" if security == "tls" else "security=none"
             return (
-                f"vless://{client_uuid}@{host}:{port}"
+                f"vless://{client_cred}@{host}:{port}"
                 f"?{sec_param}&encryption=none&type=tcp&headerType=none&sni={sni}#{client_email}"
             )
 
         if network == "ws":
-            path      = stream.get("wsSettings", {}).get("path", "/")
-            sec_param = "security=tls" if security == "tls" else "security=none"
-            ws_host   = sni if sni else host
+            path    = stream.get("wsSettings", {}).get("path", "/")
+            ws_host = sni if sni else host
             return (
-                f"vless://{client_uuid}@{host}:{port}"
+                f"vless://{client_cred}@{host}:{port}"
                 f"?{sec_param}&encryption=none&type=ws"
                 f"&host={ws_host}&path={path}&sni={sni}#{client_email}"
             )
 
         if network == "grpc":
-            service   = stream.get("grpcSettings", {}).get("serviceName", "gRPC")
-            sec_param = "security=tls" if security == "tls" else "security=none"
+            service = stream.get("grpcSettings", {}).get("serviceName", "gRPC")
             return (
-                f"vless://{client_uuid}@{host}:{port}"
+                f"vless://{client_cred}@{host}:{port}"
                 f"?{sec_param}&encryption=none&type=grpc"
                 f"&serviceName={service}&sni={sni}#{client_email}"
             )
 
         if network == "xhttp":
-            path      = stream.get("xhttpSettings", {}).get("path", "/")
-            sec_param = "security=tls" if security == "tls" else "security=none"
+            path = stream.get("xhttpSettings", {}).get("path", "/")
             return (
-                f"vless://{client_uuid}@{host}:{port}"
+                f"vless://{client_cred}@{host}:{port}"
                 f"?mode=auto&{sec_param}&encryption=none&type=xhttp"
                 f"&host={host}&path={path}&sni={sni}#{client_email}"
+            )
+
+        if network == "httpupgrade":
+            path    = stream.get("httpupgradeSettings", {}).get("path", "/")
+            hu_host = sni if sni else host
+            return (
+                f"vless://{client_cred}@{host}:{port}"
+                f"?{sec_param}&encryption=none&type=httpupgrade"
+                f"&host={hu_host}&path={path}&sni={sni}#{client_email}"
+            )
+
+        if network == "h2":
+            path    = stream.get("httpSettings", {}).get("path", "/")
+            h2_host = sni if sni else host
+            return (
+                f"vless://{client_cred}@{host}:{port}"
+                f"?security=tls&encryption=none&type=h2"
+                f"&host={h2_host}&path={path}&sni={sni}#{client_email}"
             )
 
         return "❌ Protocolo não suportado para geração de link."
@@ -266,25 +428,25 @@ def core_list_usage_text() -> str:
     """Lê os bancos de dados do limiterxray.sh e formata o consumo."""
     usages = {}
     if os.path.exists(USAGE_DB):
-        with open(USAGE_DB, 'r') as f:
+        with open(USAGE_DB, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
-                parts = line.strip().split('|')
+                parts = line.strip().split("|")
                 if len(parts) >= 2 and parts[1].isdigit():
                     usages[parts[0]] = int(parts[1])
 
     limits = {}
     if os.path.exists(LIMITS_DB):
-        with open(LIMITS_DB, 'r') as f:
+        with open(LIMITS_DB, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
-                parts = line.strip().split('|')
+                parts = line.strip().split("|")
                 if len(parts) >= 2 and parts[1].isdigit():
                     limits[parts[0]] = int(parts[1])
 
     all_nicks = set(usages.keys()).union(set(limits.keys()))
     if os.path.exists(USER_DB):
-        with open(USER_DB, 'r') as f:
+        with open(USER_DB, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
-                parts = line.strip().split('|')
+                parts = line.strip().split("|")
                 if parts[0]:
                     all_nicks.add(parts[0])
 
@@ -299,22 +461,22 @@ def core_list_usage_text() -> str:
         + sep + "\n"
     )
     rows = []
-    
+
     for nick in sorted(all_nicks):
         use_bytes = usages.get(nick, 0)
         lim_bytes = limits.get(nick, None)
-        
+
         use_str = bytes_to_human(use_bytes)
-        
-        if lim_bytes is None:
+
+        if lim_bytes is None or lim_bytes <= 0:
             lim_str = "Sem limite"
-            status = "Livre"
+            status  = "Livre"
         else:
             lim_str = bytes_to_human(lim_bytes)
             if use_bytes >= lim_bytes:
                 status = "EXCEDIDO"
             else:
-                pct = int((use_bytes * 100) / lim_bytes)
+                pct    = int((use_bytes * 100) / lim_bytes)
                 status = f"{pct}%"
 
         rows.append(f"{nick:<14} | {use_str:<12} | {lim_str:<12} | {status}")
@@ -331,7 +493,7 @@ def core_list_users_text() -> str:
     if data:
         for inbound in data.get("inbounds", []):
             if inbound.get("tag") == "inbound-turbonet":
-                for c in inbound["settings"]["clients"]:
+                for c in inbound.get("settings", {}).get("clients", []):
                     email = c.get("email", "")
                     if email.startswith("LOCKED_"):
                         locked_users.add(email.replace("LOCKED_", "", 1))
@@ -340,18 +502,18 @@ def core_list_users_text() -> str:
     header = (
         "📋 LISTA DE USUÁRIOS - TURBONET XRAY\n"
         + sep + "\n"
-        + f"{'NOME':<12} | {'VENCIMENTO':<11} | {'UUID (resumido)':<20} | STATUS\n"
+        + f"{'NOME':<12} | {'VENCIMENTO':<11} | {'CREDENCIAL':<20} | STATUS\n"
         + sep + "\n"
     )
     rows = []
-    with open(USER_DB, "r") as f:
+    with open(USER_DB, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             parts = line.strip().split("|")
             if len(parts) >= 3:
-                nick_r, uuid_r, expiry_r = parts[0], parts[1], parts[2]
-                status = "⛔" if nick_r in locked_users else "✅"
-                uuid_short = uuid_r[:8] + "..." + uuid_r[-4:] if len(uuid_r) >= 12 else uuid_r
-                rows.append(f"{nick_r:<12} | {expiry_r:<11} | {uuid_short:<20} | {status}")
+                nick_r, cred_r, expiry_r = parts[0], parts[1], parts[2]
+                status     = "⛔" if nick_r in locked_users else "✅"
+                cred_short = cred_r[:8] + "..." + cred_r[-4:] if len(cred_r) >= 12 else cred_r
+                rows.append(f"{nick_r:<12} | {expiry_r:<11} | {cred_short:<20} | {status}")
 
     footer = "\n" + sep + f"\nTotal: {len(rows)} usuário(s)"
     return header + "\n".join(rows) + footer if rows else header + "(vazio)"
@@ -361,16 +523,14 @@ def core_list_users_text() -> str:
 # FUNÇÕES CORE DE GERENCIAMENTO (CRIAR, BLOQUEAR, RESTAURAR)
 # =============================================================
 
-def core_create_user(nick: str, days: str) -> 'Tuple[bool, str]':
-    if os.path.exists(USER_DB):
-        with open(USER_DB, "r") as f:
-            if any(line.startswith(f"{nick}|") for line in f):
-                return False, "❌ Usuário já existe!"
-    else:
-        open(USER_DB, "a").close()
+def core_create_user(nick: str, days: str) -> Tuple[bool, str]:
+    if not _is_valid_nick(nick, strict_create=True):
+        return False, "❌ Nome de usuário inválido."
 
-    user_uuid   = str(uuid.uuid4())
-    expiry_date = (datetime.now() + timedelta(days=int(days))).strftime("%Y-%m-%d")
+    _ensure_private_file(USER_DB, 0o600)
+    with open(USER_DB, "r", encoding="utf-8", errors="replace") as f:
+        if any(line.startswith(f"{nick}|") for line in f):
+            return False, "❌ Usuário já existe!"
 
     data = load_config()
     if not data:
@@ -383,28 +543,27 @@ def core_create_user(nick: str, days: str) -> 'Tuple[bool, str]':
     if not inbound:
         return False, "❌ inbound-turbonet não encontrado."
 
-    inbound["settings"]["clients"].append(
-        {"id": user_uuid, "email": nick, "level": 0}
-    )
+    proto, net = _get_inbound_profile(data)
+    user_cred   = uuid.uuid4().hex if proto == "trojan" else str(uuid.uuid4())
+    expiry_date = (datetime.now() + timedelta(days=int(days))).strftime("%Y-%m-%d")
+
+    inbound["settings"]["clients"].append(_build_client_obj(nick, user_cred, proto, net))
 
     if not save_config(data):
         return False, "❌ Falha ao salvar config.json."
 
-    with open(USER_DB, "a") as f:
-        f.write(f"{nick}|{user_uuid}|{expiry_date}|{nick}|0\n")
+    with open(USER_DB, "a", encoding="utf-8") as f:
+        f.write(f"{nick}|{user_cred}|{expiry_date}|{nick}|0\n")
 
-    # Integração Híbrida SSH/SOCKS5
-    subprocess.run(["useradd", "-M", "-s", "/bin/false", nick], check=False, stderr=subprocess.DEVNULL)
-    chp = subprocess.Popen(["chpasswd"], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    chp.communicate(f"{nick}:{nick}".encode('utf-8'))
+    sync_ssh_user("create", nick, nick)
+    reload_xray_user("add", nick, user_cred)
+    link = generate_link(user_cred, nick)
 
-    reload_xray_user("add", nick, user_uuid)
-    link = generate_link(user_uuid, nick)
-
+    cred_label = "Senha Trojan" if proto == "trojan" else "UUID"
     return True, (
         f"✅ *Usuário Criado!*\n\n"
         f"👤 Nome:    `{nick}`\n"
-        f"🔑 UUID:    `{user_uuid}`\n"
+        f"🔑 {cred_label}: `{user_cred}`\n"
         f"📅 Expira: `{expiry_date}`\n"
         f"🔐 Senha App: `{nick}`\n\n"
         f"🔗 *Link:*\n`{link}`"
@@ -412,6 +571,9 @@ def core_create_user(nick: str, days: str) -> 'Tuple[bool, str]':
 
 
 def core_delete_user(nick: str) -> str:
+    if not _is_valid_nick(nick):
+        return "❌ Nome de usuário inválido."
+
     data  = load_config()
     found = False
 
@@ -430,7 +592,7 @@ def core_delete_user(nick: str) -> str:
             return "❌ Falha ao salvar config.json."
 
     if os.path.exists(USER_DB):
-        with open(USER_DB, "r") as f:
+        with open(USER_DB, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
         new_lines = []
         for line in lines:
@@ -438,25 +600,30 @@ def core_delete_user(nick: str) -> str:
                 found = True
             else:
                 new_lines.append(line)
-        tmp_db = USER_DB + ".tmp"
-        with open(tmp_db, "w") as f:
+        tmp_db = USER_DB + f".tmp.{os.getpid()}"
+        with open(tmp_db, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
+        os.chmod(tmp_db, 0o600)
         os.replace(tmp_db, USER_DB)
 
     if not found:
         return "❌ Usuário não encontrado no sistema."
 
-    subprocess.run(["userdel", "-r", "-f", nick], check=False, stderr=subprocess.DEVNULL)
+    sync_ssh_user("delete", nick)
     reload_xray_user("remove", nick, "")
     reload_xray_user("remove", f"LOCKED_{nick}", "")
     return "✅ Usuário removido do sistema."
 
 
 def core_block_user(nick: str) -> str:
+    if not _is_valid_nick(nick):
+        return "❌ Nome de usuário inválido."
+
     data = load_config()
     if not data:
         return "❌ Erro config."
 
+    proto, _ = _get_inbound_profile(data)
     found = False
     for inbound in data.get("inbounds", []):
         if inbound.get("tag") == "inbound-turbonet":
@@ -465,7 +632,10 @@ def core_block_user(nick: str) -> str:
                     return "⚠️ Usuário já está bloqueado."
                 if client.get("email") == nick:
                     client["email"] = f"LOCKED_{nick}"
-                    client["id"]    = str(uuid.uuid4())
+                    if proto == "trojan":
+                        client["password"] = uuid.uuid4().hex
+                    else:
+                        client["id"] = str(uuid.uuid4())
                     found = True
                     break
 
@@ -475,43 +645,46 @@ def core_block_user(nick: str) -> str:
     if not save_config(data):
         return "❌ Falha ao salvar config.json."
 
-    # GUILHOTINA DE SESSÕES SSH (Derruba e trava)
-    subprocess.run(["usermod", "-L", nick], check=False, stderr=subprocess.DEVNULL)
-    subprocess.run(["chage", "-E", "0", nick], check=False, stderr=subprocess.DEVNULL)
-    subprocess.run(["pkill", "-u", nick], check=False, stderr=subprocess.DEVNULL)
-
+    sync_ssh_user("block", nick)
     reload_xray_user("remove", nick, "")
-    locked_nick = f"LOCKED_{nick}"
-    fake_uuid_str = str(uuid.uuid4())
-    reload_xray_user("add", locked_nick, fake_uuid_str)
+    locked_nick   = f"LOCKED_{nick}"
+    fake_cred_str = uuid.uuid4().hex if proto == "trojan" else str(uuid.uuid4())
+    reload_xray_user("add", locked_nick, fake_cred_str)
     return f"⛔ Usuário `{nick}` foi SUSPENSO e desconectado."
 
 
 def core_unblock_user(nick: str) -> str:
-    real_uuid = None
+    if not _is_valid_nick(nick):
+        return "❌ Nome de usuário inválido."
+
+    real_cred = None
     if os.path.exists(USER_DB):
-        with open(USER_DB, "r") as f:
+        with open(USER_DB, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 if line.startswith(f"{nick}|"):
                     parts = line.strip().split("|")
                     if len(parts) >= 2:
-                        real_uuid = parts[1]
+                        real_cred = parts[1]
                     break
 
-    if not real_uuid:
-        return "❌ Erro: UUID original não encontrado no DB."
+    if not real_cred:
+        return "❌ Erro: Credencial original não encontrada no DB."
 
     data = load_config()
     if not data:
         return "❌ Erro ao ler config."
 
+    proto, _ = _get_inbound_profile(data)
     found = False
     for inbound in data.get("inbounds", []):
         if inbound.get("tag") == "inbound-turbonet":
             for client in inbound["settings"]["clients"]:
                 if client.get("email") == f"LOCKED_{nick}":
                     client["email"] = nick
-                    client["id"]    = real_uuid
+                    if proto == "trojan":
+                        client["password"] = real_cred
+                    else:
+                        client["id"] = real_cred
                     found = True
                     break
 
@@ -521,73 +694,75 @@ def core_unblock_user(nick: str) -> str:
     if not save_config(data):
         return "❌ Falha ao salvar config.json."
 
-    # RESTAURAÇÃO SSH/SOCKS5
-    subprocess.run(["usermod", "-U", nick], check=False, stderr=subprocess.DEVNULL)
-    subprocess.run(["chage", "-E", "-1", nick], check=False, stderr=subprocess.DEVNULL)
-    subprocess.run(["passwd", "-u", nick], check=False, stderr=subprocess.DEVNULL)
-
+    sync_ssh_user("unblock", nick)
     reload_xray_user("remove", f"LOCKED_{nick}", "")
-    reload_xray_user("add", nick, real_uuid)
+    reload_xray_user("add", nick, real_cred)
     return f"✅ Usuário `{nick}` REATIVADO com sucesso."
 
 
 def core_renew_user(nick: str, days_to_add: str) -> str:
-    real_uuid = None
+    if not _is_valid_nick(nick):
+        return "❌ Nome de usuário inválido."
+
+    real_cred      = None
     current_expiry = None
-    found = False
-    lines = []
+    new_expiry     = ""
+    found          = False
+    lines          = []
 
     if os.path.exists(USER_DB):
-        with open(USER_DB, "r") as f:
+        with open(USER_DB, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
 
     for i, line in enumerate(lines):
         if line.startswith(f"{nick}|"):
             parts = line.strip().split("|")
             if len(parts) >= 3:
-                real_uuid = parts[1]
+                real_cred      = parts[1]
                 current_expiry = parts[2]
                 try:
                     exp_date = datetime.strptime(current_expiry, "%Y-%m-%d")
                     if exp_date < datetime.now():
                         exp_date = datetime.now()
                     new_expiry = (exp_date + timedelta(days=int(days_to_add))).strftime("%Y-%m-%d")
-                except:
+                except ValueError:
                     new_expiry = (datetime.now() + timedelta(days=int(days_to_add))).strftime("%Y-%m-%d")
 
                 parts[2] = new_expiry
                 lines[i] = "|".join(parts) + "\n"
-                found = True
+                found    = True
             break
 
     if not found:
         return "❌ Usuário não encontrado no banco de dados."
 
-    tmp_db = USER_DB + ".tmp"
-    with open(tmp_db, "w") as f:
+    tmp_db = USER_DB + f".tmp.{os.getpid()}"
+    with open(tmp_db, "w", encoding="utf-8") as f:
         f.writelines(lines)
+    os.chmod(tmp_db, 0o600)
     os.replace(tmp_db, USER_DB)
 
-    # GARANTE DESTRANCAMENTO DO SSH SE RENOVAR
-    subprocess.run(["usermod", "-U", nick], check=False, stderr=subprocess.DEVNULL)
-    subprocess.run(["chage", "-E", "-1", nick], check=False, stderr=subprocess.DEVNULL)
-    subprocess.run(["passwd", "-u", nick], check=False, stderr=subprocess.DEVNULL)
+    sync_ssh_user("renew", nick)
 
     data = load_config()
     was_locked = False
-    if data:
+    if data and real_cred:
+        proto, _ = _get_inbound_profile(data)
         for inbound in data.get("inbounds", []):
             if inbound.get("tag") == "inbound-turbonet":
                 for client in inbound["settings"]["clients"]:
                     if client.get("email") == f"LOCKED_{nick}":
                         client["email"] = nick
-                        client["id"] = real_uuid
+                        if proto == "trojan":
+                            client["password"] = real_cred
+                        else:
+                            client["id"] = real_cred
                         was_locked = True
                         break
-    if was_locked:
+    if was_locked and data and real_cred:
         save_config(data)
         reload_xray_user("remove", f"LOCKED_{nick}", "")
-        reload_xray_user("add", nick, real_uuid)
+        reload_xray_user("add", nick, real_cred)
 
     return f"🔄 Usuário `{nick}` RENOVADO com sucesso!\nNova data: {new_expiry}"
 
@@ -603,23 +778,23 @@ def is_admin(update: Update) -> bool:
 def build_menu() -> InlineKeyboardMarkup:
     keyboard = [
         [
-            InlineKeyboardButton("👤 CRIAR",     callback_data="create_start"),
-            InlineKeyboardButton("🗑️ REMOVER",   callback_data="delete_start"),
+            InlineKeyboardButton("👤 CRIAR",        callback_data="create_start"),
+            InlineKeyboardButton("🗑️ REMOVER",      callback_data="delete_start"),
         ],
         [
-            InlineKeyboardButton("⛔ SUSPENDER", callback_data="block_start"),
-            InlineKeyboardButton("✅ REATIVAR",  callback_data="unblock_start"),
+            InlineKeyboardButton("⛔ SUSPENDER",    callback_data="block_start"),
+            InlineKeyboardButton("✅ REATIVAR",     callback_data="unblock_start"),
         ],
         [
-            InlineKeyboardButton("🔄 RENOVAR",   callback_data="renew_start"),
+            InlineKeyboardButton("🔄 RENOVAR",      callback_data="renew_start"),
             InlineKeyboardButton("📋 LISTAR (TXT)", callback_data="list_users"),
         ],
         [
-            InlineKeyboardButton("📊 VER CONSUMO", callback_data="usage_list"),
-            InlineKeyboardButton("📥 BACKUP",      callback_data="backup_start"),
+            InlineKeyboardButton("📊 VER CONSUMO",  callback_data="usage_list"),
+            InlineKeyboardButton("📥 BACKUP",       callback_data="backup_start"),
         ],
         [
-            InlineKeyboardButton("❌ SAIR", callback_data="cancel"),
+            InlineKeyboardButton("❌ SAIR",         callback_data="cancel"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -630,7 +805,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data.clear()
     await update.message.reply_text(
-        "🐉 *PAINEL TURBONET XRAY V1.4 (PRO)*\n_Integração Híbrida SSH Ativa_",
+        "🐉 *PAINEL TURBONET XRAY V1.4.1 (PRO)*\n_Integração Híbrida SSH Ativa_",
         reply_markup=build_menu(),
         parse_mode="Markdown",
     )
@@ -732,7 +907,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tmpdir = tempfile.mkdtemp()
         try:
             os.makedirs(f"{tmpdir}/opt/XrayTools", exist_ok=True)
-            for fname in ["users.db", "limits.db", "usage.db", "session.db", "active_domain"]:
+            for fname in ["users.db", "limits.db", "usage.db", "session.db", "active_domain", "connection_info.txt"]:
                 src = f"/opt/XrayTools/{fname}"
                 if os.path.exists(src):
                     shutil.copy2(src, f"{tmpdir}/opt/XrayTools/{fname}")
@@ -763,13 +938,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     sha256_hash.update(byte_block)
             digest = sha256_hash.hexdigest()
 
-            with open(sha_file, "w") as sf:
+            with open(sha_file, "w", encoding="utf-8") as sf:
                 sf.write(f"{digest}  {os.path.basename(bkp_file)}\n")
 
             close_btn = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("🗑 Fechar Backup", callback_data="close_file")]]
             )
-            # Envia o tar.gz
             with open(bkp_file, "rb") as f:
                 await context.bot.send_document(
                     chat_id=update.effective_chat.id,
@@ -783,7 +957,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown",
                     reply_markup=close_btn,
                 )
-            # Envia o .sha256
             with open(sha_file, "rb") as f:
                 await context.bot.send_document(
                     chat_id=update.effective_chat.id,
@@ -826,7 +999,7 @@ async def input_handler(
     text = update.message.text.strip().split()[0].lower()
 
     if mode == "create_nick":
-        if not re.match(r"^[a-zA-Z0-9]{5,9}$", text):
+        if not _is_valid_nick(text, strict_create=True):
             await update.message.reply_text(
                 "❌ *Nome Inválido!*\n\nRegras:\n• Entre 5 e 9 caracteres\n"
                 "• Apenas letras e números\n\nTente outro:",
@@ -840,29 +1013,41 @@ async def input_handler(
         return GET_EXPIRY_DAYS_CREATE
 
     if mode == "create_days":
-        if not text.isdigit():
-            await update.message.reply_text("Só números.")
+        if not text.isdigit() or not (1 <= int(text) <= 3650):
+            await update.message.reply_text("❌ Informe um número de dias entre 1 e 3650.")
             return GET_EXPIRY_DAYS_CREATE
         _ok, msg = core_create_user(context.user_data["nick"], text)
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu())
         return SELECTING_ACTION
 
     if mode == "delete":
+        if not _is_valid_nick(text):
+            await update.message.reply_text("❌ Nome de usuário inválido.", reply_markup=build_menu())
+            return SELECTING_ACTION
         msg = core_delete_user(text)
         await update.message.reply_text(msg, reply_markup=build_menu())
         return SELECTING_ACTION
 
     if mode == "block":
+        if not _is_valid_nick(text):
+            await update.message.reply_text("❌ Nome de usuário inválido.", reply_markup=build_menu())
+            return SELECTING_ACTION
         msg = core_block_user(text)
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu())
         return SELECTING_ACTION
 
     if mode == "unblock":
+        if not _is_valid_nick(text):
+            await update.message.reply_text("❌ Nome de usuário inválido.", reply_markup=build_menu())
+            return SELECTING_ACTION
         msg = core_unblock_user(text)
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu())
         return SELECTING_ACTION
 
     if mode == "renew_nick":
+        if not _is_valid_nick(text):
+            await update.message.reply_text("❌ Nome de usuário inválido.", reply_markup=build_menu())
+            return SELECTING_ACTION
         context.user_data["renew_nick"] = text
         await update.message.reply_text(
             f"Quantos dias deseja adicionar para `{text}`?", parse_mode="Markdown"
@@ -870,8 +1055,8 @@ async def input_handler(
         return GET_DAYS_TO_RENEW
 
     if mode == "renew_days":
-        if not text.isdigit():
-            await update.message.reply_text("Só números.")
+        if not text.isdigit() or not (1 <= int(text) <= 3650):
+            await update.message.reply_text("❌ Informe um número de dias entre 1 e 3650.")
             return GET_DAYS_TO_RENEW
         msg = core_renew_user(context.user_data["renew_nick"], text)
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=build_menu())
@@ -890,6 +1075,7 @@ async def h_block(u, c):       return await input_handler(u, c, "block")
 async def h_unblock(u, c):     return await input_handler(u, c, "unblock")
 async def h_renew_nick(u, c):  return await input_handler(u, c, "renew_nick")
 async def h_renew_days(u, c):  return await input_handler(u, c, "renew_days")
+
 
 async def cancel_op(u, c):
     await u.message.reply_text("Cancelado.", reply_markup=build_menu())
@@ -943,7 +1129,7 @@ def main():
         allow_reentry=True,
     )
     app.add_handler(conv)
-    logger.info("TURBONET XRAY Bot V1.4 iniciado. Admin ID: %d", ADMIN_ID)
+    logger.info("TURBONET XRAY Bot V1.4.1 iniciado. Admin ID: %d", ADMIN_ID)
     app.run_polling()
 
 
