@@ -1,7 +1,12 @@
 #!/bin/bash
-# botxray.sh - TURBONET XRAY V1.3 (PRO)
-# Correções:
-#   - Correção crítica no ensure_pkg do python3-venv (força instalação direta se o módulo falhar)
+# botxray.sh - TURBONET XRAY V1.3.1 (PRO)
+# Correções V1.3.1:
+#   - Removido NoNewPrivileges=true, ProtectHome=true e ajustado ProtectSystem=true no botxray.service
+#     (NoNewPrivileges bloqueava o bit SUID 4750 dos wrappers wrap_* e ProtectSystem=full bloqueava /etc/passwd)
+#   - Hardening nos wrappers C: clearenv(), verificação de setgid(0)/setuid(0) e /bin/bash -p
+#   - Corrigido restore_bot.sh para não matar a si mesmo com `systemctl stop botxray` antes de concluir
+#   - Proteção na leitura do users.db (última linha sem \n e bloqueio de alteração do usuário root)
+#   - Permissões 0640 (root:botxray) em active_domain e connection_info.txt + pip --no-cache-dir
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (codigo: $?)"; read -rp "Enter...";' ERR
@@ -43,6 +48,18 @@ ensure_pkg() {
 
 [ "${EUID:-$(id -u)}" -ne 0 ] && { echo -e "${VERMELHO}Execute como root!${RESET}"; exit 1; }
 
+_detect_xray_group() {
+    local svc_user=""
+    if command -v systemctl &>/dev/null; then
+        svc_user=$(systemctl show -p User --value xray 2>/dev/null || true)
+    fi
+    svc_user="${svc_user:-nobody}"
+    if ! id "$svc_user" &>/dev/null; then
+        svc_user="root"
+    fi
+    id -gn "$svc_user"
+}
+
 _wait_service_active() {
     local svc="$1" tries=5
     while [ "$tries" -gt 0 ]; do
@@ -60,7 +77,7 @@ func_install_bot() {
     : > "$LOG_FILE"
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}      INSTALADOR BOT TELEGRAM - V1.3 (PRO)       ${RESET}"
+    echo -e "${AMARELO}     INSTALADOR BOT TELEGRAM - V1.3.1 (PRO)      ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
     echo ""
 
@@ -72,7 +89,6 @@ func_install_bot() {
     ensure_pkg gcc        gcc
     ensure_pkg tar        tar
 
-    # CORREÇÃO: Força instalação do python3-venv diretamente caso o módulo falhe
     if ! python3 -m venv --help >/dev/null 2>&1; then
         _detect_pkg_manager
         case "$_PKG_MANAGER" in
@@ -87,12 +103,13 @@ func_install_bot() {
     echo ""
     echo -e "${AMARELO}1. Token do BotFather (formato: 123456789:ABCdef...):${RESET}"
     echo -e "${AMARELO}   Cole o token e pressione Enter:${RESET}"
-    read -r bot_token
+    read -r bot_token || true
     bot_token="$(echo "${bot_token:-}" | tr -d '[:space:][:cntrl:]')"
 
     echo ""
     echo -e "${AMARELO}2. Seu ID numerico do Telegram (Admin):${RESET}"
-    read -r -p "ID Admin: " admin_id
+    read -r -p "ID Admin: " admin_id || true
+    admin_id="$(echo "${admin_id:-}" | tr -d '[:space:][:cntrl:]')"
 
     if [ -z "${bot_token:-}" ] || ! [[ "$bot_token" =~ ^[0-9]{6,12}:[A-Za-z0-9_-]{35,}$ ]]; then
         echo -e "${VERMELHO}Token invalido.${RESET}"; sleep 2; return 1
@@ -105,33 +122,44 @@ func_install_bot() {
         useradd --system --no-create-home --shell /usr/sbin/nologin botxray
     fi
 
-    # --- WRAPPERS SETUID EM C ---
+    # --- WRAPPERS SETUID EM C (COM SANITIZAÇÃO DE AMBIENTE) ---
     echo ""
     echo "Compilando wrappers setuid..."
     for s in add_user remover_user block_user unblock_user renew_user backup_bot restore_bot; do
-        cat > /tmp/wrap_${s}.c << EOF
+        cat > "/tmp/wrap_${s}.c" << EOF
+#define _GNU_SOURCE
 #include <unistd.h>
 #include <stdlib.h>
+
 int main(int argc, char *argv[]) {
-    setuid(0); setgid(0);
-    putenv("TERM=xterm");
-    putenv("HOME=/opt/XrayTools");
-    putenv("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-    
-    char **new_args = malloc((argc + 2) * sizeof(char*));
+    if (setgid(0) != 0 || setuid(0) != 0) {
+        return 126;
+    }
+    clearenv();
+    setenv("TERM", "xterm", 1);
+    setenv("HOME", "/root", 1);
+    setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
+
+    char **new_args = malloc(((size_t)argc + 3) * sizeof(char*));
+    if (!new_args) {
+        return 127;
+    }
     new_args[0] = "/bin/bash";
-    new_args[1] = "/usr/local/bin/${s}.sh";
-    for(int i = 1; i < argc; i++) new_args[i+1] = argv[i];
-    new_args[argc+1] = NULL;
-    
+    new_args[1] = "-p";
+    new_args[2] = "/usr/local/bin/${s}.sh";
+    for (int i = 1; i < argc; i++) {
+        new_args[i + 2] = argv[i];
+    }
+    new_args[argc + 2] = NULL;
+
     execv("/bin/bash", new_args);
-    return 1;
+    return 127;
 }
 EOF
-        gcc -o /usr/local/bin/wrap_${s} /tmp/wrap_${s}.c
-        chown root:botxray /usr/local/bin/wrap_${s}
-        chmod 4750 /usr/local/bin/wrap_${s}
-        rm -f /tmp/wrap_${s}.c
+        gcc -O2 -Wall -o "/usr/local/bin/wrap_${s}" "/tmp/wrap_${s}.c"
+        chown root:botxray "/usr/local/bin/wrap_${s}"
+        chmod 4750 "/usr/local/bin/wrap_${s}"
+        rm -f "/tmp/wrap_${s}.c"
     done
     echo -e "${VERDE}Wrappers criados com sucesso.${RESET}"
 
@@ -148,7 +176,7 @@ EOF
     fi
     [ -s "$tmp_bot" ] || { echo -e "${VERMELHO}botxray.py vazio.${RESET}"; rm -f "$tmp_bot"; sleep 2; return 1; }
 
-    # --- PATCH AUTOMATICO NO botxray.py ---
+    # --- PATCH AUTOMÁTICO NO botxray.py ---
     python3 - "$tmp_bot" << 'PYEOF'
 import sys, re
 
@@ -175,17 +203,23 @@ for old, new in [
 src = src.replace('["sudo", "-n", path]', '[path]')
 src = src.replace('["sudo", "-n", path] + args', '[path] + args')
 
-# 4) Corrige type hints incompativeis com Python 3.8
+# 4) Corrige type hints incompatíveis com Python 3.8
 src = src.replace('dict | None', 'Optional[dict]')
 src = src.replace('str | None', 'Optional[str]')
 src = re.sub(r'\btuple\[([^\]]+)\]', lambda m: 'Tuple[' + m.group(1) + ']', src)
 src = re.sub(r'\blist\[([^\]]+)\]', lambda m: 'List[' + m.group(1) + ']', src)
 
-# 5) Garante imports necessarios
-if 'from typing import' not in src:
-    src = src.replace('import os\n', 'import os\nfrom typing import Optional, Tuple, List\n', 1)
+# 5) Garante imports necessários no topo
+header_inject = ""
 if 'from __future__ import annotations' not in src:
-    src = 'from __future__ import annotations\n' + src
+    header_inject += 'from __future__ import annotations\n'
+if 'import os' not in src:
+    header_inject += 'import os\n'
+if 'from typing import' not in src:
+    header_inject += 'from typing import Optional, Tuple, List\n'
+
+if header_inject:
+    src = header_inject + src
 
 open(path, 'w', encoding='utf-8').write(src)
 print("Patch aplicado com sucesso no Python.")
@@ -202,13 +236,12 @@ PYEOF
     chown root:botxray "$ENV_FILE"
     echo -e "${VERDE}Credenciais salvas em ${ENV_FILE}${RESET}"
 
-    # --- VENV COM VERSOES FIXADAS ---
+    # --- VENV COM VERSÕES FIXADAS ---
     if [ ! -d /opt/XrayTools/venv ]; then
         python3 -m venv /opt/XrayTools/venv
     fi
     echo "Instalando dependencias Python..."
-    /opt/XrayTools/venv/bin/pip install --quiet --upgrade pip >>"$LOG_FILE" 2>&1
-    /opt/XrayTools/venv/bin/pip install --quiet \
+    /opt/XrayTools/venv/bin/pip install --quiet --no-cache-dir \
         "python-telegram-bot==20.7" \
         "requests==2.31.0" >>"$LOG_FILE" 2>&1
 
@@ -226,7 +259,7 @@ OUT_FILE="${OUT_DIR}/backup_turbonet_bot_${ts}.tar.gz"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 mkdir -p "$tmpdir/opt/XrayTools"
-for f in users.db limits.db usage.db session.db active_domain; do
+for f in users.db limits.db usage.db session.db active_domain connection_info.txt; do
     [ -f "/opt/XrayTools/$f" ] && cp -f "/opt/XrayTools/$f" "$tmpdir/opt/XrayTools/$f"
 done
 [ -d /opt/XrayTools/users ] && \
@@ -269,6 +302,7 @@ while IFS= read -r entry; do
         opt/XrayTools/usage.db|\
         opt/XrayTools/session.db|\
         opt/XrayTools/active_domain|\
+        opt/XrayTools/connection_info.txt|\
         opt/XrayTools/users|\
         opt/XrayTools/users/*|\
         usr/local/etc/xray|\
@@ -278,12 +312,14 @@ while IFS= read -r entry; do
         *) echo "ERR: path nao permitido: $entry"; exit 9 ;;
     esac
 done < <(tar -tzf "$FILE" 2>/dev/null)
+
 SNAP=$(mktemp /tmp/restore_snap_XXXXXX.tar.gz)
 SNAP_PATHS=("opt/XrayTools" "usr/local/etc/xray")
 [ -d /opt/TurbonetCoreSSL ] && SNAP_PATHS+=("opt/TurbonetCoreSSL")
 tar -czf "$SNAP" -C / "${SNAP_PATHS[@]}" >/dev/null 2>&1 && chmod 0600 "$SNAP" || SNAP=""
-systemctl stop xray    >/dev/null 2>&1 || true
-systemctl stop botxray >/dev/null 2>&1 || true
+
+systemctl stop xray >/dev/null 2>&1 || true
+
 if ! tar -xzf "$FILE" -C / --no-overwrite-dir --no-same-permissions 2>/dev/null; then
     echo "ERR: falha ao extrair"
     [ -n "${SNAP:-}" ] && tar -xzf "$SNAP" -C / >/dev/null 2>&1 || true
@@ -291,63 +327,107 @@ if ! tar -xzf "$FILE" -C / --no-overwrite-dir --no-same-permissions 2>/dev/null;
     exit 3
 fi
 
-chmod 770 /usr/local/etc/xray 2>/dev/null || true
-chown root:nogroup /usr/local/etc/xray 2>/dev/null || true
-chmod 0640 /usr/local/etc/xray/config.json 2>/dev/null || true
-chown root:nogroup /usr/local/etc/xray/config.json 2>/dev/null || true
+svc_user=$(systemctl show -p User --value xray 2>/dev/null || true)
+svc_user="${svc_user:-nobody}"
+id "$svc_user" &>/dev/null || svc_user="root"
+xray_grp=$(id -gn "$svc_user")
+
+chmod 750 /usr/local/etc/xray 2>/dev/null || true
+chown "root:${xray_grp}" /usr/local/etc/xray 2>/dev/null || true
+[ -f /usr/local/etc/xray/config.json ] && {
+    chmod 0640 /usr/local/etc/xray/config.json 2>/dev/null || true
+    chown "root:${xray_grp}" /usr/local/etc/xray/config.json 2>/dev/null || true
+}
 [ -f /usr/local/etc/xray/preset.json ] && {
     chmod 0640 /usr/local/etc/xray/preset.json 2>/dev/null || true
-    chown root:nogroup /usr/local/etc/xray/preset.json 2>/dev/null || true
+    chown "root:${xray_grp}" /usr/local/etc/xray/preset.json 2>/dev/null || true
 }
+
+chown root:botxray /opt/XrayTools 2>/dev/null || true
+chmod 0750 /opt/XrayTools 2>/dev/null || true
+
+for db in users.db limits.db usage.db session.db; do
+    [ -f "/opt/XrayTools/$db" ] && {
+        chown botxray:botxray "/opt/XrayTools/$db" 2>/dev/null || true
+        chmod 0600 "/opt/XrayTools/$db" 2>/dev/null || true
+    }
+done
+
+for info in active_domain connection_info.txt; do
+    [ -f "/opt/XrayTools/$info" ] && {
+        chown root:botxray "/opt/XrayTools/$info" 2>/dev/null || true
+        chmod 0640 "/opt/XrayTools/$info" 2>/dev/null || true
+    }
+done
+
 [ -d /opt/XrayTools/users ] && {
+    chown botxray:botxray /opt/XrayTools/users 2>/dev/null || true
+    chmod 0750 /opt/XrayTools/users 2>/dev/null || true
     find /opt/XrayTools/users -maxdepth 1 -name "*.txt" \
-        -exec chmod 600 {} \; -exec chown root:root {} \; 2>/dev/null || true
+        -exec chmod 640 {} \; -exec chown root:botxray {} \; 2>/dev/null || true
 }
+
 [ -d /opt/TurbonetCoreSSL ] && {
     chmod 750 /opt/TurbonetCoreSSL 2>/dev/null || true
-    chown root:nogroup /opt/TurbonetCoreSSL 2>/dev/null || true
-    chmod 644 /opt/TurbonetCoreSSL/fullchain.pem 2>/dev/null || true
-    chown root:root /opt/TurbonetCoreSSL/fullchain.pem 2>/dev/null || true
+    chown "root:${xray_grp}" /opt/TurbonetCoreSSL 2>/dev/null || true
+    chmod 640 /opt/TurbonetCoreSSL/fullchain.pem 2>/dev/null || true
+    chown "root:${xray_grp}" /opt/TurbonetCoreSSL/fullchain.pem 2>/dev/null || true
     chmod 640 /opt/TurbonetCoreSSL/privkey.pem 2>/dev/null || true
-    chown root:nogroup /opt/TurbonetCoreSSL/privkey.pem 2>/dev/null || true
+    chown "root:${xray_grp}" /opt/TurbonetCoreSSL/privkey.pem 2>/dev/null || true
 }
 
 if [ -s /opt/XrayTools/users.db ]; then
-    while IFS='|' read -r nick uuid expiry pass limit _rest; do
+    while IFS='|' read -r nick uuid expiry pass limit _rest || [ -n "${nick:-}" ]; do
+        nick="${nick//$'\r'/}"
+        pass="${pass//$'\r'/}"
         [ -n "${nick:-}" ] && [ -n "${pass:-}" ] || continue
+        [ "$nick" = "root" ] && continue
+        [[ "$nick" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || continue
         id "$nick" &>/dev/null || useradd -M -s /bin/false "$nick" 2>/dev/null || true
         echo "${nick}:${pass}" | chpasswd 2>/dev/null || true
     done < /opt/XrayTools/users.db
 fi
 
-systemctl restart xray    >/dev/null 2>&1 || true
-systemctl restart botxray >/dev/null 2>&1 || true
+systemctl restart xray >/dev/null 2>&1 || true
 
 _wait=5
 while [ "$_wait" -gt 0 ]; do
     systemctl is-active --quiet xray 2>/dev/null && break
     sleep 1; _wait=$(( _wait - 1 ))
 done
-systemctl is-active --quiet xray 2>/dev/null && {
+
+if systemctl is-active --quiet xray 2>/dev/null; then
     [ -n "${SNAP:-}" ] && rm -f "$SNAP"
+    # Reinicia o botxray de forma assíncrona após retornar "OK" para não matar o processo pai
+    if command -v systemd-run &>/dev/null; then
+        systemd-run --no-block --unit="botxray-restart-$(date +%s)" \
+            /bin/sh -c 'sleep 2 && systemctl restart botxray' >/dev/null 2>&1 || true
+    else
+        (sleep 2; systemctl restart botxray) >/dev/null 2>&1 </dev/null &
+    fi
     echo "OK"
-} || { echo "AVISO: Xray nao ficou ativo. Snapshot: ${SNAP:-N/A}"; exit 6; }
+else
+    echo "AVISO: Xray nao ficou ativo. Snapshot: ${SNAP:-N/A}"
+    exit 6
+fi
 RSTEOF
     chmod 0755 /usr/local/bin/restore_bot.sh
     chown root:root /usr/local/bin/restore_bot.sh
 
-    # --- PERMISSOES DO DIRETORIO ---
+    # --- PERMISSÕES DO DIRETÓRIO ---
+    XRAY_GRP="$(_detect_xray_group)"
+
     if [ -d /usr/local/etc/xray ]; then
-        chmod 770 /usr/local/etc/xray
-        chown root:nogroup /usr/local/etc/xray
+        chmod 750 /usr/local/etc/xray
+        chown "root:${XRAY_GRP}" /usr/local/etc/xray
     fi
 
     if [ -f /usr/local/etc/xray/config.json ]; then
         chmod 640 /usr/local/etc/xray/config.json
-        chown root:nogroup /usr/local/etc/xray/config.json
+        chown "root:${XRAY_GRP}" /usr/local/etc/xray/config.json
     fi
 
-    mkdir -p /opt/XrayTools/backups /opt/XrayTools/users
+    mkdir -p /opt/XrayTools/backups /opt/XrayTools/users /root/backups
     chown botxray:botxray /opt/XrayTools/backups
     chmod 0750 /opt/XrayTools/backups
     chown botxray:botxray /opt/XrayTools/users
@@ -368,9 +448,15 @@ RSTEOF
             chmod 0600 "/opt/XrayTools/$db"
         }
     done
+    for info in active_domain connection_info.txt; do
+        [ -f "/opt/XrayTools/$info" ] && {
+            chown root:botxray "/opt/XrayTools/$info"
+            chmod 0640 "/opt/XrayTools/$info"
+        }
+    done
 
-    # --- SYSTEMD SERVICE ---
-    cat > /etc/systemd/system/botxray.service << 'SVCEOF'
+    # --- SYSTEMD SERVICE (SEM NoNewPrivileges PARA PERMITIR WRAPPERS SETUID) ---
+    cat > /etc/systemd/system/botxray.service << SVCEOF
 [Unit]
 Description=TURBONET XRAY Telegram Bot
 After=network.target
@@ -379,17 +465,15 @@ After=network.target
 Type=simple
 User=botxray
 Group=botxray
-SupplementaryGroups=nogroup
+SupplementaryGroups=${XRAY_GRP}
 WorkingDirectory=/opt/XrayTools
 EnvironmentFile=/opt/XrayTools/.bot_env
 ExecStart=/opt/XrayTools/venv/bin/python /opt/XrayTools/botxray.py
 Restart=always
 RestartSec=10
-NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-ReadWritePaths=/opt/XrayTools /tmp /root/backups /usr/local/etc/xray
+ProtectSystem=true
+ReadWritePaths=/opt/XrayTools /tmp /root/backups /usr/local/etc/xray /etc
 
 [Install]
 WantedBy=multi-user.target
@@ -448,7 +532,7 @@ func_view_logs() {
 while true; do
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.3        ${RESET}"
+    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.3.1      ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
 
     status_msg="${VERMELHO}NÃO INSTALADO${RESET}"
@@ -469,8 +553,8 @@ while true; do
     echo -e " ${VERMELHO}[0]${RESET} VOLTAR AO MENU PRINCIPAL"
     echo -e "${AZUL}==================================================${RESET}"
 
-    read -r -p "Escolha uma opção: " opt
-    case "$opt" in
+    read -r -p "Escolha uma opção: " opt || true
+    case "${opt:-}" in
         1) func_install_bot ;;
         2) func_start_bot ;;
         3) func_stop_bot ;;
