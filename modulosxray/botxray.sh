@@ -1,12 +1,8 @@
 #!/bin/bash
-# botxray.sh - TURBONET XRAY V1.3.1 (PRO)
-# Correções V1.3.1:
-#   - Removido NoNewPrivileges=true, ProtectHome=true e ajustado ProtectSystem=true no botxray.service
-#     (NoNewPrivileges bloqueava o bit SUID 4750 dos wrappers wrap_* e ProtectSystem=full bloqueava /etc/passwd)
-#   - Hardening nos wrappers C: clearenv(), verificação de setgid(0)/setuid(0) e /bin/bash -p
-#   - Corrigido restore_bot.sh para não matar a si mesmo com `systemctl stop botxray` antes de concluir
-#   - Proteção na leitura do users.db (última linha sem \n e bloqueio de alteração do usuário root)
-#   - Permissões 0640 (root:botxray) em active_domain e connection_info.txt + pip --no-cache-dir
+# botxray.sh - TURBONET XRAY V1.3.2 (PRO + HÍBRIDO)
+# Atualizações V1.3.2:
+#   - Adicionado wrapper setuid /usr/local/bin/wrap_ssh_sync + /usr/local/bin/ssh_sync.sh
+#     para sincronia híbrida SSH (useradd, chpasswd, userdel, usermod, chage, pkill, passwd)
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (codigo: $?)"; read -rp "Enter...";' ERR
@@ -77,7 +73,7 @@ func_install_bot() {
     : > "$LOG_FILE"
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}     INSTALADOR BOT TELEGRAM - V1.3.1 (PRO)      ${RESET}"
+    echo -e "${AMARELO}     INSTALADOR BOT TELEGRAM - V1.3.2 (PRO)      ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
     echo ""
 
@@ -122,10 +118,61 @@ func_install_bot() {
         useradd --system --no-create-home --shell /usr/sbin/nologin botxray
     fi
 
-    # --- WRAPPERS SETUID EM C (COM SANITIZAÇÃO DE AMBIENTE) ---
+    # --- SCRIPT PRIVILEGIADO DE SINCRONIA SSH ---
+    cat > /usr/local/bin/ssh_sync.sh << 'SSHEOF'
+#!/bin/bash
+set -Eeuo pipefail
+
+ACTION="${1:-}"
+NICK="${2:-}"
+
+if [[ ! "$NICK" =~ ^[a-z0-9_-]{2,32}$ ]] || [ "$NICK" = "root" ]; then
+    echo "ERR: usuario invalido" >&2
+    exit 1
+fi
+
+if id "$NICK" &>/dev/null; then
+    uid_num=$(id -u "$NICK")
+    if [ "$uid_num" -lt 1000 ]; then
+        echo "ERR: conta de sistema protegida" >&2
+        exit 1
+    fi
+fi
+
+case "$ACTION" in
+    create)
+        IFS= read -r PASS || true
+        PASS="${PASS:-$NICK}"
+        id "$NICK" &>/dev/null || useradd -M -s /bin/false "$NICK"
+        printf '%s:%s\n' "$NICK" "$PASS" | chpasswd
+        ;;
+    delete)
+        pkill -9 -u "$NICK" 2>/dev/null || true
+        userdel -r -f "$NICK" 2>/dev/null || true
+        ;;
+    block)
+        usermod -L "$NICK" 2>/dev/null || true
+        chage -E 0 "$NICK" 2>/dev/null || true
+        pkill -9 -u "$NICK" 2>/dev/null || true
+        ;;
+    unblock|renew)
+        usermod -U "$NICK" 2>/dev/null || true
+        chage -E -1 "$NICK" 2>/dev/null || true
+        passwd -u "$NICK" 2>/dev/null || true
+        ;;
+    *)
+        echo "ERR: acao invalida" >&2
+        exit 1
+        ;;
+esac
+SSHEOF
+    chmod 0755 /usr/local/bin/ssh_sync.sh
+    chown root:root /usr/local/bin/ssh_sync.sh
+
+    # --- WRAPPERS SETUID EM C ---
     echo ""
     echo "Compilando wrappers setuid..."
-    for s in add_user remover_user block_user unblock_user renew_user backup_bot restore_bot; do
+    for s in ssh_sync add_user remover_user block_user unblock_user renew_user backup_bot restore_bot; do
         cat > "/tmp/wrap_${s}.c" << EOF
 #define _GNU_SOURCE
 #include <unistd.h>
@@ -175,55 +222,6 @@ EOF
         rm -f "$tmp_bot"; sleep 2; return 1
     fi
     [ -s "$tmp_bot" ] || { echo -e "${VERMELHO}botxray.py vazio.${RESET}"; rm -f "$tmp_bot"; sleep 2; return 1; }
-
-    # --- PATCH AUTOMÁTICO NO botxray.py ---
-    python3 - "$tmp_bot" << 'PYEOF'
-import sys, re
-
-path = sys.argv[1]
-src = open(path, encoding="utf-8", errors="ignore").read()
-
-# 1) Token e admin via os.environ
-src = re.sub(r'BOT_TOKEN\s*=\s*["\'].*?["\']', 'BOT_TOKEN = os.environ.get("BOT_TOKEN", "")', src)
-src = re.sub(r'ADMIN_ID\s*=\s*\d+', 'ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))', src)
-
-# 2) Caminhos dos scripts -> wrappers setuid
-for old, new in [
-    ('"/usr/local/bin/add_user.sh"',     '"/usr/local/bin/wrap_add_user"'),
-    ('"/usr/local/bin/remover_user.sh"', '"/usr/local/bin/wrap_remover_user"'),
-    ('"/usr/local/bin/block_user.sh"',   '"/usr/local/bin/wrap_block_user"'),
-    ('"/usr/local/bin/unblock_user.sh"', '"/usr/local/bin/wrap_unblock_user"'),
-    ('"/usr/local/bin/renew_user.sh"',   '"/usr/local/bin/wrap_renew_user"'),
-    ('"/usr/local/bin/backup_bot.sh"',   '"/usr/local/bin/wrap_backup_bot"'),
-    ('"/usr/local/bin/restore_bot.sh"',  '"/usr/local/bin/wrap_restore_bot"'),
-]:
-    src = src.replace(old, new)
-
-# 3) Remove sudo das chamadas subprocess
-src = src.replace('["sudo", "-n", path]', '[path]')
-src = src.replace('["sudo", "-n", path] + args', '[path] + args')
-
-# 4) Corrige type hints incompatíveis com Python 3.8
-src = src.replace('dict | None', 'Optional[dict]')
-src = src.replace('str | None', 'Optional[str]')
-src = re.sub(r'\btuple\[([^\]]+)\]', lambda m: 'Tuple[' + m.group(1) + ']', src)
-src = re.sub(r'\blist\[([^\]]+)\]', lambda m: 'List[' + m.group(1) + ']', src)
-
-# 5) Garante imports necessários no topo
-header_inject = ""
-if 'from __future__ import annotations' not in src:
-    header_inject += 'from __future__ import annotations\n'
-if 'import os' not in src:
-    header_inject += 'import os\n'
-if 'from typing import' not in src:
-    header_inject += 'from typing import Optional, Tuple, List\n'
-
-if header_inject:
-    src = header_inject + src
-
-open(path, 'w', encoding='utf-8').write(src)
-print("Patch aplicado com sucesso no Python.")
-PYEOF
 
     mv -f "$tmp_bot" "$BOT_PY"
     chmod 0640 "$BOT_PY"
@@ -398,7 +396,6 @@ done
 
 if systemctl is-active --quiet xray 2>/dev/null; then
     [ -n "${SNAP:-}" ] && rm -f "$SNAP"
-    # Reinicia o botxray de forma assíncrona após retornar "OK" para não matar o processo pai
     if command -v systemd-run &>/dev/null; then
         systemd-run --no-block --unit="botxray-restart-$(date +%s)" \
             /bin/sh -c 'sleep 2 && systemctl restart botxray' >/dev/null 2>&1 || true
@@ -455,7 +452,7 @@ RSTEOF
         }
     done
 
-    # --- SYSTEMD SERVICE (SEM NoNewPrivileges PARA PERMITIR WRAPPERS SETUID) ---
+    # --- SYSTEMD SERVICE ---
     cat > /etc/systemd/system/botxray.service << SVCEOF
 [Unit]
 Description=TURBONET XRAY Telegram Bot
@@ -532,7 +529,7 @@ func_view_logs() {
 while true; do
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.3.1      ${RESET}"
+    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.3.2      ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
 
     status_msg="${VERMELHO}NÃO INSTALADO${RESET}"
