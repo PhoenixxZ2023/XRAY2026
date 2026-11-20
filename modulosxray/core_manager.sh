@@ -1,12 +1,11 @@
 #!/bin/bash
-# core_manager.sh - TURBONET XRAY V1.2.2 (Otimizado com Engenharia DragonCore)
-# Correções aplicadas V1.2.2:
-#   - Eliminado curto-circuito `&&` no final de blocos sob `set -Eeuo pipefail` ao ler users.db
-#   - Removida subshell `$()` na montagem dos clientes iniciais (evita captura do trap ERR)
-#   - Eliminado SIGPIPE (exit 141) na geração de senhas/UUIDs aleatórios
-#   - Removido mux inválido do outbound freedom e corrigido xhttpSettings ("headers" no plural)
-#   - Preserva usuários ativos/bloqueados do users.db ao regenerar config.json (ou cria admin sincronizado)
-#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner) e permissões 750/640
+# core_manager.sh - TURBONET XRAY V1.2.3 (Perfil XHTTP Universal estilo SSHorizon)
+# Atualizações V1.2.3:
+#   - Modo XHTTP [1] idêntico ao SSHorizon: host="" (livre), ALPN=["http/1.1"], sem trava de serverName,
+#     headers=null, mode="", noSSEHeader=false, scMaxBufferedPosts=30, scMaxEachPostBytes="1000000",
+#     scStreamUpServerSecs="20-80", xPaddingBytes="100-1000"
+#   - Adicionado "statsUserOnline": true na policy level 0
+#   - Mantidas todas as correções de segurança, permissões 750/640 e preservação do users.db
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; read -rp "Enter para continuar...";' ERR
@@ -484,7 +483,7 @@ func_generate_config() {
         read -rp "Pressione Enter..."; return 1
     fi
 
-    local policy='{"levels":{"0":{"statsUserUplink":true,"statsUserDownlink":true}},"system":{"statsInboundUplink":true,"statsInboundDownlink":true}}'
+    local policy='{"levels":{"0":{"statsUserDownlink":true,"statsUserOnline":true,"statsUserUplink":true}},"system":{"statsInboundDownlink":true,"statsInboundUplink":true,"statsOutboundDownlink":false,"statsOutboundUplink":false}}'
     local routing_rules
     routing_rules=$(_build_routing_rules)
 
@@ -494,18 +493,18 @@ func_generate_config() {
         xhttp)
             echo ""
             echo -e "${TXT_CYAN}Modo XHTTP:${RESET}"
-            echo " [1] HTTP Injection / Operadora BR (chip sem dados)"
-            echo " [2] Direto / CDN (conexão direta ou via Azion/Vercel)"
+            echo " [1] Universal / CDN & Payload (Estilo SSHorizon — Recomendado)"
+            echo " [2] HTTP Injection Leve (buffers reduzidos para chip sem dados)"
             echo " [3] SSHXHTTP (SSH via Proxy Porta 80 junto com XHTTP)"
             read -rp "Modo [1/2/3, Enter=1]: " xhttp_mode
             xhttp_mode="${xhttp_mode:-1}"
 
-            local xhttp_host_field="$domain"
+            local xhttp_host_field=""
             echo ""
-            read -rp "Host adicional CDN (Enter = usar só domínio): " extra_host
+            read -rp "Travar Host específico (Enter = livre/aceita qualquer host): " extra_host
             extra_host=$(echo "${extra_host:-}" | tr -d '[:space:][:cntrl:]')
             if [ -n "$extra_host" ]; then
-                xhttp_host_field="${domain},${extra_host}"
+                xhttp_host_field="$extra_host"
             fi
 
             if [ "$xhttp_mode" = "3" ]; then
@@ -517,92 +516,111 @@ func_generate_config() {
             if [ "$xhttp_mode" = "1" ]; then
                 if [ "$use_tls" = "true" ]; then
                     stream_settings=$(jq -n \
-                        --arg dom  "$domain" \
                         --arg crt  "$CRT_FILE" \
                         --arg key  "$KEY_FILE" \
                         --arg host "$xhttp_host_field" \
                         '{network:"xhttp",security:"tls",
-                        sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                        tlsSettings:{serverName:$dom,
+                        tlsSettings:{
                           certificates:[{certificateFile:$crt,keyFile:$key}],
-                          alpn:["http/1.1"],minVersion:"1.2"},
-                        xhttpSettings:{path:"/",host:$host,
-                          scMaxBufferedPosts:3,
-                          scMaxEachPostBytes:"131072",
-                          scStreamUpServerSecs:"5-15",
-                          xPaddingBytes:"0-0",
-                          headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                          alpn:["http/1.1"]},
+                        xhttpSettings:{
+                          headers:null,
+                          host:$host,
+                          mode:"",
+                          noSSEHeader:false,
+                          path:"/",
+                          scMaxBufferedPosts:30,
+                          scMaxEachPostBytes:"1000000",
+                          scStreamUpServerSecs:"20-80",
+                          xPaddingBytes:"100-1000"}}')
                 else
                     stream_settings=$(jq -n \
                         --arg host "$xhttp_host_field" \
                         '{network:"xhttp",security:"none",
-                        sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                        xhttpSettings:{path:"/",host:$host,
-                          scMaxBufferedPosts:3,
-                          scMaxEachPostBytes:"131072",
-                          scStreamUpServerSecs:"5-15",
-                          xPaddingBytes:"0-0",
-                          headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                        xhttpSettings:{
+                          headers:null,
+                          host:$host,
+                          mode:"",
+                          noSSEHeader:false,
+                          path:"/",
+                          scMaxBufferedPosts:30,
+                          scMaxEachPostBytes:"1000000",
+                          scStreamUpServerSecs:"20-80",
+                          xPaddingBytes:"100-1000"}}')
                 fi
             elif [ "$xhttp_mode" = "3" ]; then
                 if [ "$use_tls" = "true" ]; then
                     stream_settings=$(jq -n \
-                        --arg dom  "$domain" \
                         --arg crt  "$CRT_FILE" \
                         --arg key  "$KEY_FILE" \
                         --arg host "$xhttp_host_field" \
                         '{network:"xhttp",security:"tls",
                         sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                        tlsSettings:{serverName:$dom,
+                        tlsSettings:{
                           certificates:[{certificateFile:$crt,keyFile:$key}],
-                          alpn:["h2","http/1.1"],minVersion:"1.2"},
-                        xhttpSettings:{path:"/",host:$host,
+                          alpn:["http/1.1"]},
+                        xhttpSettings:{
+                          headers:null,
+                          host:$host,
+                          mode:"",
+                          noSSEHeader:false,
+                          path:"/",
                           scMaxBufferedPosts:10,
                           scMaxEachPostBytes:"262144",
                           scStreamUpServerSecs:"10-30",
-                          xPaddingBytes:"0-0",
-                          headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                          xPaddingBytes:"0-0"}}')
                 else
                     stream_settings=$(jq -n \
                         --arg host "$xhttp_host_field" \
                         '{network:"xhttp",security:"none",
                         sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                        xhttpSettings:{path:"/",host:$host,
+                        xhttpSettings:{
+                          headers:null,
+                          host:$host,
+                          mode:"",
+                          noSSEHeader:false,
+                          path:"/",
                           scMaxBufferedPosts:10,
                           scMaxEachPostBytes:"262144",
                           scStreamUpServerSecs:"10-30",
-                          xPaddingBytes:"0-0",
-                          headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                          xPaddingBytes:"0-0"}}')
                 fi
             else
                 if [ "$use_tls" = "true" ]; then
                     stream_settings=$(jq -n \
-                        --arg dom  "$domain" \
                         --arg crt  "$CRT_FILE" \
                         --arg key  "$KEY_FILE" \
                         --arg host "$xhttp_host_field" \
                         '{network:"xhttp",security:"tls",
                         sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                        tlsSettings:{serverName:$dom,
+                        tlsSettings:{
                           certificates:[{certificateFile:$crt,keyFile:$key}],
-                          alpn:["h2","http/1.1"],minVersion:"1.2"},
-                        xhttpSettings:{path:"/",host:$host,
-                          scMaxBufferedPosts:30,
-                          scMaxEachPostBytes:"1000000",
-                          scStreamUpServerSecs:"20-80",
-                          xPaddingBytes:"100-1000",
-                          headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                          alpn:["http/1.1"]},
+                        xhttpSettings:{
+                          headers:null,
+                          host:$host,
+                          mode:"",
+                          noSSEHeader:false,
+                          path:"/",
+                          scMaxBufferedPosts:3,
+                          scMaxEachPostBytes:"131072",
+                          scStreamUpServerSecs:"5-15",
+                          xPaddingBytes:"0-0"}}')
                 else
                     stream_settings=$(jq -n \
                         --arg host "$xhttp_host_field" \
                         '{network:"xhttp",security:"none",
                         sockopt:{tcpNoDelay:true,tcpKeepAliveIdle:30,tcpKeepAliveInterval:10},
-                        xhttpSettings:{path:"/",host:$host,
-                          scMaxBufferedPosts:30,
-                          scMaxEachPostBytes:"1000000",
-                          scStreamUpServerSecs:"20-80",
-                          xPaddingBytes:"100-1000",
-                          headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store"}}}')
+                        xhttpSettings:{
+                          headers:null,
+                          host:$host,
+                          mode:"",
+                          noSSEHeader:false,
+                          path:"/",
+                          scMaxBufferedPosts:3,
+                          scMaxEachPostBytes:"131072",
+                          scStreamUpServerSecs:"5-15",
+                          xPaddingBytes:"0-0"}}')
                 fi
             fi ;;
         ws)
@@ -718,7 +736,7 @@ func_generate_config() {
     fi
     sleep 2
 
-    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2.2)"
+    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2.3)"
 
     local status_show="${TXT_RED}FALHA${RESET}"
     if systemctl is-active --quiet xray 2>/dev/null; then
@@ -727,7 +745,7 @@ func_generate_config() {
 
     local tls_msg="${TXT_RED}DESATIVADO${RESET}"
     if [ "$use_tls" = "true" ]; then
-        tls_msg="${TXT_GREEN}ATIVADO (TLS 1.2+)${RESET}"
+        tls_msg="${TXT_GREEN}ATIVADO (TLS)${RESET}"
     fi
 
     echo -e "STATUS: $status_show"
