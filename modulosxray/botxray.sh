@@ -1,8 +1,9 @@
 #!/bin/bash
-# botxray.sh - TURBONET XRAY V1.3.2 (PRO + HÍBRIDO)
-# Atualizações V1.3.2:
-#   - Adicionado wrapper setuid /usr/local/bin/wrap_ssh_sync + /usr/local/bin/ssh_sync.sh
-#     para sincronia híbrida SSH (useradd, chpasswd, userdel, usermod, chage, pkill, passwd)
+# botxray.sh - TURBONET XRAY V1.3.3 (PRO + HÍBRIDO)
+# Correções V1.3.3:
+#   - Verificação via `python3 -c "import ensurepip, venv"` (evita falso positivo do `--help` no Ubuntu/Debian)
+#   - Instalação explícita de `python3-venv` e `python3.X-venv` com `apt-get update` garantido
+#   - Recria `/opt/XrayTools/venv` caso exista uma pasta incompleta sem `bin/pip`
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (codigo: $?)"; read -rp "Enter...";' ERR
@@ -73,25 +74,39 @@ func_install_bot() {
     : > "$LOG_FILE"
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}     INSTALADOR BOT TELEGRAM - V1.3.2 (PRO)      ${RESET}"
+    echo -e "${AMARELO}     INSTALADOR BOT TELEGRAM - V1.3.3 (PRO)      ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
     echo ""
 
     echo "Preparando ambiente..."
     ensure_pkg python3    python3
-    ensure_pkg pip3       python3-pip
     ensure_pkg curl       curl
     ensure_pkg jq         jq
     ensure_pkg gcc        gcc
     ensure_pkg tar        tar
 
-    if ! python3 -m venv --help >/dev/null 2>&1; then
+    # Verifica ensurepip + venv (no Ubuntu/Debian, python3 -m venv --help funciona sem python3-venv)
+    if ! python3 -c "import ensurepip, venv" >/dev/null 2>&1; then
         _detect_pkg_manager
+        local py_ver
+        py_ver=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "")
         case "$_PKG_MANAGER" in
-            apt) apt-get install -y python3-venv >>"$LOG_FILE" 2>&1 || true ;;
+            apt)
+                if [ "$_APT_UPDATED" -eq 0 ]; then
+                    apt-get update -y >>"$LOG_FILE" 2>&1 || true
+                    _APT_UPDATED=1
+                fi
+                apt-get install -y python3-venv ${py_ver:+"python${py_ver}-venv"} >>"$LOG_FILE" 2>&1 || true
+                ;;
             dnf|yum) "$_PKG_MANAGER" install -y python3-virtualenv >>"$LOG_FILE" 2>&1 || true ;;
-            pacman) pacman -Sy --noconfirm python-virtualenv >>"$LOG_FILE" 2>&1 || true ;;
+            pacman)  pacman -Sy --noconfirm python-virtualenv >>"$LOG_FILE" 2>&1 || true ;;
         esac
+    fi
+
+    if ! python3 -c "import ensurepip, venv" >/dev/null 2>&1; then
+        echo -e "${VERMELHO}Falha ao instalar python3-venv (ensurepip indisponivel). Veja: ${LOG_FILE}${RESET}"
+        sleep 2
+        return 1
     fi
 
     mkdir -p /opt/XrayTools
@@ -235,7 +250,8 @@ EOF
     echo -e "${VERDE}Credenciais salvas em ${ENV_FILE}${RESET}"
 
     # --- VENV COM VERSÕES FIXADAS ---
-    if [ ! -d /opt/XrayTools/venv ]; then
+    if [ ! -x /opt/XrayTools/venv/bin/pip ]; then
+        rm -rf /opt/XrayTools/venv
         python3 -m venv /opt/XrayTools/venv
     fi
     echo "Instalando dependencias Python..."
@@ -529,7 +545,7 @@ func_view_logs() {
 while true; do
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.3.2      ${RESET}"
+    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.3.3      ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
 
     status_msg="${VERMELHO}NÃO INSTALADO${RESET}"
