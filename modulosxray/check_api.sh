@@ -1,20 +1,24 @@
 #!/bin/bash
-# check_api.sh - TURBONET XRAY V1.3
-# Correções aplicadas V1.3:
-# - Daemon iniciado com nohup + redirecionamento para $API_LOG (sobrevive ao logout SSH)
-# - ThreadingHTTPServer com allow_reuse_address = True (evita erro TIME_WAIT ao reiniciar)
-# - Correção em days_left() comparando .date() (não marca usuário como expirado no dia do vencimento)
-# - Rate limiting thread-safe em memória com limpeza automática e proteção contra spoof de X-Forwarded-For
-# - Comparação de API Key via hmac.compare_digest() e restart automático ao regenerar chave
+# check_api.sh - TURBONET XRAY V1.4 (PRO + Systemd + Compatibilidade Bot Telegram)
+# Atualizações V1.4:
+#   - Verificação de root (EUID) no início e preservação de permissões 2770 root:botxray em /opt/XrayTools
+#   - Suporte a execução não-interativa (--start / --stop) e configuração de autostart via systemd
+#   - Endpoints /check e /check/status enriquecidos com limite de conexões, consumo de dados (limits.db/usage.db) e active_domain
+#   - Suporte a autenticação via X-API-Key ou Authorization: Bearer + Connection: close no ThreadingHTTPServer
+#   - Verificação dinâmica de firewall (ufw, firewalld, iptables) usando a porta ativa da API
 
 set -Eeuo pipefail
 
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
 
-USER_DB="/opt/XrayTools/users.db"
+XRAYTOOLS_DIR="/opt/XrayTools"
+USER_DB="${XRAYTOOLS_DIR}/users.db"
+LIMITS_DB="${XRAYTOOLS_DIR}/limits.db"
+USAGE_DB="${XRAYTOOLS_DIR}/usage.db"
+ACTIVE_DOMAIN_FILE="${XRAYTOOLS_DIR}/active_domain"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
 PRESET_FILE="/usr/local/etc/xray/preset.json"
-API_KEY_FILE="/opt/XrayTools/.api_key"
+API_KEY_FILE="${XRAYTOOLS_DIR}/.api_key"
 API_PID_FILE="/tmp/turbonet_check_api.pid"
 API_PORT_FILE="/tmp/turbonet_check_api.port"
 API_LOG="/tmp/turbonet_check_api.log"
@@ -27,17 +31,44 @@ TXT_YELLOW='\033[1;33m'
 TITLE_BAR='\033[1;47;34m'
 RESET='\033[0m'
 
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo -e "${TXT_RED}❌ Execute como root!${RESET}"
+    exit 1
+fi
+
+_apply_xraytools_dir_perms() {
+    mkdir -p "$XRAYTOOLS_DIR"
+    if id -u botxray &>/dev/null; then
+        chown root:botxray "$XRAYTOOLS_DIR"
+        chmod 2770 "$XRAYTOOLS_DIR"
+    else
+        chown root:root "$XRAYTOOLS_DIR"
+        chmod 0750 "$XRAYTOOLS_DIR"
+    fi
+}
+
+_get_active_port() {
+    if [ -s "$API_PORT_FILE" ]; then
+        tr -d '[:space:]' < "$API_PORT_FILE"
+    else
+        echo "$DEFAULT_PORT"
+    fi
+}
+
 # ================================================================
 # FUNÇÕES DE AUTENTICAÇÃO
 # ================================================================
 
 install_api_key() {
+    _apply_xraytools_dir_perms
     if [ ! -s "$API_KEY_FILE" ]; then
-        mkdir -p "$(dirname "$API_KEY_FILE")"
         openssl rand -hex 32 > "$API_KEY_FILE"
         chmod 0600 "$API_KEY_FILE"
         chown root:root "$API_KEY_FILE"
         echo -e "${TXT_GREEN}✅ API key gerada: $API_KEY_FILE${RESET}"
+    else
+        chmod 0600 "$API_KEY_FILE"
+        chown root:root "$API_KEY_FILE"
     fi
 }
 
@@ -65,7 +96,7 @@ regenerate_api_key() {
         old_pid=$(cat "$API_PID_FILE" 2>/dev/null || true)
         if [ -n "${old_pid:-}" ] && kill -0 "$old_pid" 2>/dev/null; then
             was_running=true
-            [ -f "$API_PORT_FILE" ] && running_port=$(cat "$API_PORT_FILE" 2>/dev/null || echo "$DEFAULT_PORT")
+            running_port=$(_get_active_port)
         fi
     fi
 
@@ -98,6 +129,11 @@ _port_in_use() {
 _start_api_server() {
     local port="${1:-$DEFAULT_PORT}"
 
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        echo -e "${TXT_RED}❌ Porta inválida: ${port}${RESET}"
+        return 1
+    fi
+
     if [ -f "$API_PID_FILE" ]; then
         local existing_pid
         existing_pid=$(cat "$API_PID_FILE" 2>/dev/null || true)
@@ -127,22 +163,29 @@ _start_api_server() {
 
     echo -e "${TXT_YELLOW}Iniciando API protegida na porta ${port}...${RESET}"
 
-    nohup python3 - "$port" "$api_key" "$USER_DB" "$CONFIG_PATH" "$PRESET_FILE" </dev/null >>"$API_LOG" 2>&1 << 'PYSERVER' &
-import sys, json, os, time, hmac, threading
+    nohup python3 - "$port" "$api_key" "$USER_DB" "$CONFIG_PATH" "$PRESET_FILE" \
+                    "$LIMITS_DB" "$USAGE_DB" "$ACTIVE_DOMAIN_FILE" </dev/null >>"$API_LOG" 2>&1 << 'PYSERVER' &
+import sys, json, os, time, hmac, threading, re
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 
-PORT = int(sys.argv[1])
-API_KEY = sys.argv[2]
-USER_DB = sys.argv[3]
-CFG = sys.argv[4]
-PRESET = sys.argv[5]
+PORT               = int(sys.argv[1])
+API_KEY            = sys.argv[2]
+USER_DB            = sys.argv[3]
+CFG                = sys.argv[4]
+PRESET             = sys.argv[5]
+LIMITS_DB          = sys.argv[6]
+USAGE_DB           = sys.argv[7]
+ACTIVE_DOMAIN_FILE = sys.argv[8]
 
-RATE_LOCK = threading.Lock()
+RATE_LOCK    = threading.Lock()
 RATE_BUCKETS = {}
-RATE_MAX = 60
-RATE_WINDOW = 60
+RATE_MAX     = 60
+RATE_WINDOW  = 60
+
+NICK_RE = re.compile(r'^[a-zA-Z0-9_-]{1,32}$')
+UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
@@ -162,14 +205,45 @@ def is_process_running(proc_name):
         pass
     return False
 
-def load_db():
-    users = {}
-    if os.path.exists(USER_DB):
-        with open(USER_DB, 'r', encoding='utf-8', errors='replace') as f:
+def load_kv_int(path):
+    data = {}
+    if not os.path.exists(path):
+        return data
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
             for line in f:
                 parts = line.strip().split('|')
-                if len(parts) >= 3 and parts[0]:
-                    users[parts[0].lower()] = {'uuid': parts[1], 'expiry': parts[2]}
+                if len(parts) >= 2 and parts[0] and parts[1].strip().isdigit():
+                    data[parts[0].lower().strip()] = int(parts[1].strip())
+    except Exception:
+        pass
+    return data
+
+def load_db():
+    users = {}
+    limits_map = load_kv_int(LIMITS_DB)
+    usage_map  = load_kv_int(USAGE_DB)
+
+    if os.path.exists(USER_DB):
+        try:
+            with open(USER_DB, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split('|')
+                    if len(parts) >= 3 and parts[0]:
+                        nick = parts[0].lower().strip()
+                        conn_limit = int(parts[4].strip()) if len(parts) > 4 and parts[4].strip().isdigit() else 0
+                        users[nick] = {
+                            'uuid':             parts[1].strip(),
+                            'expiry':           parts[2].strip(),
+                            'connection_limit': conn_limit,
+                            'data_limit_bytes': limits_map.get(nick, 0),
+                            'data_used_bytes':  usage_map.get(nick, 0),
+                        }
+        except Exception:
+            pass
     return users
 
 def is_locked(nick, cfg_data):
@@ -208,11 +282,22 @@ def load_preset():
     except Exception:
         return {}
 
+def get_active_domain(preset):
+    dom = preset.get('domain', '')
+    if dom:
+        return dom
+    try:
+        if os.path.exists(ACTIVE_DOMAIN_FILE):
+            with open(ACTIVE_DOMAIN_FILE, 'r', encoding='utf-8') as f:
+                return f.read().strip()
+    except Exception:
+        pass
+    return ''
+
 def check_rate_limit(ip):
     now = time.time()
     cutoff = now - RATE_WINDOW
     with RATE_LOCK:
-        # Limpeza periódica para evitar crescimento de memória
         if len(RATE_BUCKETS) > 1024:
             stale = [k for k, v in RATE_BUCKETS.items() if not v or v[-1] <= cutoff]
             for k in stale:
@@ -238,12 +323,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Connection', 'close')
         self.end_headers()
         self.wfile.write(body)
 
     def get_client_ip(self):
         peer_ip = self.client_address[0]
-        # Aceita cabeçalhos de encaminhamento apenas se vierem de proxy reverso local
         if peer_ip in ('127.0.0.1', '::1'):
             xff = self.headers.get('X-Forwarded-For')
             if xff:
@@ -254,8 +339,14 @@ class Handler(BaseHTTPRequestHandler):
         return peer_ip
 
     def check_auth(self):
+        if not API_KEY:
+            return False
         provided_key = self.headers.get('X-API-Key', '').strip()
-        if not provided_key or not API_KEY:
+        if not provided_key:
+            auth_hdr = self.headers.get('Authorization', '').strip()
+            if auth_hdr.lower().startswith('bearer '):
+                provided_key = auth_hdr[7:].strip()
+        if not provided_key:
             return False
         return hmac.compare_digest(provided_key, API_KEY)
 
@@ -277,7 +368,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/health':
                 self.send_json(200, {
                     'status': 'ok',
-                    'service': 'TURBONET XRAY Check API V1.3',
+                    'service': 'TURBONET XRAY Check API V1.4',
                     'version': 'auth_required'
                 })
                 return
@@ -310,7 +401,7 @@ class Handler(BaseHTTPRequestHandler):
                     'xray': 'active' if xray_ok else 'inactive',
                     'protocol': preset.get('network', ''),
                     'port': preset.get('port', ''),
-                    'domain': preset.get('domain', ''),
+                    'domain': get_active_domain(preset),
                     'users': {
                         'total': total,
                         'active': active,
@@ -326,7 +417,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 if 'user' in qs:
                     nick = qs['user'][0].lower().strip()
-                    if nick not in users:
+                    if not NICK_RE.match(nick) or nick not in users:
                         self.send_json(404, {
                             'error': 'user_not_found',
                             'name': nick
@@ -343,12 +434,18 @@ class Handler(BaseHTTPRequestHandler):
                         'expiry': u['expiry'],
                         'status': user_status(u['expiry'], locked),
                         'days_left': dl,
-                        'locked': locked
+                        'locked': locked,
+                        'connection_limit': u['connection_limit'],
+                        'data_limit_bytes': u['data_limit_bytes'],
+                        'data_used_bytes': u['data_used_bytes']
                     })
                     return
 
                 if 'uuid' in qs:
                     target_uuid = qs['uuid'][0].lower().strip()
+                    if not UUID_RE.match(target_uuid):
+                        self.send_json(404, {'error': 'uuid_not_found'})
+                        return
                     for nick, u in users.items():
                         if u['uuid'].lower() == target_uuid:
                             locked = is_locked(nick, cfg_data)
@@ -359,7 +456,10 @@ class Handler(BaseHTTPRequestHandler):
                                 'expiry': u['expiry'],
                                 'status': user_status(u['expiry'], locked),
                                 'days_left': dl,
-                                'locked': locked
+                                'locked': locked,
+                                'connection_limit': u['connection_limit'],
+                                'data_limit_bytes': u['data_limit_bytes'],
+                                'data_used_bytes': u['data_used_bytes']
                             })
                             return
                     self.send_json(404, {'error': 'uuid_not_found'})
@@ -393,7 +493,7 @@ PYSERVER
         echo "$server_pid" > "$API_PID_FILE"
         echo "$port" > "$API_PORT_FILE"
         chmod 0600 "$API_PID_FILE" "$API_PORT_FILE"
-        echo -e "${TXT_GREEN}✅ API protegida iniciada! PID: ${server_pid}${RESET}"
+        echo -e "${TXT_GREEN}✅ API protegida V1.4 iniciada! PID: ${server_pid}${RESET}"
         echo ""
         echo -e " ${TXT_CYAN}Endpoints disponíveis:${RESET}"
         echo ""
@@ -401,8 +501,10 @@ PYSERVER
         echo -e "   GET /health — Status do serviço"
         echo ""
         echo -e " ${TXT_YELLOW}PROTEGIDOS (requer X-API-Key):${RESET}"
-        local pub_ip
-        pub_ip=$(curl -4fsSL --max-time 5 https://icanhazip.com 2>/dev/null || echo "SEU_IP")
+        local pub_ip="SEU_IP"
+        if command -v curl &>/dev/null; then
+            pub_ip=$(curl -4fsSL --max-time 5 https://icanhazip.com 2>/dev/null || echo "SEU_IP")
+        fi
         echo -e "   GET http://${pub_ip}:${port}/check?user=NOME"
         echo -e "   GET http://${pub_ip}:${port}/check?uuid=UUID"
         echo -e "   GET http://${pub_ip}:${port}/check/status"
@@ -476,43 +578,108 @@ _test_api() {
     echo ""
 
     echo -e "${TXT_YELLOW}[GET /health] — SEM AUTENTICAÇÃO${RESET}"
-    curl -s "http://127.0.0.1:${port}/health" | python3 -m json.tool 2>/dev/null || \
-    curl -s "http://127.0.0.1:${port}/health"
+    curl -fsS --max-time 5 "http://127.0.0.1:${port}/health" | python3 -m json.tool 2>/dev/null || \
+    curl -fsS --max-time 5 "http://127.0.0.1:${port}/health" || echo "Falha no /health"
     echo ""
 
     echo -e "${TXT_YELLOW}[GET /check/status] — SEM API KEY (deve falhar 401)${RESET}"
-    curl -s "http://127.0.0.1:${port}/check/status" | python3 -m json.tool 2>/dev/null || \
-    curl -s "http://127.0.0.1:${port}/check/status"
+    curl -s --max-time 5 "http://127.0.0.1:${port}/check/status" | python3 -m json.tool 2>/dev/null || \
+    curl -s --max-time 5 "http://127.0.0.1:${port}/check/status"
     echo ""
 
     echo -e "${TXT_YELLOW}[GET /check/status] — COM API KEY CORRETA${RESET}"
-    curl -s -H "X-API-Key: ${api_key}" "http://127.0.0.1:${port}/check/status" | python3 -m json.tool 2>/dev/null || \
-    curl -s -H "X-API-Key: ${api_key}" "http://127.0.0.1:${port}/check/status"
+    curl -fsS --max-time 5 -H "X-API-Key: ${api_key}" "http://127.0.0.1:${port}/check/status" | python3 -m json.tool 2>/dev/null || \
+    curl -fsS --max-time 5 -H "X-API-Key: ${api_key}" "http://127.0.0.1:${port}/check/status" || echo "Falha no /check/status"
     echo ""
 
     if [ -s "$USER_DB" ]; then
         local first_user
         first_user=$(head -1 "$USER_DB" | cut -d'|' -f1)
         echo -e "${TXT_YELLOW}[GET /check?user=${first_user}] — COM API KEY${RESET}"
-        curl -s -H "X-API-Key: ${api_key}" "http://127.0.0.1:${port}/check?user=${first_user}" | python3 -m json.tool 2>/dev/null || \
-        curl -s -H "X-API-Key: ${api_key}" "http://127.0.0.1:${port}/check?user=${first_user}"
+        curl -fsS --max-time 5 -H "X-API-Key: ${api_key}" "http://127.0.0.1:${port}/check?user=${first_user}" | python3 -m json.tool 2>/dev/null || \
+        curl -fsS --max-time 5 -H "X-API-Key: ${api_key}" "http://127.0.0.1:${port}/check?user=${first_user}" || echo "Falha no /check"
         echo ""
     fi
 
     echo -e "${TXT_CYAN}✅ Testes concluídos!${RESET}"
 }
 
+_check_firewall() {
+    local port
+    port=$(_get_active_port)
+
+    echo ""
+    echo -e "${TXT_CYAN}Verificando firewall para porta ${port}/tcp...${RESET}"
+
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        if ufw status 2>/dev/null | grep -q "${port}/tcp"; then
+            echo -e "${TXT_GREEN}✅ Porta ${port}/tcp liberada no UFW${RESET}"
+        else
+            echo -e "${TXT_YELLOW}⚠ Porta ${port}/tcp não encontrada no UFW${RESET}"
+            echo "Execute: ufw allow ${port}/tcp"
+        fi
+    elif command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
+        if firewall-cmd --list-ports 2>/dev/null | grep -q "${port}/tcp"; then
+            echo -e "${TXT_GREEN}✅ Porta ${port}/tcp liberada no firewalld${RESET}"
+        else
+            echo -e "${TXT_YELLOW}⚠ Porta ${port}/tcp não encontrada no firewalld${RESET}"
+            echo "Execute: firewall-cmd --permanent --add-port=${port}/tcp && firewall-cmd --reload"
+        fi
+    elif command -v iptables &>/dev/null; then
+        if iptables -L INPUT -n 2>/dev/null | grep -q "dpt:${port}"; then
+            echo -e "${TXT_GREEN}✅ Porta ${port}/tcp encontrada no iptables${RESET}"
+        else
+            echo -e "${TXT_YELLOW}⚠ Regra explícita para ${port}/tcp não encontrada no iptables${RESET}"
+        fi
+    fi
+}
+
+_setup_autostart() {
+    local port="${1:-$DEFAULT_PORT}"
+    local script_path
+    script_path="$(readlink -f "$0")"
+    chmod +x "$script_path" 2>/dev/null || true
+
+    cat > /etc/systemd/system/turbonet-checkapi.service << EOF
+[Unit]
+Description=TURBONET XRAY Check API Service
+After=network.target xray.service
+
+[Service]
+Type=forking
+ExecStart=${script_path} --start ${port}
+ExecStop=${script_path} --stop
+PIDFile=${API_PID_FILE}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable turbonet-checkapi >/dev/null 2>&1
+    echo -e "${TXT_GREEN}✅ API /check configurada para iniciar automaticamente na porta ${port}.${RESET}"
+}
+
+# ================================================================
+# MODO NÃO-INTERATIVO (SYSTEMD)
+# ================================================================
+
+if [ "${1:-}" = "--start" ]; then
+    _start_api_server "${2:-$DEFAULT_PORT}"
+    exit 0
+elif [ "${1:-}" = "--stop" ]; then
+    _stop_api_server
+    exit 0
+fi
+
 # ================================================================
 # MENU PRINCIPAL
 # ================================================================
 
-if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    echo -e "${TXT_RED}❌ Execute como root!${RESET}"; exit 1
-fi
-
 while true; do
     clear
-    echo -e "${TITLE_BAR} API /CHECK — TURBONET XRAY V1.3 ${RESET}"
+    echo -e "${TITLE_BAR} API /CHECK — TURBONET XRAY V1.4 ${RESET}"
     echo ""
     echo -e " Status:$(_api_status)"
     echo ""
@@ -523,7 +690,8 @@ while true; do
     echo -e "${TXT_CYAN}[5] Ver API Key atual${RESET}"
     echo -e "${TXT_YELLOW}[6] Gerar nova API Key${RESET}"
     echo -e "${TXT_CYAN}[7] Ver logs${RESET}"
-    echo -e "${TXT_YELLOW}[8] Verificar firewall (ufw)${RESET}"
+    echo -e "${TXT_YELLOW}[8] Verificar firewall${RESET}"
+    echo -e "${TXT_CYAN}[9] Configurar início automático (systemd)${RESET}"
     echo -e "${TXT_CYAN}[0] Voltar${RESET}"
     echo "-----------------------------------------"
     read -rp "Opção: " opt
@@ -532,7 +700,7 @@ while true; do
         1) _start_api_server "$DEFAULT_PORT"; read -rp "Enter..." ;;
         2)
             read -rp "Porta (1024-65535): " custom_port
-            if [[ "$custom_port" =~ ^[0-9]+$ ]] && \
+            if [[ "${custom_port:-}" =~ ^[0-9]+$ ]] && \
                [ "$custom_port" -ge 1024 ] && [ "$custom_port" -le 65535 ]; then
                 _start_api_server "$custom_port"
             else
@@ -567,15 +735,17 @@ while true; do
             read -rp "Enter..."
         ;;
         8)
-            echo ""
-            echo -e "${TXT_CYAN}Verificando firewall...${RESET}"
-            if command -v ufw &>/dev/null; then
-                echo "Regras UFW ativas:"
-                ufw status numbered 2>/dev/null || echo "UFW desabilitado"
+            _check_firewall
+            read -rp "Enter..."
+        ;;
+        9)
+            read -rp "Porta para autostart [${DEFAULT_PORT}]: " ap
+            [ -z "${ap:-}" ] && ap="$DEFAULT_PORT"
+            if [[ "$ap" =~ ^[0-9]+$ ]] && [ "$ap" -ge 1024 ] && [ "$ap" -le 65535 ]; then
+                _setup_autostart "$ap"
+            else
+                echo -e "${TXT_RED}Porta inválida.${RESET}"
             fi
-            echo ""
-            echo -e "${TXT_YELLOW}Para abrir porta ${DEFAULT_PORT}:${RESET}"
-            echo "  ufw allow ${DEFAULT_PORT}/tcp"
             read -rp "Enter..."
         ;;
         0) exit 0 ;;
