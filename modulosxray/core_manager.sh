@@ -1,10 +1,8 @@
 #!/bin/bash
-# core_manager.sh - TURBONET XRAY V1.2.5 (Perfil XHTTP Universal + Compatibilidade Bot Telegram)
-# Atualizações V1.2.5:
-#   - Corrigido retorno falso (código 1) em _apply_xraytools_perms quando connection_info.txt ainda não existe
-#   - Preservada permissão 700 root:root em /opt/TurbonetCoreSSL/renew_cert.sh dentro de _apply_config_perms
-#   - Sincronização automática do CN/SAN gravado em active_domain após execução do certxray.sh
-#   - Evitado disparo duplicado do trap ERR na linha 998 após mensagens tratadas no assistente
+# core_manager.sh - TURBONET XRAY V1.2.6 (Perfil XHTTP Universal + Compatibilidade Bot Telegram)
+# Atualizações V1.2.6:
+#   - Garante automaticamente que o usuário `botxray` pertença ao grupo dono do Xray (`${XRAY_GROUP}`) em _apply_config_perms
+#   - Mantidas correções de retorno em _apply_xraytools_perms e permissões 700 em renew_cert.sh
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; read -rp "Enter para continuar...";' ERR
@@ -147,6 +145,10 @@ _apply_config_perms() {
     local dir_mode="750"
     local file_mode="640"
     if id -u botxray &>/dev/null; then
+        if ! id -nG botxray 2>/dev/null | grep -qw "${XRAY_GROUP}"; then
+            usermod -aG "${XRAY_GROUP}" botxray 2>/dev/null || true
+            systemctl restart botxray >/dev/null 2>&1 || true
+        fi
         dir_mode="2770"
         file_mode="660"
     fi
@@ -799,7 +801,7 @@ func_generate_config() {
     fi
     sleep 2
 
-    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2.5)"
+    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2.6)"
 
     local status_show="${TXT_RED}FALHA${RESET}"
     if systemctl is-active --quiet xray 2>/dev/null; then
@@ -1014,7 +1016,7 @@ func_wizard_install() {
 # --- MENU INTERATIVO ---
 while true; do
     clear
-    echo -e "${TITLE_BAR}   CORE MANAGER — TURBONET XRAY V1.2.5   ${RESET}"
+    echo -e "${TITLE_BAR}   CORE MANAGER — TURBONET XRAY V1.2.6   ${RESET}"
     echo ""
 
     if systemctl is-active --quiet xray 2>/dev/null; then
