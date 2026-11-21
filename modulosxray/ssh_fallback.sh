@@ -1,12 +1,11 @@
 #!/bin/bash
-# ssh_fallback.sh - TURBONET XRAY V2.1 (OpenSSH Nativo)
-# Correções aplicadas V2.1:
-#   - Proxy 80: separação exata de cabeçalho HTTP (\r\n\r\n) preservando bytes subsequentes
-#   - Proxy 80: suporte a HTTP Payload (CONNECT/GET/POST -> 200 OK -> SSH), WebSocket (101) e TCP direto
-#   - Proxy 80: encerramento simétrico de conexões (FIRST_COMPLETED) evitando sockets presos
-#   - OpenSSH PAM: garante /bin/false em /etc/shells para evitar rejeição de login
-#   - Xray Fallback: valida protocolo VLESS + transporte compatível e testa config com `xray run -test`
-#   - Permissões dinâmicas 750/640 root:$XRAY_GROUP no diretório e no config.json
+# ssh_fallback.sh - TURBONET XRAY V2.2 (OpenSSH Nativo + Proxy 80 + Compatibilidade Bot)
+# Atualizações V2.2:
+#   - _apply_config_perms preserva permissões 2770/0660 quando o usuário `botxray` existe
+#   - Proxy 80: suporte a WebSocket Ping/Pong (0x9 -> 0xA), Close (0x8) e TCP_NODELAY
+#   - Systemd: Alias=turbonet-sshfallback.service para parada limpa durante renovação SSL (certxray.sh)
+#   - OpenSSH: configuração segura via drop-in /etc/ssh/sshd_config.d/99-turbonet-ssh.conf (PasswordAuthentication yes)
+#   - Proteção de UID >= 1000 ao sincronizar, criar ou remover usuários SSH
 
 set -Eeuo pipefail
 
@@ -20,6 +19,8 @@ trap '_cleanup' EXIT
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO"; sleep 2' ERR
 
 CONFIG_PATH="/usr/local/etc/xray/config.json"
+PRESET_FILE="/usr/local/etc/xray/preset.json"
+ACTIVE_DOMAIN_FILE="/opt/XrayTools/active_domain"
 USER_DB="/opt/XrayTools/users.db"
 XRAY_BIN="/usr/local/bin/xray"
 SSH_PORT=22
@@ -82,14 +83,21 @@ _apply_config_perms() {
     local cfg_dir
     cfg_dir="$(dirname "$CONFIG_PATH")"
 
+    local dir_mode="750"
+    local file_mode="0640"
+    if id -u botxray &>/dev/null; then
+        dir_mode="2770"
+        file_mode="0660"
+    fi
+
     if [ -d "$cfg_dir" ]; then
         chown "root:${XRAY_GROUP}" "$cfg_dir"
-        chmod 750 "$cfg_dir"
+        chmod "$dir_mode" "$cfg_dir"
     fi
 
     if [ -f "$CONFIG_PATH" ]; then
         chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
-        chmod 0640 "$CONFIG_PATH"
+        chmod "$file_mode" "$CONFIG_PATH"
     fi
 }
 
@@ -116,6 +124,63 @@ _wait_xray_active() {
 _ensure_false_shell() {
     if [ -f /etc/shells ] && ! grep -qxF "/bin/false" /etc/shells 2>/dev/null; then
         echo "/bin/false" >> /etc/shells
+    fi
+}
+
+_is_protected_account() {
+    local u="$1"
+    case "$u" in
+        root|nobody|nogroup|botxray|ubuntu|debian|opc|centos|admin|www-data) return 0 ;;
+    esac
+    if id "$u" &>/dev/null; then
+        local uid
+        uid=$(id -u "$u" 2>/dev/null || echo 0)
+        [ "$uid" -lt 1000 ] && return 0
+    fi
+    return 1
+}
+
+_ensure_openssh_password_auth() {
+    local ssh_svc=""
+    if systemctl list-unit-files 2>/dev/null | grep -q '^ssh\.service'; then
+        ssh_svc="ssh"
+    elif systemctl list-unit-files 2>/dev/null | grep -q '^sshd\.service'; then
+        ssh_svc="sshd"
+    else
+        return 0
+    fi
+
+    local changed=0
+    if [ -d /etc/ssh/sshd_config.d ] && grep -qiE '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config 2>/dev/null; then
+        local dropin="/etc/ssh/sshd_config.d/99-turbonet-ssh.conf"
+        if [ ! -f "$dropin" ]; then
+            cat > "$dropin" << 'SSHEOF'
+# TURBONET XRAY - Habilita autenticação por senha e túnel TCP para clientes VPN
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+AllowTcpForwarding yes
+ClientAliveInterval 30
+ClientAliveCountMax 3
+SSHEOF
+            chmod 0644 "$dropin"
+            changed=1
+        fi
+    elif [ -f /etc/ssh/sshd_config ]; then
+        if grep -qiE '^\s*PasswordAuthentication\s+no' /etc/ssh/sshd_config; then
+            cp -f /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.turbonet
+            sed -i -E 's/^\s*PasswordAuthentication\s+no/PasswordAuthentication yes/I' /etc/ssh/sshd_config
+            changed=1
+        fi
+    fi
+
+    if [ "$changed" -eq 1 ]; then
+        if command -v sshd &>/dev/null && ! sshd -t >>"$LOG_FILE" 2>&1; then
+            rm -f /etc/ssh/sshd_config.d/99-turbonet-ssh.conf 2>/dev/null || true
+            [ -f /etc/ssh/sshd_config.bak.turbonet ] && mv -f /etc/ssh/sshd_config.bak.turbonet /etc/ssh/sshd_config
+            echo -e "${TXT_YELLOW}⚠  Ajuste automático no sshd_config revertido por falha de sintaxe.${RESET}"
+            return 0
+        fi
+        systemctl reload "$ssh_svc" >/dev/null 2>&1 || systemctl restart "$ssh_svc" >/dev/null 2>&1 || true
     fi
 }
 
@@ -204,6 +269,8 @@ _configure_xray_fallback() {
         systemctl restart xray >/dev/null 2>&1 || true
         return 1
     fi
+
+    _ensure_openssh_password_auth
     echo -e "${TXT_GREEN}✅ Fallback configurado: porta 443 → OpenSSH :22${RESET}"
 }
 
@@ -222,6 +289,12 @@ _remove_xray_fallback() {
         mv -f "$tmp" "$CONFIG_PATH"
         _TMP_FILES=("${_TMP_FILES[@]/$tmp}")
         _apply_config_perms
+        if ! _test_xray_config "$CONFIG_PATH" >>"$LOG_FILE" 2>&1; then
+            mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+            _apply_config_perms
+            echo -e "${TXT_RED}❌ Falha na validação ao remover fallbacks.${RESET}"
+            return 1
+        fi
         systemctl restart xray >/dev/null 2>&1 || true
         echo -e "${TXT_GREEN}✅ Fallbacks removidos.${RESET}"
     else
@@ -235,23 +308,34 @@ _setup_proxy80() {
 
     if ss -tlnp 2>/dev/null | grep -q ":80 "; then
         echo -e "${TXT_YELLOW}⚠  Porta 80 em uso. Liberando...${RESET}"
-        systemctl stop nginx   2>/dev/null || true
-        systemctl stop apache2 2>/dev/null || true
+        systemctl stop turbonet-proxy80 2>/dev/null || true
+        systemctl stop nginx            2>/dev/null || true
+        systemctl stop apache2          2>/dev/null || true
+        systemctl stop caddy            2>/dev/null || true
         fuser -k 80/tcp 2>/dev/null || true
         sleep 1
     fi
 
     ensure_pkg python3 python3
+    _ensure_openssh_password_auth
 
     cat > /usr/local/bin/turbonet-proxy80.py << 'PYEOF'
 #!/usr/bin/env python3
-import asyncio, base64, hashlib
+import asyncio, base64, hashlib, socket
 
-LISTEN_PORT = 80
-SSH_HOST    = "127.0.0.1"
-SSH_PORT    = 22
-WS_MAGIC    = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+LISTEN_PORT  = 80
+SSH_HOST     = "127.0.0.1"
+SSH_PORT     = 22
+WS_MAGIC     = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 HTTP_METHODS = (b"GET ", b"POST", b"HEAD", b"PUT ", b"OPT ", b"CONN", b"PATC", b"DELE")
+
+def set_nodelay(writer):
+    sock = writer.get_extra_info("socket")
+    if sock is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
 
 async def pipe(src_r, dst_w):
     try:
@@ -282,6 +366,7 @@ async def bridge_tasks(task_a, task_b):
 
 async def handle_client(reader, writer):
     ssh_w = None
+    set_nodelay(writer)
     try:
         peek = await asyncio.wait_for(reader.read(4), timeout=10.0)
         if not peek:
@@ -302,14 +387,20 @@ async def handle_client(reader, writer):
             head_lower = raw_head.lower()
             is_ws = (b"upgrade: websocket" in head_lower) or (b"upgrade:websocket" in head_lower)
 
-            ssh_r, ssh_w = await asyncio.open_connection(SSH_HOST, SSH_PORT)
-
             if is_ws:
                 ws_key = b""
                 for line in raw_head.split(b"\r\n"):
                     if line.lower().startswith(b"sec-websocket-key:"):
                         ws_key = line.split(b":", 1)[1].strip()
                         break
+                if not ws_key:
+                    writer.write(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                    await writer.drain()
+                    return
+
+                ssh_r, ssh_w = await asyncio.open_connection(SSH_HOST, SSH_PORT)
+                set_nodelay(ssh_w)
+
                 accept = ws_accept_key(ws_key)
                 response = (
                     b"HTTP/1.1 101 Switching Protocols\r\n"
@@ -320,10 +411,13 @@ async def handle_client(reader, writer):
                 writer.write(response)
                 await writer.drain()
 
-                t1 = asyncio.create_task(ws_to_ssh(reader, ssh_w, leftover))
+                t1 = asyncio.create_task(ws_to_ssh(reader, writer, ssh_w, leftover))
                 t2 = asyncio.create_task(ssh_to_ws(ssh_r, writer))
                 await bridge_tasks(t1, t2)
             else:
+                ssh_r, ssh_w = await asyncio.open_connection(SSH_HOST, SSH_PORT)
+                set_nodelay(ssh_w)
+
                 # Resposta HTTP 200 para payloads HTTP/CONNECT antes de iniciar o túnel SSH
                 writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 await writer.drain()
@@ -336,6 +430,7 @@ async def handle_client(reader, writer):
                 await bridge_tasks(t1, t2)
         else:
             ssh_r, ssh_w = await asyncio.open_connection(SSH_HOST, SSH_PORT)
+            set_nodelay(ssh_w)
             ssh_w.write(peek)
             await ssh_w.drain()
 
@@ -357,7 +452,7 @@ async def handle_client(reader, writer):
         except Exception:
             pass
 
-async def ws_to_ssh(ws_reader, ssh_writer, initial_buf=b""):
+async def ws_to_ssh(ws_reader, ws_writer, ssh_writer, initial_buf=b""):
     buf = bytearray(initial_buf)
 
     async def read_exact(n):
@@ -388,9 +483,22 @@ async def ws_to_ssh(ws_reader, ssh_writer, initial_buf=b""):
             payload = await read_exact(length)
             if masked:
                 payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
             if opcode == 0x8:
+                # Close frame: responde Close (0x88) e encerra
+                try:
+                    ws_writer.write(b"\x88\x00")
+                    await ws_writer.drain()
+                except Exception:
+                    pass
                 break
-            if opcode in (0x1, 0x2, 0x0):
+            elif opcode == 0x9:
+                # Ping frame: responde Pong (0x8A) mantendo o túnel vivo em CDNs
+                pong_len = len(payload)
+                if pong_len < 126:
+                    ws_writer.write(bytes([0x8A, pong_len]) + payload)
+                    await ws_writer.drain()
+            elif opcode in (0x1, 0x2, 0x0):
                 ssh_writer.write(payload)
                 await ssh_writer.drain()
     except Exception:
@@ -441,6 +549,7 @@ LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
+Alias=turbonet-sshfallback.service
 SVCEOF
 
     systemctl daemon-reload
@@ -448,8 +557,10 @@ SVCEOF
     systemctl restart turbonet-proxy80 >/dev/null 2>&1
     sleep 2
 
-    local pub_ip
-    pub_ip=$(curl -4fsSL --max-time 5 https://icanhazip.com 2>/dev/null || echo "SEU_IP")
+    local pub_ip="SEU_IP"
+    if command -v curl &>/dev/null; then
+        pub_ip=$(curl -4fsSL --max-time 5 https://icanhazip.com 2>/dev/null || echo "SEU_IP")
+    fi
 
     if systemctl is-active --quiet turbonet-proxy80 2>/dev/null; then
         echo ""
@@ -473,6 +584,7 @@ _remove_proxy80() {
     systemctl stop    turbonet-proxy80 >/dev/null 2>&1 || true
     systemctl disable turbonet-proxy80 >/dev/null 2>&1 || true
     rm -f /etc/systemd/system/turbonet-proxy80.service
+    rm -f /etc/systemd/system/turbonet-sshfallback.service
     rm -f /usr/local/bin/turbonet-proxy80.py
     systemctl daemon-reload
     echo -e "${TXT_GREEN}✅ Proxy porta 80 removido.${RESET}"
@@ -485,11 +597,15 @@ _sync_ssh_users() {
     [ -s "$USER_DB" ] || { echo -e "${TXT_YELLOW}DB vazio.${RESET}"; return; }
 
     _ensure_false_shell
+    _ensure_openssh_password_auth
     local today_ts
     today_ts=$(date -d "$(date +%F)" +%s)
 
     while IFS='|' read -r nick uuid expiry pass limit _rest; do
-        [ -n "${nick:-}" ] && [ -n "${pass:-}" ] || continue
+        nick=$(echo "${nick:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+        [ -n "$nick" ] && [[ ! "$nick" =~ ^# ]] && [ -n "${pass:-}" ] || continue
+        [[ "$nick" =~ ^[a-z0-9_-]{3,32}$ ]] || continue
+        _is_protected_account "$nick" && continue
 
         local exp_ts
         exp_ts=$(date -d "${expiry:-2000-01-01}" +%s 2>/dev/null || echo 0)
@@ -522,11 +638,17 @@ _sync_ssh_users() {
 }
 
 _show_info() {
-    local pub_ip
-    pub_ip=$(curl -4fsSL --max-time 5 https://icanhazip.com 2>/dev/null || echo "SEU_IP")
+    local pub_ip="SEU_IP"
+    if command -v curl &>/dev/null; then
+        pub_ip=$(curl -4fsSL --max-time 5 https://icanhazip.com 2>/dev/null || echo "SEU_IP")
+    fi
     local preset_domain=""
-    [ -f "/usr/local/etc/xray/preset.json" ] && \
-        preset_domain=$(jq -r '.domain // ""' /usr/local/etc/xray/preset.json 2>/dev/null || echo "")
+    if [ -f "$PRESET_FILE" ]; then
+        preset_domain=$(jq -r '.domain // ""' "$PRESET_FILE" 2>/dev/null || echo "")
+    fi
+    if [ -z "$preset_domain" ] && [ -s "$ACTIVE_DOMAIN_FILE" ]; then
+        preset_domain=$(tr -d '[:space:]' < "$ACTIVE_DOMAIN_FILE")
+    fi
 
     clear
     echo -e "${TITLE_BAR}   INFO DE CONEXÃO SSH XHTTP   ${RESET}"
@@ -551,7 +673,7 @@ _show_info() {
 # --- MENU ---
 while true; do
     clear
-    echo -e "${TITLE_BAR}   SSH FALLBACK + PROXY — TURBONET XRAY   ${RESET}"
+    echo -e "${TITLE_BAR}   SSH FALLBACK + PROXY — TURBONET XRAY V2.2   ${RESET}"
     echo ""
     echo -e " Servidor SSH:    $(_openssh_status)"
     echo -e " Xray Fallback:   $(_xray_fallback_status)"
@@ -583,10 +705,13 @@ while true; do
         4) _sync_ssh_users;            read -rp "Enter..." ;;
         5)
             read -rp "Nome: " sn; read -rp "Senha: " sp
-            sn=$(echo "${sn:-}" | tr -cd 'a-zA-Z0-9_-')
+            sn=$(echo "${sn:-}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
             sp=$(echo "${sp:-}" | tr -d '[:space:]')
-            if [[ "$sn" =~ ^[a-zA-Z0-9_-]{3,32}$ ]] && [ -n "$sp" ]; then
+            if _is_protected_account "$sn"; then
+                echo -e "${TXT_RED}❌ Usuário protegido do sistema não pode ser modificado.${RESET}"
+            elif [[ "$sn" =~ ^[a-z0-9_-]{3,32}$ ]] && [ -n "$sp" ]; then
                 _ensure_false_shell
+                _ensure_openssh_password_auth
                 id "$sn" &>/dev/null || useradd -M -s /bin/false "$sn" 2>/dev/null || true
                 usermod -U "$sn" 2>/dev/null || true
                 chage -E -1 "$sn" 2>/dev/null || true
