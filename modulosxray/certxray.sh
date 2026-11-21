@@ -1,14 +1,20 @@
 #!/bin/bash
-# certxray.sh - TURBONET XRAY V1.2
-# Correções aplicadas V1.2:
-#   - Adicionada extensão Subject Alternative Name (SAN: DNS/IP) no certificado autoassinado
-#   - Controle completo de serviços na porta 80 (xray, nginx, apache2, caddy, turbonet-sshfallback) na emissão e no cron
-#   - Mapeamento multi-distro para o comando dig (dnsutils / bind-utils / bind)
-#   - Atualização segura de tlsSettings.serverName (apenas quando security=="tls") e preset.json
-#   - Verificação require_root e proteção chmod 600 em privkey.pem.bak e active_domain
-#   - Cron agendado nos dias 1 e 15 de cada mês para redundância na renovação
+# certxray.sh - TURBONET XRAY V1.3 (PRO + Compatibilidade Bot Telegram)
+# Atualizações V1.3:
+#   - _apply_xraytools_perms e _apply_config_perms preservam permissões 2770/0660 quando o usuário `botxray` existe
+#   - _update_xray_sni mantém active_domain, preset.json e config.json sincronizados + validação `xray run -test`
+#   - Normalização de domínio em minúsculas e garantia de `curl` antes da detecção de IP público
+#   - Cleanup centralizado via trap para arquivos temporários
 
 set -Eeuo pipefail
+
+_TMP_FILES=()
+_cleanup() {
+    for f in "${_TMP_FILES[@]:-}"; do
+        [ -n "$f" ] && rm -f "$f" 2>/dev/null || true
+    done
+}
+trap '_cleanup' EXIT
 
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
     echo -e "\033[1;31m❌ Execute como root!\033[0m"
@@ -16,14 +22,16 @@ if [ "${EUID:-$(id -u)}" -ne 0 ]; then
 fi
 
 RAW_INPUT="$*"
-DOMAIN="$(echo "$RAW_INPUT" | awk '{print $NF}' | tr -d '[:space:][:cntrl:]')"
+DOMAIN="$(echo "$RAW_INPUT" | awk '{print $NF}' | tr -d '[:space:][:cntrl:]' | tr '[:upper:]' '[:lower:]')"
 
 SSL_DIR="/opt/TurbonetCoreSSL"
+XRAYTOOLS_DIR="/opt/XrayTools"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
 PRESET_FILE="/usr/local/etc/xray/preset.json"
+XRAY_BIN="/usr/local/bin/xray"
 LE_DIR=""
 RENEW_SCRIPT="$SSL_DIR/renew_cert.sh"
-ACTIVE_DOMAIN_FILE="/opt/XrayTools/active_domain"
+ACTIVE_DOMAIN_FILE="${XRAYTOOLS_DIR}/active_domain"
 LOG_FILE="/tmp/certxray.log"
 
 XRAY_USER="nobody"
@@ -86,6 +94,64 @@ _detect_xray_owner() {
     XRAY_GROUP="$(id -gn "$XRAY_USER")"
 }
 
+_apply_xraytools_perms() {
+    mkdir -p "$XRAYTOOLS_DIR"
+    if id -u botxray &>/dev/null; then
+        chown root:botxray "$XRAYTOOLS_DIR"
+        chmod 2770 "$XRAYTOOLS_DIR"
+        if [ -f "$ACTIVE_DOMAIN_FILE" ]; then
+            chown botxray:botxray "$ACTIVE_DOMAIN_FILE"
+            chmod 0660 "$ACTIVE_DOMAIN_FILE"
+        fi
+    else
+        chown root:root "$XRAYTOOLS_DIR"
+        chmod 0750 "$XRAYTOOLS_DIR"
+        if [ -f "$ACTIVE_DOMAIN_FILE" ]; then
+            chown root:root "$ACTIVE_DOMAIN_FILE"
+            chmod 0600 "$ACTIVE_DOMAIN_FILE"
+        fi
+    fi
+}
+
+_apply_config_perms() {
+    _detect_xray_owner
+    local cfg_dir
+    cfg_dir="$(dirname "$CONFIG_PATH")"
+
+    local dir_mode="750"
+    local file_mode="0640"
+    if id -u botxray &>/dev/null; then
+        dir_mode="2770"
+        file_mode="0660"
+    fi
+
+    if [ -d "$cfg_dir" ]; then
+        chown "root:${XRAY_GROUP}" "$cfg_dir"
+        chmod "$dir_mode" "$cfg_dir"
+    fi
+
+    if [ -f "$CONFIG_PATH" ]; then
+        chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
+        chmod "$file_mode" "$CONFIG_PATH"
+    fi
+
+    if [ -f "$PRESET_FILE" ]; then
+        chown "root:${XRAY_GROUP}" "$PRESET_FILE"
+        chmod "$file_mode" "$PRESET_FILE"
+    fi
+}
+
+_test_xray_config() {
+    local cfg="$1"
+    [ ! -x "$XRAY_BIN" ] && return 0
+    _detect_xray_owner
+    if command -v runuser &>/dev/null && [ "$XRAY_USER" != "root" ]; then
+        runuser -u "$XRAY_USER" -- "$XRAY_BIN" run -test -config "$cfg"
+    else
+        "$XRAY_BIN" run -test -config "$cfg"
+    fi
+}
+
 # --- VALIDAÇÃO DE DOMÍNIO (RFC 1123) ---
 validate_domain() {
     local d="${1:-}"
@@ -96,6 +162,7 @@ validate_domain() {
 
 # --- IP PÚBLICO COM HTTPS E TIMEOUT ---
 get_public_ip() {
+    ensure_cmd curl curl
     curl -4fsSL --max-time 10 --connect-timeout 5 \
         "https://icanhazip.com" 2>/dev/null \
     || curl -4fsSL --max-time 10 --connect-timeout 5 \
@@ -159,22 +226,30 @@ restore_cert_backup() {
 _update_xray_sni() {
     local sn="$1"
     ensure_cmd jq jq
-    _detect_xray_owner
+
+    mkdir -p "$XRAYTOOLS_DIR"
+    echo "$sn" > "$ACTIVE_DOMAIN_FILE" 2>/dev/null || true
+    _apply_xraytools_perms
 
     if [ -f "$CONFIG_PATH" ] && jq empty "$CONFIG_PATH" 2>/dev/null; then
         local tmp_cfg
         tmp_cfg=$(mktemp /tmp/xray_cfg_cert_XXXXXX.json)
+        _TMP_FILES+=("$tmp_cfg")
         if jq --arg sn "$sn" '
             (.inbounds[] | select(.tag=="inbound-turbonet") |
              select(.streamSettings.security=="tls") |
              .streamSettings.tlsSettings.serverName) = $sn
         ' "$CONFIG_PATH" > "$tmp_cfg" 2>/dev/null && jq empty "$tmp_cfg" 2>/dev/null; then
+            cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
             mv -f "$tmp_cfg" "$CONFIG_PATH"
-            chmod 750 "$(dirname "$CONFIG_PATH")"
-            chown "root:${XRAY_GROUP}" "$(dirname "$CONFIG_PATH")"
-            chmod 640 "$CONFIG_PATH"
-            chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
-            echo -e "${GB}✅ serverName atualizado no config.json para: ${sn}${RESET}"
+            _apply_config_perms
+            if ! _test_xray_config "$CONFIG_PATH" >/dev/null 2>&1; then
+                echo -e "${RB}⚠  Validação do config.json falhou após atualizar SNI. Revertendo config...${RESET}"
+                mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+                _apply_config_perms
+            else
+                echo -e "${GB}✅ serverName atualizado no config.json para: ${sn}${RESET}"
+            fi
         else
             rm -f "$tmp_cfg"
         fi
@@ -183,10 +258,10 @@ _update_xray_sni() {
     if [ -f "$PRESET_FILE" ] && jq empty "$PRESET_FILE" 2>/dev/null; then
         local tmp_pre
         tmp_pre=$(mktemp /tmp/xray_pre_cert_XXXXXX.json)
+        _TMP_FILES+=("$tmp_pre")
         if jq --arg sn "$sn" '.domain = $sn' "$PRESET_FILE" > "$tmp_pre" 2>/dev/null && jq empty "$tmp_pre" 2>/dev/null; then
             mv -f "$tmp_pre" "$PRESET_FILE"
-            chmod 640 "$PRESET_FILE"
-            chown "root:${XRAY_GROUP}" "$PRESET_FILE"
+            _apply_config_perms
         else
             rm -f "$tmp_pre"
         fi
@@ -304,7 +379,7 @@ install_letsencrypt() {
     # Script de renovação gerado com detecção dinâmica do grupo do xray.service e restauração dos serviços
     cat > "$RENEW_SCRIPT" <<RENEW_EOF
 #!/bin/bash
-# renew_cert.sh — gerado por certxray.sh V1.2
+# renew_cert.sh — gerado por certxray.sh V1.3
 set -Eeuo pipefail
 LOG="/tmp/renew_cert.log"
 : > "\$LOG"
@@ -386,13 +461,13 @@ RENEW_EOF
 : > "$LOG_FILE"
 clear
 echo -e "${YB}====================================================${RESET}"
-echo -e "${YB}         GERENCIADOR DE CERTIFICADOS SSL            ${RESET}"
+echo -e "${YB}      GERENCIADOR DE CERTIFICADOS SSL (V1.3)        ${RESET}"
 echo -e "${YB}====================================================${RESET}"
 echo ""
 
 if [ -z "${DOMAIN:-}" ] || [ "$DOMAIN" = "certxray.sh" ]; then
     read -rp "Digite o domínio: " DOMAIN
-    DOMAIN="$(echo "${DOMAIN:-}" | tr -d '[:space:][:cntrl:]')"
+    DOMAIN="$(echo "${DOMAIN:-}" | tr -d '[:space:][:cntrl:]' | tr '[:upper:]' '[:lower:]')"
 fi
 
 [ -n "${DOMAIN:-}" ] || { echo -e "${RB}❌ Domínio vazio.${RESET}"; exit 1; }
@@ -403,10 +478,9 @@ if ! validate_domain "$DOMAIN"; then
     exit 1
 fi
 
-mkdir -p /opt/XrayTools 2>/dev/null || true
-chmod 700 /opt/XrayTools 2>/dev/null || true
+mkdir -p "$XRAYTOOLS_DIR" 2>/dev/null || true
 echo "$DOMAIN" > "$ACTIVE_DOMAIN_FILE" 2>/dev/null || true
-chmod 600 "$ACTIVE_DOMAIN_FILE" 2>/dev/null || true
+_apply_xraytools_perms
 
 echo -e "${YB}DOMÍNIO ALVO:${RESET} ${CB}$DOMAIN${RESET}"
 echo ""
@@ -446,7 +520,6 @@ case "${cert_opt:-2}" in
     echo ""
 
     _ensure_dig
-    ensure_cmd curl curl
 
     VPS_IP="$(get_public_ip)"
     echo -e "${YB}IP público desta VPS:${RESET} ${CB}${VPS_IP:-"(não detectado)"}${RESET}"
