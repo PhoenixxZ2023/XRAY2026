@@ -1,11 +1,10 @@
 #!/bin/bash
-# core_manager.sh - TURBONET XRAY V1.2.3 (Perfil XHTTP Universal estilo SSHorizon)
-# Atualizações V1.2.3:
-#   - Modo XHTTP [1] idêntico ao SSHorizon: host="" (livre), ALPN=["http/1.1"], sem trava de serverName,
-#     headers=null, mode="", noSSEHeader=false, scMaxBufferedPosts=30, scMaxEachPostBytes="1000000",
-#     scStreamUpServerSecs="20-80", xPaddingBytes="100-1000"
-#   - Adicionado "statsUserOnline": true na policy level 0
-#   - Mantidas todas as correções de segurança, permissões 750/640 e preservação do users.db
+# core_manager.sh - TURBONET XRAY V1.2.4 (Perfil XHTTP Universal + Compatibilidade Bot Telegram)
+# Atualizações V1.2.4:
+#   - _apply_config_perms e _apply_xraytools_perms preservam permissões 2770/660 quando o usuário `botxray` existe
+#   - Removidos `chmod 700` e `chown root:root` em /opt/XrayTools, users.db, active_domain e connection_info.txt
+#   - Adicionado `|| true` ao parar o serviço na opção [3] para evitar disparo indevido do trap ERR
+#   - Mantido perfil XHTTP [1] estilo SSHorizon e statsUserOnline na policy level 0
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; read -rp "Enter para continuar...";' ERR
@@ -99,25 +98,59 @@ _detect_xray_owner() {
     XRAY_GROUP="$(id -gn "$XRAY_USER")"
 }
 
+_apply_xraytools_perms() {
+    mkdir -p "$XRAYTOOLS_DIR"
+    if id -u botxray &>/dev/null; then
+        chown root:botxray "$XRAYTOOLS_DIR"
+        chmod 2770 "$XRAYTOOLS_DIR"
+
+        for db in "$USER_DB" "${XRAYTOOLS_DIR}/limits.db" "${XRAYTOOLS_DIR}/usage.db" "${XRAYTOOLS_DIR}/session.db"; do
+            if [ -f "$db" ]; then
+                chown botxray:botxray "$db"
+                chmod 660 "$db"
+            fi
+        done
+
+        for info in "$ACTIVE_DOMAIN_FILE" "$CONN_INFO_FILE"; do
+            if [ -f "$info" ]; then
+                chown root:botxray "$info"
+                chmod 640 "$info"
+            fi
+        done
+    else
+        chmod 750 "$XRAYTOOLS_DIR"
+        [ -f "$USER_DB" ] && { chown root:root "$USER_DB"; chmod 600 "$USER_DB"; }
+        [ -f "$ACTIVE_DOMAIN_FILE" ] && { chown root:root "$ACTIVE_DOMAIN_FILE"; chmod 600 "$ACTIVE_DOMAIN_FILE"; }
+        [ -f "$CONN_INFO_FILE" ] && { chown root:root "$CONN_INFO_FILE"; chmod 600 "$CONN_INFO_FILE"; }
+    fi
+}
+
 _apply_config_perms() {
     _detect_xray_owner
     local cfg_dir
     cfg_dir="$(dirname "$CONFIG_PATH")"
 
+    local dir_mode="750"
+    local file_mode="640"
+    if id -u botxray &>/dev/null; then
+        dir_mode="2770"
+        file_mode="660"
+    fi
+
     if [ -d "$cfg_dir" ]; then
         chown -R "root:${XRAY_GROUP}" "$cfg_dir"
-        chmod 750 "$cfg_dir"
-        find "$cfg_dir" -maxdepth 1 -type f -exec chmod 640 {} +
+        chmod "$dir_mode" "$cfg_dir"
+        find "$cfg_dir" -maxdepth 1 -type f -exec chmod "$file_mode" {} +
     fi
 
     if [ -f "$CONFIG_PATH" ]; then
         chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
-        chmod 640 "$CONFIG_PATH"
+        chmod "$file_mode" "$CONFIG_PATH"
     fi
 
     if [ -f "$PRESET_FILE" ]; then
         chown "root:${XRAY_GROUP}" "$PRESET_FILE"
-        chmod 640 "$PRESET_FILE"
+        chmod "$file_mode" "$PRESET_FILE"
     fi
 
     if [ -d "$SSL_DIR" ]; then
@@ -125,6 +158,8 @@ _apply_config_perms() {
         find "$SSL_DIR" -type d -exec chmod 750 {} +
         find "$SSL_DIR" -type f -exec chmod 640 {} +
     fi
+
+    _apply_xraytools_perms
 }
 
 _test_xray_config() {
@@ -427,8 +462,7 @@ _build_initial_clients() {
 
         mkdir -p "$XRAYTOOLS_DIR"
         echo "${default_nick}|${SAMPLE_CRED}|${default_exp}|${default_pass}|0" >> "$USER_DB"
-        chmod 600 "$USER_DB"
-        chown root:root "$USER_DB"
+        _apply_xraytools_perms
     elif [ -z "$SAMPLE_CRED" ]; then
         if [ "$network" = "trojan" ]; then
             SAMPLE_CRED=$(generate_trojan_password)
@@ -468,7 +502,6 @@ func_generate_config() {
 
     ensure_cmd jq jq
     mkdir -p "$(dirname "$CONFIG_PATH")" "$XRAYTOOLS_DIR" "$SSL_DIR"
-    chmod 700 "$XRAYTOOLS_DIR"
     _apply_config_perms
 
     if [ "$use_tls" = "true" ]; then
@@ -488,6 +521,7 @@ func_generate_config() {
     routing_rules=$(_build_routing_rules)
 
     local stream_settings=""
+    local xhttp_host_field=""
 
     case "$network" in
         xhttp)
@@ -499,7 +533,6 @@ func_generate_config() {
             read -rp "Modo [1/2/3, Enter=1]: " xhttp_mode
             xhttp_mode="${xhttp_mode:-1}"
 
-            local xhttp_host_field=""
             echo ""
             read -rp "Travar Host específico (Enter = livre/aceita qualquer host): " extra_host
             extra_host=$(echo "${extra_host:-}" | tr -d '[:space:][:cntrl:]')
@@ -711,8 +744,7 @@ func_generate_config() {
     _apply_config_perms
 
     echo "$domain" > "$ACTIVE_DOMAIN_FILE"
-    chmod 600 "$ACTIVE_DOMAIN_FILE"
-    chown root:root "$ACTIVE_DOMAIN_FILE"
+    _apply_xraytools_perms
 
     if ! _test_xray_config "$CONFIG_PATH" >>"$LOG_FILE" 2>&1; then
         echo -e "${TXT_RED}❌ Falha na validação do config.json pelo Xray:${RESET}"
@@ -736,7 +768,7 @@ func_generate_config() {
     fi
     sleep 2
 
-    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2.3)"
+    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2.4)"
 
     local status_show="${TXT_RED}FALHA${RESET}"
     if systemctl is-active --quiet xray 2>/dev/null; then
@@ -762,11 +794,12 @@ func_generate_config() {
     local sec="none"
     if [ "$use_tls" = "true" ]; then sec="tls"; fi
 
+    local link_host="${xhttp_host_field:-$domain}"
     local link=""
     case "$network" in
         grpc)        link="vless://${credential}@${domain}:${port}?security=${sec}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#VLESS-TURBONET" ;;
         ws)          link="vless://${credential}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#VLESS-TURBONET" ;;
-        xhttp)       link="vless://${credential}@${domain}:${port}?mode=auto&path=%2F&security=${sec}&encryption=none&host=${domain}&type=xhttp&sni=${domain}#VLESS-TURBONET" ;;
+        xhttp)       link="vless://${credential}@${domain}:${port}?mode=auto&path=%2F&security=${sec}&encryption=none&host=${link_host}&type=xhttp&sni=${domain}#VLESS-TURBONET" ;;
         vision)      link="vless://${credential}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#VLESS-TURBONET" ;;
         httpupgrade) link="vless://${credential}@${domain}:${port}?path=%2F&security=${sec}&encryption=none&host=${domain}&type=httpupgrade&sni=${domain}#VLESS-TURBONET" ;;
         h2)          link="vless://${credential}@${domain}:${port}?path=%2F&security=tls&encryption=none&host=${domain}&type=h2&sni=${domain}#VLESS-TURBONET" ;;
@@ -789,8 +822,7 @@ TLS=${use_tls}
 CREDENCIAL=${credential}
 LINK=${link}
 EOF
-    chmod 600 "$CONN_INFO_FILE"
-    chown root:root "$CONN_INFO_FILE"
+    _apply_xraytools_perms
 
     echo -e "${TXT_GREEN}Link salvo em: ${CONN_INFO_FILE}${RESET}"
     echo ""
@@ -874,9 +906,8 @@ func_wizard_install() {
     fi
 
     mkdir -p "$XRAYTOOLS_DIR"
-    chmod 700 "$XRAYTOOLS_DIR"
     echo "$domain_val" > "$ACTIVE_DOMAIN_FILE"
-    chmod 600 "$ACTIVE_DOMAIN_FILE"
+    _apply_xraytools_perms
 
     header_blue "PASSO 5/5 — PROTOCOLO"
     echo " [1] WS          — WebSocket"
@@ -973,7 +1004,7 @@ while true; do
             read -rp "Enter..."
             ;;
         3)
-            systemctl stop xray >/dev/null 2>&1
+            systemctl stop xray >/dev/null 2>&1 || true
             echo -e "${TXT_RED}⛔ Xray Parado.${RESET}"
             read -rp "Enter..."
             ;;
@@ -990,7 +1021,7 @@ while true; do
             ;;
         5)
             echo -e "${TXT_CYAN}=== Últimos 30 logs do Xray ===${RESET}"
-            journalctl -u xray -n 30 --no-pager
+            journalctl -u xray -n 30 --no-pager || true
             read -rp "Enter..."
             ;;
         0) exit 0 ;;
