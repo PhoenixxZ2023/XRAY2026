@@ -1,11 +1,10 @@
 """
-botxray.py - TURBONET XRAY V1.4.2 (PRO + HÍBRIDO)
-Correções V1.4.2:
-- Permissões 0o660 em save_config() e USER_DB + tratamento de OSError em load_config()
-- generate_link() respeita xhttpSettings.host (quando configurado) e codifica path (%2F)
-- core_create_user() verifica duplicidade também em config.json antes de inserir
-- core_renew_user() valida retorno de save_config() antes de recarregar usuário via API
-- Limpeza garantida de arquivos temporários em /tmp no backup_start via try...finally
+botxray.py - TURBONET XRAY V1.4.3 (PRO + HÍBRIDO)
+Correções V1.4.3:
+- save_config() e _write_user_db_atomic() com tempfile.mkstemp + fsync + ajuste condicional de GID
+- _append_user_db_line() garante quebra de linha antes de inserir novos registros no users.db
+- core_delete_user() regrava config.json apenas quando há alteração efetiva no inbound
+- Mantidas permissões 0o660, codificação de path (%2F) e limpeza de temporários no backup
 """
 
 from __future__ import annotations
@@ -100,21 +99,49 @@ def _ensure_private_file(path: str, mode: int = 0o660) -> None:
         pass
 
 
+def _append_user_db_line(entry: str) -> None:
+    _ensure_private_file(USER_DB, 0o660)
+    needs_newline = False
+    try:
+        if os.path.getsize(USER_DB) > 0:
+            with open(USER_DB, "rb") as fb:
+                fb.seek(-1, os.SEEK_END)
+                if fb.read(1) != b"\n":
+                    needs_newline = True
+    except OSError:
+        pass
+
+    with open(USER_DB, "a", encoding="utf-8") as f:
+        if needs_newline:
+            f.write("\n")
+        f.write(entry)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def _write_user_db_atomic(lines: list[str]) -> None:
     db_dir = os.path.dirname(USER_DB)
-    tmp_db = os.path.join(db_dir, f".users.db.tmp.{os.getpid()}")
+    os.makedirs(db_dir, exist_ok=True)
+    tmp_db = None
     try:
-        with open(tmp_db, "w", encoding="utf-8") as f:
+        fd, tmp_db = tempfile.mkstemp(prefix=".users.db.", suffix=".tmp", dir=db_dir)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.writelines(lines)
+            f.flush()
+            os.fsync(f.fileno())
+
         os.chmod(tmp_db, 0o660)
         try:
             bot_gid = grp.getgrnam("botxray").gr_gid
-            os.chown(tmp_db, -1, bot_gid)
+            if os.stat(tmp_db).st_gid != bot_gid:
+                os.chown(tmp_db, -1, bot_gid)
         except (KeyError, OSError):
             pass
+
         os.replace(tmp_db, USER_DB)
+        tmp_db = None
     finally:
-        if os.path.exists(tmp_db):
+        if tmp_db and os.path.exists(tmp_db):
             try:
                 os.remove(tmp_db)
             except OSError:
@@ -263,7 +290,7 @@ def load_config() -> Optional[dict]:
 
 def save_config(data: dict) -> bool:
     cfg_dir = os.path.dirname(CONFIG_PATH)
-    tmp_path = os.path.join(cfg_dir, f".config.json.tmp.{os.getpid()}")
+    tmp_path = None
 
     target_gid = -1
     try:
@@ -275,28 +302,35 @@ def save_config(data: dict) -> bool:
             target_gid = -1
 
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        fd, tmp_path = tempfile.mkstemp(prefix=".config.json.", suffix=".tmp", dir=cfg_dir)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+
         os.chmod(tmp_path, 0o660)
         if target_gid != -1:
             try:
-                os.chown(tmp_path, -1, target_gid)
+                if os.stat(tmp_path).st_gid != target_gid:
+                    os.chown(tmp_path, -1, target_gid)
             except OSError as e:
                 logger.warning("save_config: não foi possível ajustar grupo %s: %s", target_gid, e)
+
         os.replace(tmp_path, CONFIG_PATH)
+        tmp_path = None
         return True
     except PermissionError as e:
-        logger.error("save_config: sem permissão: %s", e)
+        logger.error("save_config: sem permissão em %s: %s", cfg_dir, e)
         return False
     except Exception as e:
         logger.error("Erro ao salvar config: %s", e)
         return False
     finally:
-        try:
-            if os.path.exists(tmp_path):
+        if tmp_path and os.path.exists(tmp_path):
+            try:
                 os.remove(tmp_path)
-        except OSError:
-            pass
+            except OSError:
+                pass
 
 
 def get_ip() -> str:
@@ -589,8 +623,7 @@ def core_create_user(nick: str, days: str) -> Tuple[bool, str]:
     if not save_config(data):
         return False, "❌ Falha ao salvar config.json."
 
-    with open(USER_DB, "a", encoding="utf-8") as f:
-        f.write(f"{nick}|{user_cred}|{expiry_date}|{nick}|0\n")
+    _append_user_db_line(f"{nick}|{user_cred}|{expiry_date}|{nick}|0\n")
 
     sync_ssh_user("create", nick, nick)
     reload_xray_user("add", nick, user_cred)
@@ -611,8 +644,9 @@ def core_delete_user(nick: str) -> str:
     if not _is_valid_nick(nick):
         return "❌ Nome de usuário inválido."
 
-    data  = load_config()
-    found = False
+    data        = load_config()
+    found       = False
+    cfg_changed = False
 
     if data:
         for inbound in data.get("inbounds", []):
@@ -623,9 +657,10 @@ def core_delete_user(nick: str) -> str:
                     if c.get("email") not in (nick, f"LOCKED_{nick}")
                 ]
                 if len(clients) != len(new_clients):
-                    found = True
-                inbound["settings"]["clients"] = new_clients
-        if not save_config(data):
+                    found       = True
+                    cfg_changed = True
+                    inbound["settings"]["clients"] = new_clients
+        if cfg_changed and not save_config(data):
             return "❌ Falha ao salvar config.json."
 
     if os.path.exists(USER_DB):
@@ -835,7 +870,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data.clear()
     await update.message.reply_text(
-        "🐉 *PAINEL TURBONET XRAY V1.4.2 (PRO)*\n_Integração Híbrida SSH Ativa_",
+        "🐉 *PAINEL TURBONET XRAY V1.4.3 (PRO)*\n_Integração Híbrida SSH Ativa_",
         reply_markup=build_menu(),
         parse_mode="Markdown",
     )
@@ -1165,7 +1200,7 @@ def main():
         allow_reentry=True,
     )
     app.add_handler(conv)
-    logger.info("TURBONET XRAY Bot V1.4.2 iniciado. Admin ID: %d", ADMIN_ID)
+    logger.info("TURBONET XRAY Bot V1.4.3 iniciado. Admin ID: %d", ADMIN_ID)
     app.run_polling()
 
 
