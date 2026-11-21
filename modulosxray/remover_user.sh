@@ -1,17 +1,21 @@
 #!/bin/bash
-# remover_user.sh - TURBONET XRAY V1.1
-# Correções aplicadas:
-#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
-#   - Permissões 750/640 root:$XRAY_GROUP aplicadas no diretório e no config.json
-#   - Validação com `xray run -test` sob o usuário do serviço antes de reiniciar
-#   - Substituído try-reload-or-restart por restart direto no fallback
-#   - Suporte a credenciais Trojan (32 hex chars) além de nome e UUID
+# remover_user.sh - TURBONET XRAY V1.2 (PRO + Compatibilidade Bot Telegram)
+# Atualizações V1.2:
+#   - _apply_config_perms e _apply_xraytools_perms preservam permissões 2770/0660 quando o usuário `botxray` existe
+#   - Remove corretamente usuários ativos e suspensos (`LOCKED_<nick>`) tanto por nome quanto por UUID/senha
+#   - Corrigida sintaxe da API interna (`xray api removeuser -email=...`) para hot-reload sem derrubar conexões ativas
+#   - Limpa também registros em limits.db e usage.db preservando dono/permissões
+#   - Valida UID >= 1000 e shell /bin/false antes de remover conta Linux local
 
 set -Eeuo pipefail
 
 CONFIG_PATH="/usr/local/etc/xray/config.json"
-USER_DB="/opt/XrayTools/users.db"
-CONN_INFO_DIR="/opt/XrayTools/users"
+PRESET_FILE="/usr/local/etc/xray/preset.json"
+XRAYTOOLS_DIR="/opt/XrayTools"
+USER_DB="${XRAYTOOLS_DIR}/users.db"
+LIMITS_DB="${XRAYTOOLS_DIR}/limits.db"
+USAGE_DB="${XRAYTOOLS_DIR}/usage.db"
+CONN_INFO_DIR="${XRAYTOOLS_DIR}/users"
 LOG_FILE="/tmp/remover_user.log"
 
 XRAY_USER="nobody"
@@ -25,6 +29,11 @@ TITLE_BAR='\033[1;47;34m'
 RESET='\033[0m'
 
 export DEBIAN_FRONTEND=noninteractive
+
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo -e "${TXT_RED}❌ Execute como root!${RESET}"
+    exit 1
+fi
 
 # --- CLEANUP CENTRALIZADO ---
 _tmp_cfg=""
@@ -50,20 +59,61 @@ _detect_xray_owner() {
     XRAY_GROUP="$(id -gn "$XRAY_USER")"
 }
 
+_apply_xraytools_perms() {
+    mkdir -p "$XRAYTOOLS_DIR" "$CONN_INFO_DIR"
+    if id -u botxray &>/dev/null; then
+        chown root:botxray "$XRAYTOOLS_DIR"
+        chmod 2770 "$XRAYTOOLS_DIR"
+
+        chown root:botxray "$CONN_INFO_DIR"
+        chmod 0750 "$CONN_INFO_DIR"
+
+        for db in "$USER_DB" "$LIMITS_DB" "$USAGE_DB"; do
+            if [ -f "$db" ]; then
+                chown botxray:botxray "$db"
+                chmod 0660 "$db"
+            fi
+        done
+    else
+        chmod 0750 "$XRAYTOOLS_DIR"
+        chmod 0700 "$CONN_INFO_DIR"
+        for db in "$USER_DB" "$LIMITS_DB" "$USAGE_DB"; do
+            if [ -f "$db" ]; then
+                chown root:root "$db"
+                chmod 0600 "$db"
+            fi
+        done
+    fi
+}
+
 _apply_config_perms() {
     _detect_xray_owner
     local cfg_dir
     cfg_dir="$(dirname "$CONFIG_PATH")"
 
+    local dir_mode="750"
+    local file_mode="0640"
+    if id -u botxray &>/dev/null; then
+        dir_mode="2770"
+        file_mode="0660"
+    fi
+
     if [ -d "$cfg_dir" ]; then
         chown "root:${XRAY_GROUP}" "$cfg_dir"
-        chmod 750 "$cfg_dir"
+        chmod "$dir_mode" "$cfg_dir"
     fi
 
     if [ -f "$CONFIG_PATH" ]; then
         chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
-        chmod 0640 "$CONFIG_PATH"
+        chmod "$file_mode" "$CONFIG_PATH"
     fi
+
+    if [ -f "$PRESET_FILE" ]; then
+        chown "root:${XRAY_GROUP}" "$PRESET_FILE"
+        chmod "$file_mode" "$PRESET_FILE"
+    fi
+
+    _apply_xraytools_perms
 }
 
 _test_xray_config() {
@@ -120,11 +170,40 @@ _wait_xray_active() {
     return 1
 }
 
+_clean_db_entry() {
+    local db_file="$1" nick_match="$2" id_match="$3"
+    [ -s "$db_file" ] || return 0
+    _tmp_db=$(mktemp "${db_file}.tmp.XXXXXX")
+    awk -F'|' -v n="$nick_match" -v id="$id_match" \
+        '($1 != n && $1 != id && $2 != id){print $0}' "$db_file" > "$_tmp_db"
+    mv -f "$_tmp_db" "$db_file"
+    _tmp_db=""
+}
+
+_remove_linux_account() {
+    local nick="$1"
+    [ -n "$nick" ] || return 1
+    if getent passwd "$nick" >/dev/null 2>&1; then
+        local uid shell
+        uid=$(id -u "$nick" 2>/dev/null || echo 0)
+        shell=$(getent passwd "$nick" | cut -d: -f7)
+        if [ "$uid" -lt 1000 ] || [ "$shell" != "/bin/false" ]; then
+            echo -e "${TXT_YELLOW}⚠  Conta Linux '${nick}' pertence ao sistema — não removida.${RESET}"
+            return 1
+        fi
+        pkill -KILL -u "$nick" 2>/dev/null || true
+        userdel -r -f "$nick" 2>/dev/null || true
+        return 0
+    fi
+    return 1
+}
+
 # --- INICIALIZAÇÃO ---
 : > "$LOG_FILE"
 ensure_cmd jq jq
-mkdir -p "$(dirname "$USER_DB")" "$CONN_INFO_DIR"
+mkdir -p "$XRAYTOOLS_DIR" "$CONN_INFO_DIR"
 [ -f "$USER_DB" ] || touch "$USER_DB"
+_apply_xraytools_perms
 
 if [ ! -s "$CONFIG_PATH" ]; then
     echo -e "${TXT_RED}❌ Config não encontrada: $CONFIG_PATH${RESET}"
@@ -150,7 +229,8 @@ if [ -s "$USER_DB" ]; then
     printf "%-12s %-14s %-12s\n" "NOME" "CREDENCIAL" "EXPIRA"
     echo "-----------------------------------------"
     while IFS='|' read -r name uuid expiry _rest; do
-        printf "%-12s %-14s %-12s\n" "$name" "${uuid:0:8}..." "$expiry"
+        [ -z "${name:-}" ] && continue
+        printf "%-12s %-14s %-12s\n" "$name" "${uuid:0:8}..." "${expiry:-N/A}"
     done < "$USER_DB"
     echo "-----------------------------------------"
     echo ""
@@ -170,20 +250,25 @@ fi
 
 identifier=$(echo "$identifier" | tr '[:upper:]' '[:lower:]')
 
-# Confirma existência antes de agir
-found_in_config=0
-if jq -e --arg id "$identifier" '
-    .inbounds[]? | select(.tag=="inbound-turbonet")
-    | .settings.clients[]?
-    | select(.id == $id or .password == $id or .email == $id)
-' "$CONFIG_PATH" >/dev/null 2>&1; then
-    found_in_config=1
+# Resolve nome real no DB ou no config (inclusive se estiver LOCKED_)
+found_in_db=0
+nick_real=""
+if [ -s "$USER_DB" ]; then
+    nick_real=$(awk -F'|' -v id="$identifier" '($1==id || $2==id){print $1; exit}' "$USER_DB" 2>/dev/null || echo "")
+    [ -n "$nick_real" ] && found_in_db=1
 fi
 
-found_in_db=0
-if [ -s "$USER_DB" ] && \
-   awk -F'|' -v id="$identifier" '($1==id || $2==id){found=1} END{exit found?0:1}' "$USER_DB" 2>/dev/null; then
-    found_in_db=1
+found_in_config=0
+if jq -e --arg id "$identifier" --arg nick "${nick_real:-$identifier}" '
+    .inbounds[]? | select(.tag=="inbound-turbonet")
+    | .settings.clients[]?
+    | select(
+        .id == $id or .password == $id or
+        .email == $id or .email == ("LOCKED_" + $id) or
+        .email == $nick or .email == ("LOCKED_" + $nick)
+      )
+' "$CONFIG_PATH" >/dev/null 2>&1; then
+    found_in_config=1
 fi
 
 if [ "$found_in_config" -eq 0 ] && [ "$found_in_db" -eq 0 ]; then
@@ -191,38 +276,40 @@ if [ "$found_in_config" -eq 0 ] && [ "$found_in_db" -eq 0 ]; then
     sleep 2; exit 0
 fi
 
-# Resolve nome real para limpeza do arquivo de info e SSH
-nick_real=""
-if [ "$found_in_db" -eq 1 ] && [ -s "$USER_DB" ]; then
-    nick_real=$(awk -F'|' -v id="$identifier" '($1==id || $2==id){print $1; exit}' "$USER_DB" 2>/dev/null || echo "")
-fi
 if [ -z "$nick_real" ] && [ "$found_in_config" -eq 1 ]; then
-    nick_real=$(jq -r --arg id "$identifier" '
+    raw_email=$(jq -r --arg id "$identifier" '
         .inbounds[]? | select(.tag=="inbound-turbonet")
         | .settings.clients[]?
-        | select(.id == $id or .password == $id or .email == $id)
+        | select(.id == $id or .password == $id or .email == $id or .email == ("LOCKED_" + $id))
         | .email // ""
     ' "$CONFIG_PATH" 2>/dev/null | head -1 || echo "")
+    nick_real="${raw_email#LOCKED_}"
 fi
+
+clean_nick="${nick_real:-$identifier}"
 
 # Confirmação explícita
 echo ""
-echo -e "${TXT_YELLOW}⚠  Remover usuário: '${nick_real:-$identifier}'?${RESET}"
+echo -e "${TXT_YELLOW}⚠  Remover usuário: '${clean_nick}'?${RESET}"
 read -rp "Confirmar? [s/N]: " confirm
 [[ "${confirm:-n}" =~ ^[Ss]$ ]] || { echo "Cancelado."; sleep 1; exit 0; }
 
 # --- BACKUP DO CONFIG ---
 cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
 
-# --- APLICA REMOÇÃO NO CONFIG ---
+# --- APLICA REMOÇÃO NO CONFIG (ATIVOS E BLOQUEADOS) ---
 _tmp_cfg=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")
 
-jq --arg id "$identifier" '
+jq --arg id "$identifier" --arg nick "$clean_nick" '
   (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
     (if type == "array" then . else [] end)
   |
   (.inbounds[] | select(.tag=="inbound-turbonet").settings.clients) |=
-    map(select(.id != $id and .password != $id and .email != $id))
+    map(select(
+      .id != $id and .password != $id and
+      .email != $id and .email != ("LOCKED_" + $id) and
+      .email != $nick and .email != ("LOCKED_" + $nick)
+    ))
 ' "$CONFIG_PATH" > "$_tmp_cfg"
 
 if ! jq empty "$_tmp_cfg" 2>/dev/null; then
@@ -246,17 +333,22 @@ if ! _test_xray_config "$CONFIG_PATH" >>"$LOG_FILE" 2>&1; then
     sleep 3; exit 1
 fi
 
-# --- HELPER: porta da API do Xray ---
+# --- HELPER: porta e remoção via API do Xray ---
 _xray_api_port() {
     jq -r '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
 }
+
 _api_remove() {
     local email="$1"
+    [ ! -x /usr/local/bin/xray ] && return 1
     systemctl is-active --quiet xray 2>/dev/null || return 1
     local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
-    /usr/local/bin/xray api rmu -server="127.0.0.1:${p}" \
-        -inboundTag="inbound-turbonet" "$email" >/dev/null 2>&1
+    /usr/local/bin/xray api removeuser \
+        -server="127.0.0.1:${p}" \
+        -inboundTag="inbound-turbonet" \
+        -email="$email" >>"$LOG_FILE" 2>&1
 }
+
 _fallback_reload() {
     if ! systemctl restart xray >>"$LOG_FILE" 2>&1 || ! _wait_xray_active; then
         echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}"
@@ -270,37 +362,32 @@ _fallback_reload() {
     return 0
 }
 
-# Hot reload: remove via API (sem restart). Fallback: restart do serviço.
-target_email="${nick_real:-$identifier}"
-if _api_remove "$target_email" 2>/dev/null; then
-    echo -e "${TXT_GREEN}Removido via API (sem restart).${RESET}"
+# Hot reload: remove via API (ativo ou LOCKED_). Fallback: restart do serviço.
+if _api_remove "$clean_nick" || _api_remove "LOCKED_${clean_nick}"; then
+    echo -e "${TXT_GREEN}⚡ Removido via API sem derrubar conexões ativas.${RESET}"
 else
     echo -e "${TXT_YELLOW}Aplicando remoção via reinício do Xray...${RESET}"
     _fallback_reload || exit 1
 fi
 
-# --- SÓ AGORA ATUALIZA O DB (após aplicação confirmada) ---
-if [ "$found_in_db" -eq 1 ] && [ -s "$USER_DB" ]; then
-    _tmp_db=$(mktemp "${USER_DB}.tmp.XXXXXX")
-    awk -F'|' -v id="$identifier" '($1!=id && $2!=id){print $0}' "$USER_DB" > "$_tmp_db"
-    mv -f "$_tmp_db" "$USER_DB"
-    _tmp_db=""
-    chmod 600 "$USER_DB"
-fi
+# --- ATUALIZA OS BANCOS DE DADOS APÓS APLICAÇÃO CONFIRMADA ---
+_clean_db_entry "$USER_DB"   "$clean_nick" "$identifier"
+_clean_db_entry "$LIMITS_DB" "$clean_nick" "$identifier"
+_clean_db_entry "$USAGE_DB"  "$clean_nick" "$identifier"
+_apply_xraytools_perms
 
 file_removed=0
-if [ -n "$nick_real" ]; then
-    user_file="${CONN_INFO_DIR}/${nick_real}.txt"
+if [ -n "$clean_nick" ]; then
+    user_file="${CONN_INFO_DIR}/${clean_nick}.txt"
     if [ -f "$user_file" ]; then
         rm -f "$user_file"
         file_removed=1
     fi
 fi
 
-# --- INTEGRAÇÃO SSH: REMOVER USUÁRIO DO SISTEMA (Dropbear/SOCKS5) ---
+# --- INTEGRAÇÃO SSH: REMOVER USUÁRIO DO SISTEMA (SSH/Dropbear/SOCKS5) ---
 ssh_removed=0
-if [ -n "$nick_real" ] && id "$nick_real" &>/dev/null; then
-    userdel -f "$nick_real" 2>/dev/null || true
+if _remove_linux_account "$clean_nick"; then
     ssh_removed=1
 fi
 
@@ -309,12 +396,12 @@ removed_config=$(( before_count - after_count ))
 
 clear
 if [ "$removed_config" -gt 0 ] || [ "$found_in_db" -eq 1 ]; then
-    echo -e "${TXT_GREEN}✅ Usuário '${nick_real:-$identifier}' removido com sucesso.${RESET}"
+    echo -e "${TXT_GREEN}✅ Usuário '${clean_nick}' removido com sucesso.${RESET}"
     echo "-----------------------------------------"
-    [ "$removed_config" -gt 0 ] && echo -e " Config:   ${TXT_GREEN}removido do Xray${RESET}"
-    [ "$found_in_db"    -eq 1 ] && echo -e " DB:       ${TXT_GREEN}removido do banco${RESET}"
-    [ "$file_removed"   -eq 1 ] && echo -e " Arquivo:  ${TXT_GREEN}${CONN_INFO_DIR}/${nick_real}.txt apagado${RESET}"
-    [ "$ssh_removed"    -eq 1 ] && echo -e " SSH/SOCKS:${TXT_GREEN} acesso local bloqueado${RESET}"
+    [ "$removed_config" -gt 0 ] && echo -e " Config:    ${TXT_GREEN}removido do Xray${RESET}"
+    [ "$found_in_db"    -eq 1 ] && echo -e " DB:        ${TXT_GREEN}removido do banco${RESET}"
+    [ "$file_removed"   -eq 1 ] && echo -e " Arquivo:   ${TXT_GREEN}${CONN_INFO_DIR}/${clean_nick}.txt apagado${RESET}"
+    [ "$ssh_removed"    -eq 1 ] && echo -e " SSH/SOCKS: ${TXT_GREEN}conta local removida${RESET}"
     echo "-----------------------------------------"
 else
     echo -e "${TXT_RED}⚠  Nenhum dado removido (usuário não estava no config).${RESET}"
