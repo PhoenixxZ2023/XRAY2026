@@ -1,17 +1,24 @@
 #!/bin/bash
-# lista_users.sh - TURBONET XRAY V1.3
-# Correções aplicadas V1.3:
-#   - Array associativo em memória (USER_CFG_STATUS) com lookup O(1) — zero forks de jq por usuário
-#   - _load_status_map() executado antes da listagem e das exportações CSV/JSON (elimina unbound variable)
-#   - Exportação JSON gerada com jq (escape seguro de senhas e validação numérica)
-#   - Permissões chmod 600 nos arquivos exportados em /tmp (protege UUIDs e senhas)
-#   - Alinhamento do cálculo de vencimento para considerar o dia inteiro da expiração
-#   - Removido prompt duplicado de Enter após exportação
+# lista_users.sh - TURBONET XRAY V1.4 (PRO + Compatibilidade Bot Telegram)
+# Atualizações V1.4:
+#   - _apply_xraytools_perms preserva permissões 2770/0660 quando o usuário `botxray` existe
+#   - Alinhamento entre contador de Ativos no resumo e o filtro [2] Apenas Ativos (separa Fora de Sync)
+#   - Alerta explícito caso config.json esteja ausente ou com JSON inválido
+#   - Cleanup centralizado via trap para arquivos temporários de exportação
 
 set -Eeuo pipefail
+
+_TMP_FILES=()
+_cleanup() {
+    for f in "${_TMP_FILES[@]:-}"; do
+        [ -n "$f" ] && rm -f "$f" 2>/dev/null || true
+    done
+}
+trap '_cleanup' EXIT
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO"; sleep 2' ERR
 
-USER_DB="/opt/XrayTools/users.db"
+XRAYTOOLS_DIR="/opt/XrayTools"
+USER_DB="${XRAYTOOLS_DIR}/users.db"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
 
 TITLE_BAR='\033[1;47;34m'
@@ -55,11 +62,23 @@ ensure_cmd() {
     esac
 }
 
-ensure_cmd jq jq
+_apply_xraytools_perms() {
+    mkdir -p "$XRAYTOOLS_DIR"
+    touch "$USER_DB"
+    if id -u botxray &>/dev/null; then
+        chown root:botxray "$XRAYTOOLS_DIR"
+        chmod 2770 "$XRAYTOOLS_DIR"
+        chown botxray:botxray "$USER_DB"
+        chmod 0660 "$USER_DB"
+    else
+        chmod 0750 "$XRAYTOOLS_DIR"
+        chown root:root "$USER_DB"
+        chmod 0600 "$USER_DB"
+    fi
+}
 
-mkdir -p "$(dirname "$USER_DB")"
-touch "$USER_DB"
-chmod 600 "$USER_DB"
+ensure_cmd jq jq
+_apply_xraytools_perms
 
 # --- HELPERS DE DATA ---
 _today_midnight_ts() {
@@ -96,11 +115,16 @@ days_remaining() {
 
 # --- PRÉ-CARREGAMENTO DO STATUS DO CONFIG EM MEMÓRIA (O(1)) ---
 declare -A USER_CFG_STATUS
+CONFIG_LOAD_OK=1
 
 _load_status_map() {
     USER_CFG_STATUS=()
-    [ -s "$CONFIG_PATH" ] || return 0
-    jq empty "$CONFIG_PATH" 2>/dev/null || return 0
+    CONFIG_LOAD_OK=1
+
+    if [ ! -s "$CONFIG_PATH" ] || ! jq empty "$CONFIG_PATH" 2>/dev/null; then
+        CONFIG_LOAD_OK=0
+        return 0
+    fi
 
     local email state
     while IFS='|' read -r email state; do
@@ -183,6 +207,7 @@ export_to_json() {
 
     local tmp_ndjson
     tmp_ndjson=$(mktemp /tmp/lista_users_ndjson_XXXXXX)
+    _TMP_FILES+=("$tmp_ndjson")
 
     while IFS='|' read -r nick uuid expiry password conn_limit _rest; do
         nick="${nick//$'\r'/}"
@@ -239,7 +264,7 @@ export_to_json() {
 # --- INTERFACE ---
 mostrar_menu_filtro() {
     clear
-    echo -e "${TITLE_BAR}   LISTA DE USUÁRIOS - FILTRO   ${RESET}"
+    echo -e "${TITLE_BAR}   LISTA DE USUÁRIOS - FILTRO (V1.4)   ${RESET}"
     echo ""
     echo "Selecione o filtro:"
     echo ""
@@ -264,6 +289,9 @@ mostrar_lista() {
 
     clear
     echo -e "${TITLE_BAR}   LISTA DE USUÁRIOS   ${RESET}"
+    if [ "$CONFIG_LOAD_OK" -eq 0 ]; then
+        echo -e "${TXT_YELLOW}⚠  Aviso: config.json ausente ou inválido — status do Xray indisponível.${RESET}"
+    fi
 
     printf "%-12s | %-19s | %-12s | %-5s | %-8s | %s\n" \
         "USUÁRIO" "UUID" "EXPIRA" "DIAS" "CONN" "STATUS"
@@ -318,7 +346,6 @@ mostrar_lista() {
             local_color="$TXT_YELLOW"
             status_label="${TXT_YELLOW}FORA DE SYNC${RESET}"
             count_unknown=$(( count_unknown + 1 ))
-            count_active=$(( count_active + 1 ))
             { [ "$filter" = "sync" ] || [ "$filter" = "all" ]; } && should_show=true
         elif [ "$local_soon" = true ]; then
             local_color="$TXT_YELLOW"
@@ -365,7 +392,7 @@ mostrar_lista() {
     echo -e "   Total:         ${TXT_CYAN}${count_total}${RESET}"
     echo -e "   Ativos:        ${TXT_GREEN}${count_active}${RESET}"
     [ "$count_warn"    -gt 0 ] && echo -e "   ↳ Expirando:   ${TXT_YELLOW}${count_warn}${RESET}"
-    [ "$count_unknown" -gt 0 ] && echo -e "   ↳ ForadeSync:  ${TXT_YELLOW}${count_unknown}${RESET}"
+    [ "$count_unknown" -gt 0 ] && echo -e "   Fora de Sync:  ${TXT_YELLOW}${count_unknown}${RESET}"
     [ "$count_locked"  -gt 0 ] && echo -e "   Bloqueados:    ${TXT_RED}${count_locked}${RESET}"
     [ "$count_expired" -gt 0 ] && echo -e "   Expirados:     ${TXT_RED}${count_expired}${RESET}"
     echo ""
