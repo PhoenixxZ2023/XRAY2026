@@ -1,12 +1,11 @@
 #!/bin/bash
-# limiterxray.sh - TURBONET XRAY V1.4 (Com Guilhotina de Sessões)
-# Correções aplicadas V1.4:
-# - Parsing seguro da API com jq + sanitização numérica (elimina crash com aspas do protojson)
-# - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
-# - Permissões 750/640 root:$XRAY_GROUP no diretório e no config.json + validação `xray run -test`
-# - Suporte completo a Trojan (.password) além de VLESS/VMess (.id) no bloqueio/desbloqueio
-# - Substituído try-reload-or-restart por restart direto com verificação _wait_xray_active
-# - Guilhotina com pkill -KILL para encerramento imediato de sessões SSH/SOCKS5
+# limiterxray.sh - TURBONET XRAY V1.5 (PRO + Hot-Reload API + Compatibilidade Bot Telegram)
+# Atualizações V1.5:
+# - _apply_config_perms e _apply_xraytools_perms preservam permissões 2770/0660 quando o usuário `botxray` existe
+# - Corrigida sintaxe da API interna (`xray api removeuser -email=...` + `xray api adduser`) para bloquear/desbloquear sem reiniciar o Xray
+# - Fallback automático para `systemctl restart xray` apenas se a API interna estiver indisponível
+# - Bloqueio/desbloqueio completo da conta Linux (`usermod`, `chage`, `passwd`) com proteção para contas do sistema (UID < 1000)
+# - Verificação explícita de execução como root (EUID)
 
 set -Eeuo pipefail
 
@@ -24,10 +23,12 @@ trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; 
 
 XRAY_BIN="/usr/local/bin/xray"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
-LIMITS_DB="/opt/XrayTools/limits.db"
-USAGE_DB="/opt/XrayTools/usage.db"
-SESSION_DB="/opt/XrayTools/session.db"
-USER_DB="/opt/XrayTools/users.db"
+PRESET_FILE="/usr/local/etc/xray/preset.json"
+XRAYTOOLS_DIR="/opt/XrayTools"
+LIMITS_DB="${XRAYTOOLS_DIR}/limits.db"
+USAGE_DB="${XRAYTOOLS_DIR}/usage.db"
+SESSION_DB="${XRAYTOOLS_DIR}/session.db"
+USER_DB="${XRAYTOOLS_DIR}/users.db"
 LOG_FILE="/tmp/limiterxray.log"
 LOCK_FILE="/tmp/limiterxray.lock"
 
@@ -46,6 +47,11 @@ TXT_YELLOW='\033[1;33m'
 RESET='\033[0m'
 
 export DEBIAN_FRONTEND=noninteractive
+
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    [ "${1:-}" != "--cron" ] && echo -e "${TXT_RED}❌ Execute como root!${RESET}"
+    exit 1
+fi
 
 # ================================================================
 # DETECÇÃO AUTOMÁTICA DE PORTA API
@@ -125,7 +131,7 @@ generate_uuid() {
 acquire_lock() {
     exec 9>"$LOCK_FILE"
     if ! flock -n 9; then
-        echo -e "${TXT_RED}⚠ Outra instância do limiter está rodando. Aguarde.${RESET}"
+        [ "${1:-}" != "--cron" ] && echo -e "${TXT_RED}⚠ Outra instância do limiter está rodando. Aguarde.${RESET}"
         exit 1
     fi
 }
@@ -148,20 +154,57 @@ _detect_xray_owner() {
     XRAY_GROUP="$(id -gn "$XRAY_USER")"
 }
 
+_apply_xraytools_perms() {
+    mkdir -p "$XRAYTOOLS_DIR"
+    if id -u botxray &>/dev/null; then
+        chown root:botxray "$XRAYTOOLS_DIR"
+        chmod 2770 "$XRAYTOOLS_DIR"
+
+        for db in "$LIMITS_DB" "$USAGE_DB" "$SESSION_DB" "$USER_DB"; do
+            if [ -f "$db" ]; then
+                chown botxray:botxray "$db"
+                chmod 0660 "$db"
+            fi
+        done
+    else
+        chmod 0750 "$XRAYTOOLS_DIR"
+        for db in "$LIMITS_DB" "$USAGE_DB" "$SESSION_DB" "$USER_DB"; do
+            if [ -f "$db" ]; then
+                chown root:root "$db"
+                chmod 0600 "$db"
+            fi
+        done
+    fi
+}
+
 _apply_config_perms() {
     _detect_xray_owner
     local cfg_dir
     cfg_dir="$(dirname "$CONFIG_PATH")"
 
+    local dir_mode="750"
+    local file_mode="0640"
+    if id -u botxray &>/dev/null; then
+        dir_mode="2770"
+        file_mode="0660"
+    fi
+
     if [ -d "$cfg_dir" ]; then
         chown "root:${XRAY_GROUP}" "$cfg_dir"
-        chmod 750 "$cfg_dir"
+        chmod "$dir_mode" "$cfg_dir"
     fi
 
     if [ -f "$CONFIG_PATH" ]; then
         chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
-        chmod 0640 "$CONFIG_PATH"
+        chmod "$file_mode" "$CONFIG_PATH"
     fi
+
+    if [ -f "$PRESET_FILE" ]; then
+        chown "root:${XRAY_GROUP}" "$PRESET_FILE"
+        chmod "$file_mode" "$PRESET_FILE"
+    fi
+
+    _apply_xraytools_perms
 }
 
 _test_xray_config() {
@@ -186,12 +229,49 @@ _wait_xray_active() {
 }
 
 # ================================================================
+# GERENCIAMENTO SEGURO DE CONTA LINUX LOCAL
+# ================================================================
+_lock_linux_account() {
+    local nick="$1"
+    if getent passwd "$nick" >/dev/null 2>&1; then
+        local uid shell
+        uid=$(id -u "$nick" 2>/dev/null || echo 0)
+        shell=$(getent passwd "$nick" | cut -d: -f7)
+        if [ "$uid" -lt 1000 ] || [ "$shell" != "/bin/false" ]; then
+            return 0
+        fi
+        usermod -L "$nick" 2>/dev/null || true
+        chage -E 0 "$nick" 2>/dev/null || true
+        passwd -l "$nick" 2>/dev/null || true
+        pkill -KILL -u "$nick" 2>/dev/null || true
+    fi
+}
+
+_unlock_linux_account() {
+    local nick="$1"
+    if [ -f /etc/shells ] && ! grep -qxF "/bin/false" /etc/shells 2>/dev/null; then
+        echo "/bin/false" >> /etc/shells
+    fi
+    if getent passwd "$nick" >/dev/null 2>&1; then
+        local uid shell
+        uid=$(id -u "$nick" 2>/dev/null || echo 0)
+        shell=$(getent passwd "$nick" | cut -d: -f7)
+        if [ "$uid" -lt 1000 ] || [ "$shell" != "/bin/false" ]; then
+            return 0
+        fi
+        usermod -U "$nick" 2>/dev/null || true
+        chage -E -1 "$nick" 2>/dev/null || true
+        passwd -u "$nick" 2>/dev/null || true
+    fi
+}
+
+# ================================================================
 # INICIALIZAÇÃO
 # ================================================================
 : > "$LOG_FILE"
-mkdir -p "/opt/XrayTools"
+mkdir -p "$XRAYTOOLS_DIR"
 touch "$LIMITS_DB" "$USAGE_DB" "$SESSION_DB" "$USER_DB"
-chmod 0600 "$LIMITS_DB" "$USAGE_DB" "$SESSION_DB" "$USER_DB"
+_apply_xraytools_perms
 ensure_cmd jq jq
 
 if [ "${1:-}" != "--cron" ]; then
@@ -203,7 +283,7 @@ fi
 
 header_limit() {
     clear
-    echo -e "${TITLE_BAR} CONTROLE DE CONSUMO (PERSISTENTE) — V1.4 ${RESET}"
+    echo -e "${TITLE_BAR} CONTROLE DE CONSUMO (PERSISTENTE) — V1.5 ${RESET}"
     echo ""
     echo -e " ${TXT_CYAN}Porta API: ${XRAY_API_PORT}${RESET}"
     echo ""
@@ -251,7 +331,7 @@ db_delete_key() {
     tmp=$(mktemp "${file}.tmp.XXXXXX")
     awk -F'|' -v n="$nick" '$1!=n {print}' "$file" > "$tmp"
     mv -f "$tmp" "$file"
-    chmod 0600 "$file"
+    _apply_xraytools_perms
 }
 
 db_get_value() {
@@ -263,7 +343,7 @@ db_set_value() {
     local file="$1" nick="$2" value="$3"
     db_delete_key "$file" "$nick"
     echo "$nick|$value" >> "$file"
-    chmod 0600 "$file"
+    _apply_xraytools_perms
 }
 
 # ================================================================
@@ -290,14 +370,64 @@ safe_config_write() {
 }
 
 # ================================================================
-# FUNÇÕES DA API XRAY
+# FUNÇÕES DA API XRAY (HOT-RELOAD)
 # ================================================================
 _api_remove() {
     local email="$1"
+    [ ! -x "$XRAY_BIN" ] && return 1
     systemctl is-active --quiet xray 2>/dev/null || return 1
     [ -z "${XRAY_API_PORT:-}" ] && func_get_api_port || true
-    "$XRAY_BIN" api rmu -server="127.0.0.1:$XRAY_API_PORT" \
-        -inboundTag="inbound-turbonet" "$email" >/dev/null 2>&1
+    timeout "$XRAY_API_TIMEOUT" "$XRAY_BIN" api removeuser \
+        -server="127.0.0.1:${XRAY_API_PORT}" \
+        -inboundTag="inbound-turbonet" \
+        -email="$email" >>"$LOG_FILE" 2>&1
+}
+
+_api_add_client() {
+    local email="$1" cred="$2"
+    [ ! -x "$XRAY_BIN" ] && return 1
+    systemctl is-active --quiet xray 2>/dev/null || return 1
+    [ -z "${XRAY_API_PORT:-}" ] && func_get_api_port || true
+
+    local proto has_vision preset_net tmp_api_json
+    proto=$(jq -r '.inbounds[]? | select(.tag=="inbound-turbonet") | .protocol // "vless"' "$CONFIG_PATH" 2>/dev/null | head -1)
+    preset_net=$(jq -r '.network // ""' "$PRESET_FILE" 2>/dev/null || echo "")
+    has_vision=$(jq -r '
+        [.inbounds[]? | select(.tag=="inbound-turbonet") | .settings.clients[]? | select(.flow=="xtls-rprx-vision")] | length
+    ' "$CONFIG_PATH" 2>/dev/null || echo 0)
+
+    tmp_api_json=$(mktemp /tmp/xray_limiter_api_XXXXXX.json)
+    _TMP_FILES+=("$tmp_api_json")
+
+    if [ "$proto" = "trojan" ]; then
+        jq -n --arg pwd "$cred" --arg em "$email" \
+            '{inbounds:[{tag:"inbound-turbonet",settings:{clients:[{password:$pwd,email:$em,level:0}]}}]}' > "$tmp_api_json"
+    elif [ "$preset_net" = "vision" ] || [ "${has_vision:-0}" -gt 0 ]; then
+        jq -n --arg id "$cred" --arg em "$email" \
+            '{inbounds:[{tag:"inbound-turbonet",settings:{clients:[{id:$id,email:$em,level:0,flow:"xtls-rprx-vision"}]}}]}' > "$tmp_api_json"
+    else
+        jq -n --arg id "$cred" --arg em "$email" \
+            '{inbounds:[{tag:"inbound-turbonet",settings:{clients:[{id:$id,email:$em,level:0}]}}]}' > "$tmp_api_json"
+    fi
+
+    if timeout "$XRAY_API_TIMEOUT" "$XRAY_BIN" api adduser \
+        -s "127.0.0.1:${XRAY_API_PORT}" "$tmp_api_json" >>"$LOG_FILE" 2>&1; then
+        rm -f "$tmp_api_json"
+        return 0
+    fi
+
+    rm -f "$tmp_api_json"
+    return 1
+}
+
+_hot_reload_swap_client() {
+    local old_email="$1" new_email="$2" new_cred="$3"
+    if ! _test_xray_config "$CONFIG_PATH" >>"$LOG_FILE" 2>&1; then
+        return 1
+    fi
+    _api_remove "$old_email" 2>/dev/null || return 1
+    _api_add_client "$new_email" "$new_cred" || return 1
+    return 0
 }
 
 apply_config_change_and_reload() {
@@ -404,17 +534,14 @@ func_set_limit() {
                 else . end)' \
                 --arg nick "$nick" --arg locked "LOCKED_$nick" --arg cred "$real_cred"; then
 
-                _api_remove "LOCKED_${nick}" 2>/dev/null || true
-                if apply_config_change_and_reload; then
+                if _hot_reload_swap_client "LOCKED_${nick}" "$nick" "$real_cred"; then
+                    echo -e "${TXT_GREEN}⚡ Usuário desbloqueado via API sem derrubar conexões ativas!${RESET}"
+                elif apply_config_change_and_reload; then
                     echo -e "${TXT_GREEN}✅ Usuário desbloqueado!${RESET}"
                 fi
             fi
 
-            if id "$nick" &>/dev/null; then
-                usermod -U "$nick" 2>/dev/null || true
-                chage -E -1 "$nick" 2>/dev/null || true
-            fi
-
+            _unlock_linux_account "$nick"
             release_lock
         else
             echo -e "${TXT_YELLOW}⚠ Credencial real não encontrada. Desbloqueio manual necessário.${RESET}"
@@ -507,16 +634,14 @@ func_remove_limit() {
                 else . end)' \
                 --arg nick "$nick" --arg locked "LOCKED_$nick" --arg cred "$real_cred"; then
 
-                _api_remove "LOCKED_${nick}" 2>/dev/null || true
-                apply_config_change_and_reload && \
+                if _hot_reload_swap_client "LOCKED_${nick}" "$nick" "$real_cred"; then
+                    echo -e "${TXT_GREEN}⚡ Limite removido e usuário desbloqueado via API!${RESET}"
+                elif apply_config_change_and_reload; then
                     echo -e "${TXT_GREEN}✅ Limite removido e usuário desbloqueado!${RESET}"
+                fi
             fi
 
-            if id "$nick" &>/dev/null; then
-                usermod -U "$nick" 2>/dev/null || true
-                chage -E -1 "$nick" 2>/dev/null || true
-            fi
-
+            _unlock_linux_account "$nick"
             release_lock
         fi
     fi
@@ -548,9 +673,9 @@ func_check_and_block() {
         return 1
     fi
 
-    acquire_lock
+    acquire_lock "$MODE"
     local blocked_count=0
-    local config_changed=false
+    local need_full_restart=false
 
     local tmp_usage tmp_session
     tmp_usage=$(mktemp "${USAGE_DB}.work.XXXXXX")
@@ -626,16 +751,18 @@ func_check_and_block() {
                     cp -f "$CONFIG_PATH" "${CONFIG_PATH}.bak"
                     mv -f "$tmp_block" "$CONFIG_PATH"
                     _apply_config_perms
-                    config_changed=true
 
-                    _api_remove "$nick" 2>/dev/null || true
+                    local proto fake_cred
+                    proto=$(jq -r '.inbounds[]? | select(.tag=="inbound-turbonet") | .protocol // "vless"' "$CONFIG_PATH" 2>/dev/null | head -1)
+                    fake_cred="$fake_uuid"
+                    [ "$proto" = "trojan" ] && fake_cred="$fake_pass"
+
+                    if ! _hot_reload_swap_client "$nick" "LOCKED_${nick}" "$fake_cred"; then
+                        need_full_restart=true
+                    fi
 
                     # Guilhotina SSH/SOCKS5: trava conta e derruba conexões ativas
-                    if id "$nick" &>/dev/null; then
-                        usermod -L "$nick" 2>/dev/null || true
-                        chage -E 0 "$nick" 2>/dev/null || true
-                        pkill -KILL -u "$nick" 2>/dev/null || true
-                    fi
+                    _lock_linux_account "$nick"
 
                     blocked_count=$(( blocked_count + 1 ))
                 else
@@ -647,20 +774,21 @@ func_check_and_block() {
         fi
     done < "$LIMITS_DB"
 
-    # Promove cópias de trabalho para DBs reais
+    # Promove cópias de trabalho para DBs reais e preserva dono/permissões do botxray
     mv -f "$tmp_usage" "$USAGE_DB"
     mv -f "$tmp_session" "$SESSION_DB"
-    _TMP_FILES=()
+    _apply_xraytools_perms
 
-    chmod 0600 "$USAGE_DB" "$SESSION_DB"
-
-    if [ "$config_changed" = true ]; then
+    if [ "$need_full_restart" = true ]; then
         apply_config_change_and_reload || true
         [ "$MODE" != "--cron" ] && \
-        echo -e "${TXT_RED}🚫 ${blocked_count} usuário(s) bloqueado(s).${RESET}"
+        echo -e "${TXT_RED}🚫 ${blocked_count} usuário(s) bloqueado(s) (via restart).${RESET}"
+    elif [ "$blocked_count" -gt 0 ]; then
+        [ "$MODE" != "--cron" ] && \
+        echo -e "${TXT_RED}🚫 ${blocked_count} usuário(s) bloqueado(s) via API sem derrubar clientes ativos.${RESET}"
     else
         [ "$MODE" != "--cron" ] && \
-        echo -e "${TXT_GREEN}✅ Dados atualizados. Nenhum reload necessário.${RESET}"
+        echo -e "${TXT_GREEN}✅ Dados atualizados. Nenhum bloqueio necessário.${RESET}"
     fi
 
     release_lock
