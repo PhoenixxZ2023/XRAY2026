@@ -1,10 +1,10 @@
 #!/bin/bash
-# core_manager.sh - TURBONET XRAY V1.2.4 (Perfil XHTTP Universal + Compatibilidade Bot Telegram)
-# Atualizações V1.2.4:
-#   - _apply_config_perms e _apply_xraytools_perms preservam permissões 2770/660 quando o usuário `botxray` existe
-#   - Removidos `chmod 700` e `chown root:root` em /opt/XrayTools, users.db, active_domain e connection_info.txt
-#   - Adicionado `|| true` ao parar o serviço na opção [3] para evitar disparo indevido do trap ERR
-#   - Mantido perfil XHTTP [1] estilo SSHorizon e statsUserOnline na policy level 0
+# core_manager.sh - TURBONET XRAY V1.2.5 (Perfil XHTTP Universal + Compatibilidade Bot Telegram)
+# Atualizações V1.2.5:
+#   - Corrigido retorno falso (código 1) em _apply_xraytools_perms quando connection_info.txt ainda não existe
+#   - Preservada permissão 700 root:root em /opt/TurbonetCoreSSL/renew_cert.sh dentro de _apply_config_perms
+#   - Sincronização automática do CN/SAN gravado em active_domain após execução do certxray.sh
+#   - Evitado disparo duplicado do trap ERR na linha 998 após mensagens tratadas no assistente
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; read -rp "Enter para continuar...";' ERR
@@ -111,18 +111,32 @@ _apply_xraytools_perms() {
             fi
         done
 
-        for info in "$ACTIVE_DOMAIN_FILE" "$CONN_INFO_FILE"; do
-            if [ -f "$info" ]; then
-                chown root:botxray "$info"
-                chmod 640 "$info"
-            fi
-        done
+        if [ -f "$ACTIVE_DOMAIN_FILE" ]; then
+            chown botxray:botxray "$ACTIVE_DOMAIN_FILE"
+            chmod 660 "$ACTIVE_DOMAIN_FILE"
+        fi
+
+        if [ -f "$CONN_INFO_FILE" ]; then
+            chown root:botxray "$CONN_INFO_FILE"
+            chmod 640 "$CONN_INFO_FILE"
+        fi
     else
+        chown root:root "$XRAYTOOLS_DIR"
         chmod 750 "$XRAYTOOLS_DIR"
-        [ -f "$USER_DB" ] && { chown root:root "$USER_DB"; chmod 600 "$USER_DB"; }
-        [ -f "$ACTIVE_DOMAIN_FILE" ] && { chown root:root "$ACTIVE_DOMAIN_FILE"; chmod 600 "$ACTIVE_DOMAIN_FILE"; }
-        [ -f "$CONN_INFO_FILE" ] && { chown root:root "$CONN_INFO_FILE"; chmod 600 "$CONN_INFO_FILE"; }
+        if [ -f "$USER_DB" ]; then
+            chown root:root "$USER_DB"
+            chmod 600 "$USER_DB"
+        fi
+        if [ -f "$ACTIVE_DOMAIN_FILE" ]; then
+            chown root:root "$ACTIVE_DOMAIN_FILE"
+            chmod 600 "$ACTIVE_DOMAIN_FILE"
+        fi
+        if [ -f "$CONN_INFO_FILE" ]; then
+            chown root:root "$CONN_INFO_FILE"
+            chmod 600 "$CONN_INFO_FILE"
+        fi
     fi
+    return 0
 }
 
 _apply_config_perms() {
@@ -154,12 +168,24 @@ _apply_config_perms() {
     fi
 
     if [ -d "$SSL_DIR" ]; then
-        chown -R "root:${XRAY_GROUP}" "$SSL_DIR"
-        find "$SSL_DIR" -type d -exec chmod 750 {} +
-        find "$SSL_DIR" -type f -exec chmod 640 {} +
+        chmod 750 "$SSL_DIR"
+        chown "root:${XRAY_GROUP}" "$SSL_DIR"
+        if [ -f "$SSL_DIR/privkey.pem" ]; then
+            chmod 640 "$SSL_DIR/privkey.pem"
+            chown "root:${XRAY_GROUP}" "$SSL_DIR/privkey.pem"
+        fi
+        if [ -f "$SSL_DIR/fullchain.pem" ]; then
+            chmod 644 "$SSL_DIR/fullchain.pem"
+            chown root:root "$SSL_DIR/fullchain.pem"
+        fi
+        if [ -f "$SSL_DIR/renew_cert.sh" ]; then
+            chmod 700 "$SSL_DIR/renew_cert.sh"
+            chown root:root "$SSL_DIR/renew_cert.sh"
+        fi
     fi
 
     _apply_xraytools_perms
+    return 0
 }
 
 _test_xray_config() {
@@ -370,8 +396,13 @@ func_xray_cert() {
     mv -f "$tmp" "$cert_script"
     chmod 700 "$cert_script"
     chown root:root "$cert_script"
-    bash "$cert_script" "$dom"
+
+    if ! bash "$cert_script" "$dom"; then
+        return 1
+    fi
+
     _apply_config_perms
+    return 0
 }
 
 # Preenche $out_file com array JSON de clientes e define SAMPLE_CRED no escopo atual
@@ -768,7 +799,7 @@ func_generate_config() {
     fi
     sleep 2
 
-    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2.4)"
+    header_blue "CONFIGURAÇÃO CONCLUÍDA (V1.2.5)"
 
     local status_show="${TXT_RED}FALHA${RESET}"
     if systemctl is-active --quiet xray 2>/dev/null; then
@@ -836,7 +867,7 @@ func_wizard_install() {
     header_blue "PASSO 1/5 — INSTALAÇÃO DO CORE"
     echo -e "${TXT_YELLOW}Deseja instalar/atualizar o Xray Core?${RESET}"
     read -rp "[s] Sim / [n] Não: " inst
-    if [[ "$inst" =~ ^[Ss]$ ]]; then
+    if [[ "${inst:-n}" =~ ^[Ss]$ ]]; then
         func_install_official_core || true
     fi
 
@@ -877,7 +908,7 @@ func_wizard_install() {
     if [ "$use_tls" = "true" ]; then
         echo -e "${TXT_YELLOW}Digite o domínio (ex: meusite.com):${RESET}"
         read -rp "Domínio: " domain_val
-        domain_val="$(echo "${domain_val:-}" | tr -d '[:space:][:cntrl:]')"
+        domain_val="$(echo "${domain_val:-}" | tr -d '[:space:][:cntrl:]' | tr '[:upper:]' '[:lower:]')"
         if ! validate_domain "$domain_val"; then
             echo -e "${TXT_RED}❌ Domínio inválido.${RESET}"; read -rp "Enter..."; return 1
         fi
@@ -889,10 +920,18 @@ func_wizard_install() {
         if [ ! -s "$CRT_FILE" ] || [ ! -s "$KEY_FILE" ]; then
             echo -e "${TXT_RED}❌ Certificado não gerado.${RESET}"; read -rp "Enter..."; return 1
         fi
+
+        if [ -s "$ACTIVE_DOMAIN_FILE" ]; then
+            local cert_cn
+            cert_cn="$(tr -d '[:space:][:cntrl:]' < "$ACTIVE_DOMAIN_FILE")"
+            if [ -n "$cert_cn" ]; then
+                domain_val="$cert_cn"
+            fi
+        fi
     else
         echo -e "${TXT_YELLOW}IP público da VPS ou domínio (sem TLS):${RESET}"
         read -rp "Endereço [Enter = detectar IP]: " domain_val
-        domain_val="$(echo "${domain_val:-}" | tr -d '[:space:][:cntrl:]')"
+        domain_val="$(echo "${domain_val:-}" | tr -d '[:space:][:cntrl:]' | tr '[:upper:]' '[:lower:]')"
         if [ -z "${domain_val:-}" ]; then
             echo -n "Detectando IP... "
             domain_val=$(curl -fsSL --max-time 10 "https://icanhazip.com" 2>/dev/null || \
@@ -921,7 +960,7 @@ func_wizard_install() {
     read -rp "Opção [1-8]: " prot_opt
 
     local selected_net=""
-    case "$prot_opt" in
+    case "${prot_opt:-}" in
         1) selected_net="ws"          ;;
         2) selected_net="grpc"        ;;
         3) selected_net="xhttp"       ;;
@@ -975,7 +1014,7 @@ func_wizard_install() {
 # --- MENU INTERATIVO ---
 while true; do
     clear
-    echo -e "${TITLE_BAR}   CORE MANAGER — TURBONET XRAY   ${RESET}"
+    echo -e "${TITLE_BAR}   CORE MANAGER — TURBONET XRAY V1.2.5   ${RESET}"
     echo ""
 
     if systemctl is-active --quiet xray 2>/dev/null; then
@@ -995,10 +1034,10 @@ while true; do
 
     case "${opt:-0}" in
         1)
-            func_wizard_install
+            func_wizard_install || true
             ;;
         2)
-            func_install_official_core
+            func_install_official_core || true
             _apply_config_perms
             systemctl restart xray >/dev/null 2>&1 || true
             read -rp "Enter..."
