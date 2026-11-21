@@ -1,9 +1,9 @@
 #!/bin/bash
-# botxray.sh - TURBONET XRAY V1.3.3 (PRO + HÍBRIDO)
-# Correções V1.3.3:
-#   - Verificação via `python3 -c "import ensurepip, venv"` (evita falso positivo do `--help` no Ubuntu/Debian)
-#   - Instalação explícita de `python3-venv` e `python3.X-venv` com `apt-get update` garantido
-#   - Recria `/opt/XrayTools/venv` caso exista uma pasta incompleta sem `bin/pip`
+# botxray.sh - TURBONET XRAY V1.3.4 (PRO + HÍBRIDO)
+# Correções V1.3.4:
+#   - Verificação via `python3 -c "import ensurepip, venv"` + instalação garantida de `python3-venv` / `python3.X-venv`
+#   - Testa `/opt/XrayTools/venv/bin/python -m pip --version` e recria o venv automaticamente se estiver incompleto
+#   - Usa `/opt/XrayTools/venv/bin/python -m pip install` (evita erro 127 se `bin/pip` estiver ausente)
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (codigo: $?)"; read -rp "Enter...";' ERR
@@ -74,7 +74,7 @@ func_install_bot() {
     : > "$LOG_FILE"
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}     INSTALADOR BOT TELEGRAM - V1.3.3 (PRO)      ${RESET}"
+    echo -e "${AMARELO}     INSTALADOR BOT TELEGRAM - V1.3.4 (PRO)      ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
     echo ""
 
@@ -249,13 +249,13 @@ EOF
     chown root:botxray "$ENV_FILE"
     echo -e "${VERDE}Credenciais salvas em ${ENV_FILE}${RESET}"
 
-    # --- VENV COM VERSÕES FIXADAS ---
-    if [ ! -x /opt/XrayTools/venv/bin/pip ]; then
+    # --- VENV COM VERSÕES FIXADAS (RECRIA SE INCOMPLETO) ---
+    if ! /opt/XrayTools/venv/bin/python -m pip --version >/dev/null 2>&1; then
         rm -rf /opt/XrayTools/venv
         python3 -m venv /opt/XrayTools/venv
     fi
     echo "Instalando dependencias Python..."
-    /opt/XrayTools/venv/bin/pip install --quiet --no-cache-dir \
+    /opt/XrayTools/venv/bin/python -m pip install --quiet --no-cache-dir \
         "python-telegram-bot==20.7" \
         "requests==2.31.0" >>"$LOG_FILE" 2>&1
 
@@ -545,7 +545,7 @@ func_view_logs() {
 while true; do
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.3.3      ${RESET}"
+    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.3.4      ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
 
     status_msg="${VERMELHO}NÃO INSTALADO${RESET}"
