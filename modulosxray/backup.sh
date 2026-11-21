@@ -1,12 +1,10 @@
 #!/bin/bash
-# backup.sh - TURBONET XRAY V1.1
-# Correções aplicadas V1.1:
-#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
-#   - Permissões 750/640 root:$XRAY_GROUP aplicadas nos diretórios e arquivos do Xray/SSL
-#   - umask 077 no restore + chmod 600 root:root em todos os bancos (.db) e .api_key
-#   - Validação de tipos de entrada no tar (bloqueia symlinks e arquivos especiais) + --no-same-owner
-#   - Validação com `xray run -test` antes de reiniciar o serviço
-#   - Sincronização SSH/SOCKS5 respeita usuários expirados, LOCKED_ e /etc/shells
+# backup.sh - TURBONET XRAY V1.2 (PRO + Compatibilidade Bot Telegram)
+# Atualizações V1.2:
+#   - _apply_xraytools_perms e _apply_config_perms preservam permissões 2770/0660 quando o usuário `botxray` existe
+#   - Backup inclui também arquivos de configuração/estado do bot em /opt/XrayTools (*.env, *.json, bot.db)
+#   - Sincronização completa de contas Linux (`usermod`, `chage`, `passwd`, `pkill`) com validação de nick e UID >= 1000
+#   - Reinício garantido dos serviços `xray` e `botxray` mesmo em caso de rollback por falha na extração
 
 set -Eeuo pipefail
 
@@ -28,7 +26,9 @@ RESET='\033[0m'
 TITLE_BAR='\033[1;47;34m'
 
 BACKUP_DIR="/root/backups"
+XRAYTOOLS_DIR="/opt/XrayTools"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
+PRESET_FILE="/usr/local/etc/xray/preset.json"
 XRAY_BIN="/usr/local/bin/xray"
 MAX_BACKUPS=5
 _SNAP_REMOVE_OK=0
@@ -46,6 +46,8 @@ require_root() {
 require_root
 mkdir -p "$BACKUP_DIR"
 
+validate_nick() { [[ "${1:-}" =~ ^[a-zA-Z0-9]{5,9}$ ]]; }
+
 # --- DETECÇÃO DINÂMICA DE DONO E PERMISSÕES ---
 _detect_xray_owner() {
     local svc_user=""
@@ -60,11 +62,92 @@ _detect_xray_owner() {
     XRAY_GROUP="$(id -gn "$XRAY_USER")"
 }
 
-_apply_config_perms() {
-    local f="$1"
+_apply_xraytools_perms() {
+    mkdir -p "$XRAYTOOLS_DIR"
+    if id -u botxray &>/dev/null; then
+        chown root:botxray "$XRAYTOOLS_DIR"
+        chmod 2770 "$XRAYTOOLS_DIR"
+
+        for db_f in users.db limits.db usage.db session.db active_domain .api_key bot.db; do
+            if [ -f "${XRAYTOOLS_DIR}/${db_f}" ]; then
+                chown botxray:botxray "${XRAYTOOLS_DIR}/${db_f}"
+                chmod 0660 "${XRAYTOOLS_DIR}/${db_f}"
+            fi
+        done
+
+        find "$XRAYTOOLS_DIR" -maxdepth 1 \( -name "*.env" -o -name "*.json" \) -type f \
+            -exec chown botxray:botxray {} \; \
+            -exec chmod 0660 {} \; 2>/dev/null || true
+
+        if [ -d "${XRAYTOOLS_DIR}/users" ]; then
+            chown root:botxray "${XRAYTOOLS_DIR}/users"
+            chmod 0750 "${XRAYTOOLS_DIR}/users"
+            find "${XRAYTOOLS_DIR}/users" -maxdepth 1 -name "*.txt" -type f \
+                -exec chown root:botxray {} \; \
+                -exec chmod 0640 {} \; 2>/dev/null || true
+        fi
+    else
+        chown root:root "$XRAYTOOLS_DIR"
+        chmod 0750 "$XRAYTOOLS_DIR"
+
+        for db_f in users.db limits.db usage.db session.db active_domain .api_key bot.db; do
+            if [ -f "${XRAYTOOLS_DIR}/${db_f}" ]; then
+                chown root:root "${XRAYTOOLS_DIR}/${db_f}"
+                chmod 0600 "${XRAYTOOLS_DIR}/${db_f}"
+            fi
+        done
+
+        find "$XRAYTOOLS_DIR" -maxdepth 1 \( -name "*.env" -o -name "*.json" \) -type f \
+            -exec chown root:root {} \; \
+            -exec chmod 0600 {} \; 2>/dev/null || true
+
+        if [ -d "${XRAYTOOLS_DIR}/users" ]; then
+            chown root:root "${XRAYTOOLS_DIR}/users"
+            chmod 0700 "${XRAYTOOLS_DIR}/users"
+            find "${XRAYTOOLS_DIR}/users" -maxdepth 1 -name "*.txt" -type f \
+                -exec chown root:root {} \; \
+                -exec chmod 0600 {} \; 2>/dev/null || true
+        fi
+    fi
+}
+
+_apply_all_restored_perms() {
     _detect_xray_owner
-    chmod 0640 "$f"
-    chown "root:${XRAY_GROUP}" "$f"
+
+    local dir_mode="750"
+    local file_mode="0640"
+    if id -u botxray &>/dev/null; then
+        dir_mode="2770"
+        file_mode="0660"
+    fi
+
+    if [ -d /usr/local/etc/xray ]; then
+        chown "root:${XRAY_GROUP}" /usr/local/etc/xray
+        chmod "$dir_mode" /usr/local/etc/xray
+    fi
+    if [ -f "$CONFIG_PATH" ]; then
+        chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
+        chmod "$file_mode" "$CONFIG_PATH"
+    fi
+    if [ -f "$PRESET_FILE" ]; then
+        chown "root:${XRAY_GROUP}" "$PRESET_FILE"
+        chmod "$file_mode" "$PRESET_FILE"
+    fi
+
+    if [ -d /opt/TurbonetCoreSSL ]; then
+        chmod 750 /opt/TurbonetCoreSSL
+        chown "root:${XRAY_GROUP}" /opt/TurbonetCoreSSL 2>/dev/null || true
+        if [ -f /opt/TurbonetCoreSSL/fullchain.pem ]; then
+            chmod 644 /opt/TurbonetCoreSSL/fullchain.pem
+            chown root:root /opt/TurbonetCoreSSL/fullchain.pem
+        fi
+        if [ -f /opt/TurbonetCoreSSL/privkey.pem ]; then
+            chmod 640 /opt/TurbonetCoreSSL/privkey.pem
+            chown "root:${XRAY_GROUP}" /opt/TurbonetCoreSSL/privkey.pem
+        fi
+    fi
+
+    _apply_xraytools_perms
 }
 
 _test_xray_config() {
@@ -78,14 +161,22 @@ _test_xray_config() {
     fi
 }
 
-_wait_xray_active() {
+_wait_service_active() {
+    local svc="$1"
     local tries=5
     while [ "$tries" -gt 0 ]; do
-        systemctl is-active --quiet xray 2>/dev/null && return 0
+        systemctl is-active --quiet "$svc" 2>/dev/null && return 0
         sleep 1
         tries=$(( tries - 1 ))
     done
     return 1
+}
+
+_restart_services() {
+    systemctl restart xray >/dev/null 2>&1 || true
+    if systemctl list-unit-files botxray.service >/dev/null 2>&1; then
+        systemctl restart botxray >/dev/null 2>&1 || true
+    fi
 }
 
 _ensure_false_shell() {
@@ -156,16 +247,18 @@ rotate_backups() {
     if [ "$count" -gt "$max" ]; then
         local to_remove=$(( count - max ))
         echo -e "${TXT_CYAN}Removendo ${to_remove} backup(s) antigo(s)...${RESET}"
-        for (( i=0; i<to_remove; i++ )); do
-            rm -f "${all_backups[$i]}" "${all_backups[$i]}.sha256"
-            echo " removido: $(basename "${all_backups[$i]}")"
+        local idx=0
+        while [ "$idx" -lt "$to_remove" ]; do
+            rm -f "${all_backups[$idx]}" "${all_backups[$idx]}.sha256"
+            echo " removido: $(basename "${all_backups[$idx]}")"
+            idx=$(( idx + 1 ))
         done
     fi
 }
 
 # --- MENU ---
 clear
-echo -e "${TITLE_BAR}   BACKUP & RESTORE   ${RESET}"
+echo -e "${TITLE_BAR}   BACKUP & RESTORE (V1.2 PRO)   ${RESET}"
 echo ""
 echo -e "${TXT_CYAN}[1] CRIAR BACKUP${RESET}"
 echo -e "${TXT_CYAN}[2] RESTAURAR BACKUP${RESET}"
@@ -179,8 +272,8 @@ case "${opt:-0}" in
   # ============================================================
     echo "Verificando arquivos necessários..."
 
-    if [ ! -f "/opt/XrayTools/users.db" ]; then
-        echo -e "${TXT_RED}❌ users.db não encontrado em /opt/XrayTools/${RESET}"
+    if [ ! -f "${XRAYTOOLS_DIR}/users.db" ]; then
+        echo -e "${TXT_RED}❌ users.db não encontrado em ${XRAYTOOLS_DIR}/${RESET}"
         exit 1
     fi
     if [ ! -d "/usr/local/etc/xray" ]; then
@@ -196,11 +289,14 @@ case "${opt:-0}" in
     _TMPDIR_BKP=$(mktemp -d)
 
     mkdir -p "$_TMPDIR_BKP/opt/XrayTools"
-    for f in users.db limits.db usage.db session.db active_domain .api_key; do
-        [ -f "/opt/XrayTools/$f" ] && cp -f "/opt/XrayTools/$f" "$_TMPDIR_BKP/opt/XrayTools/$f"
+    for f in users.db limits.db usage.db session.db active_domain .api_key bot.db; do
+        [ -f "${XRAYTOOLS_DIR}/$f" ] && cp -f "${XRAYTOOLS_DIR}/$f" "$_TMPDIR_BKP/opt/XrayTools/$f"
     done
-    [ -d "/opt/XrayTools/users" ] && \
-        cp -r "/opt/XrayTools/users" "$_TMPDIR_BKP/opt/XrayTools/" 2>/dev/null || true
+    find "$XRAYTOOLS_DIR" -maxdepth 1 \( -name "*.env" -o -name "*.json" \) -type f \
+        -exec cp -f {} "$_TMPDIR_BKP/opt/XrayTools/" \; 2>/dev/null || true
+
+    [ -d "${XRAYTOOLS_DIR}/users" ] && \
+        cp -r "${XRAYTOOLS_DIR}/users" "$_TMPDIR_BKP/opt/XrayTools/" 2>/dev/null || true
 
     mkdir -p "$_TMPDIR_BKP/usr/local/etc"
     cp -a /usr/local/etc/xray "$_TMPDIR_BKP/usr/local/etc/" 2>/dev/null || true
@@ -334,54 +430,15 @@ case "${opt:-0}" in
                 --no-same-permissions \
                 --no-same-owner \
                 >/dev/null 2>&1 || true
+            _apply_all_restored_perms
             echo -e "${TXT_YELLOW}Estado anterior restaurado do snapshot.${RESET}"
         fi
+        _restart_services
         exit 1
     fi
 
     echo "Aplicando permissões..."
-    _detect_xray_owner
-
-    chmod 700 /opt/XrayTools 2>/dev/null || true
-    chown root:root /opt/XrayTools 2>/dev/null || true
-    for db_f in users.db limits.db usage.db session.db active_domain .api_key; do
-        if [ -f "/opt/XrayTools/$db_f" ]; then
-            chmod 600 "/opt/XrayTools/$db_f"
-            chown root:root "/opt/XrayTools/$db_f"
-        fi
-    done
-
-    if [ -d /usr/local/etc/xray ]; then
-        chown "root:${XRAY_GROUP}" /usr/local/etc/xray
-        chmod 750 /usr/local/etc/xray
-    fi
-    if [ -f /usr/local/etc/xray/config.json ]; then
-        _apply_config_perms /usr/local/etc/xray/config.json
-    fi
-    if [ -f /usr/local/etc/xray/preset.json ]; then
-        _apply_config_perms /usr/local/etc/xray/preset.json
-    fi
-
-    if [ -d /opt/XrayTools/users ]; then
-        chmod 700 /opt/XrayTools/users
-        chown root:root /opt/XrayTools/users
-        find /opt/XrayTools/users -maxdepth 1 -name "*.txt" \
-            -exec chmod 600 {} \; \
-            -exec chown root:root {} \; 2>/dev/null || true
-    fi
-
-    if [ -d /opt/TurbonetCoreSSL ]; then
-        chmod 750 /opt/TurbonetCoreSSL
-        chown "root:${XRAY_GROUP}" /opt/TurbonetCoreSSL 2>/dev/null || true
-        if [ -f /opt/TurbonetCoreSSL/fullchain.pem ]; then
-            chmod 644 /opt/TurbonetCoreSSL/fullchain.pem
-            chown root:root /opt/TurbonetCoreSSL/fullchain.pem
-        fi
-        if [ -f /opt/TurbonetCoreSSL/privkey.pem ]; then
-            chmod 640 /opt/TurbonetCoreSSL/privkey.pem
-            chown "root:${XRAY_GROUP}" /opt/TurbonetCoreSSL/privkey.pem
-        fi
-    fi
+    _apply_all_restored_perms
 
     if [ -f "$CONFIG_PATH" ]; then
         _test_xray_config "$CONFIG_PATH" >/dev/null 2>&1 || \
@@ -389,27 +446,53 @@ case "${opt:-0}" in
     fi
 
     echo "Reiniciando serviços..."
-    systemctl restart xray    >/dev/null 2>&1 || true
-    systemctl restart botxray >/dev/null 2>&1 || true
+    _restart_services
 
     echo ""
     local_xray_status="${TXT_RED}FALHA${RESET}"
-    if _wait_xray_active; then
+    if _wait_service_active "xray"; then
         local_xray_status="${TXT_GREEN}ATIVO${RESET}"
     fi
 
-    # INTEGRAÇÃO SSH/SOCKS5: Re-sincronizar usuários respeitando vencimento e LOCKED_
+    local_bot_status=""
+    if systemctl list-unit-files botxray.service >/dev/null 2>&1; then
+        if _wait_service_active "botxray"; then
+            local_bot_status="${TXT_GREEN}ATIVO${RESET}"
+        else
+            local_bot_status="${TXT_RED}FALHA${RESET}"
+        fi
+    fi
+
+    # INTEGRAÇÃO SSH/DROPBEAR/SOCKS5: Re-sincronizar usuários respeitando vencimento, LOCKED_ e UID >= 1000
     echo "Sincronizando usuários locais (SSH/SOCKS5)..."
-    if [ -s /opt/XrayTools/users.db ]; then
+    if [ -s "${XRAYTOOLS_DIR}/users.db" ]; then
         _ensure_false_shell
         today_ts=$(date -d "$(date +%F)" +%s)
 
         while IFS='|' read -r nick uuid expiry pass limit _rest; do
+            nick="${nick//$'\r'/}"
+            expiry="${expiry//$'\r'/}"
+            pass="${pass//$'\r'/}"
+
             [ -n "${nick:-}" ] && [ -n "${pass:-}" ] || continue
+            validate_nick "$nick" || continue
+            nick=$(echo "$nick" | tr '[:upper:]' '[:lower:]')
+
             exp_ts=$(date -d "${expiry:-2000-01-01}" +%s 2>/dev/null || echo 0)
 
+            if getent passwd "$nick" >/dev/null 2>&1; then
+                uid=$(id -u "$nick" 2>/dev/null || echo 0)
+                shell=$(getent passwd "$nick" | cut -d: -f7)
+                if [ "$uid" -lt 1000 ] || [ "$shell" != "/bin/false" ]; then
+                    continue
+                fi
+            fi
+
             if [ "$exp_ts" -lt "$today_ts" ]; then
-                id "$nick" &>/dev/null && userdel -f "$nick" 2>/dev/null || true
+                if getent passwd "$nick" >/dev/null 2>&1; then
+                    pkill -KILL -u "$nick" 2>/dev/null || true
+                    userdel -r -f "$nick" 2>/dev/null || true
+                fi
                 continue
             fi
 
@@ -421,22 +504,27 @@ case "${opt:-0}" in
                 ' "$CONFIG_PATH" >/dev/null 2>&1 && is_locked=true
             fi
 
-            id "$nick" &>/dev/null || useradd -M -s /bin/false "$nick" 2>/dev/null || true
+            getent passwd "$nick" >/dev/null 2>&1 || useradd -M -s /bin/false "$nick" 2>/dev/null || true
             echo "${nick}:${pass}" | chpasswd 2>/dev/null || true
 
             if [ "$is_locked" = true ]; then
+                usermod -L "$nick" >/dev/null 2>&1 || true
+                chage -E 0 "$nick" >/dev/null 2>&1 || true
                 passwd -l "$nick" >/dev/null 2>&1 || true
+                pkill -KILL -u "$nick" 2>/dev/null || true
             else
                 usermod -U "$nick" >/dev/null 2>&1 || true
                 chage -E -1 "$nick" >/dev/null 2>&1 || true
+                passwd -u "$nick" >/dev/null 2>&1 || true
             fi
-        done < /opt/XrayTools/users.db
+        done < "${XRAYTOOLS_DIR}/users.db"
         echo -e "${TXT_GREEN}✅ Contas locais Linux sincronizadas com o banco.${RESET}"
     fi
 
     echo -e "${TXT_GREEN}✅ Sistema restaurado!${RESET}"
     echo "-----------------------------------------"
     echo -e " Xray:    ${local_xray_status}"
+    [ -n "$local_bot_status" ] && echo -e " Bot TG:  ${local_bot_status}"
     if ! systemctl is-active --quiet xray 2>/dev/null; then
         echo ""
         echo -e "${TXT_YELLOW}Últimas linhas do journal:${RESET}"
