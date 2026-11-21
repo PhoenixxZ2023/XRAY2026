@@ -1,11 +1,10 @@
 #!/bin/bash
-# onlinexray.sh - TURBONET XRAY V1.1
-# Correções aplicadas:
-#   - Consulta única por ciclo via `xray api statsquery` + jq (elimina aspas do protojson e gargalo 2xN)
-#   - Sanitização estrita de inteiros antes da aritmética Bash sob set -Eeuo pipefail
-#   - Baseline inicial sem falso positivo de "Online" para tráfego antigo acumulado
-#   - Atualização dinâmica da lista de usuários ativos a cada 5 ciclos
-#   - Detecção da porta API por tag "api" ou protocolo "dokodemo-door" com fallback 1080
+# onlinexray.sh - TURBONET XRAY V1.2 (PRO + Híbrido Xray/SSH)
+# Atualizações V1.2:
+#   - Baseline dinâmico (known_user) para usuários adicionados ou desbloqueados durante a execução (sem falso positivo)
+#   - Detecção híbrida de sessões ativas (Xray via API statsquery + SSH/Dropbear/SOCKS5 via ps)
+#   - Exibição de taxa de transferência instantânea (B/s, KB/s, MB/s) e ordenação de usuários online no topo
+#   - Proteção contra array vazio (${USERS[@]:-}) sob set -Eeuo pipefail
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;33mSaindo...\033[0m"; exit 0' INT TERM
@@ -72,18 +71,39 @@ if ! jq -e '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door")' "$
     echo -e "${RED}❌ Inbound API não configurado no Xray.${RESET}"; exit 1
 fi
 
-API_PORT="$(jq -r '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door") | .port // empty' "$CONF" 2>/dev/null | head -1 || true)"
-[ -n "${API_PORT:-}" ] || API_PORT="1080"
+API_PORT="1080"
+_refresh_api_port() {
+    local detected
+    detected="$(jq -r '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door") | .port // empty' "$CONF" 2>/dev/null | head -1 || true)"
+    if [[ "${detected:-}" =~ ^[0-9]+$ ]]; then
+        API_PORT="$detected"
+    fi
+}
+_refresh_api_port
 
 # --- CARREGA USUÁRIOS ATIVOS (sem LOCKED_) ---
 USERS=()
+declare -A known_user
+
 _load_users() {
+    [ -s "$CONF" ] && jq empty "$CONF" 2>/dev/null || return 0
     mapfile -t USERS < <(jq -r '
         .inbounds[]? | select(.tag=="inbound-turbonet")
         | .settings.clients[]?
         | select(.email? and (.email | startswith("LOCKED_") | not))
         | .email
     ' "$CONF" 2>/dev/null | awk 'NF')
+
+    declare -A active_set=()
+    local u k
+    for u in "${USERS[@]:-}"; do
+        [ -n "${u:-}" ] && active_set["$u"]=1
+    done
+    for k in "${!known_user[@]}"; do
+        if [ -z "${active_set[$k]:-}" ]; then
+            unset "known_user[$k]"
+        fi
+    done
 }
 
 _load_users
@@ -91,8 +111,8 @@ if [ ${#USERS[@]} -eq 0 ]; then
     echo -e "${RED}Nenhum usuário ativo no inbound-turbonet.${RESET}"; exit 0
 fi
 
-# --- CONSULTA ÚNICA À API POR CICLO ---
-declare -A cur_down cur_up last_down last_up last_seen delta_total
+# --- CONSULTA ÚNICA À API E PROCESSOS SSH/SOCKS5 POR CICLO ---
+declare -A cur_down cur_up last_down last_up last_seen delta_total ssh_active
 
 _poll_all_stats() {
     cur_down=()
@@ -126,6 +146,15 @@ _poll_all_stats() {
     ' 2>/dev/null || true)
 }
 
+_poll_ssh_users() {
+    ssh_active=()
+    local proc_user
+    while IFS= read -r proc_user; do
+        [ -n "${proc_user:-}" ] || continue
+        ssh_active["$proc_user"]=1
+    done < <(ps -eo user= 2>/dev/null | sort -u || true)
+}
+
 bytes_human() {
     local b="${1:-0}"
     awk -v b="$b" 'BEGIN {
@@ -139,10 +168,13 @@ bytes_human() {
 # --- BASELINE INICIAL ---
 echo -e "${CYAN}Inicializando monitor para ${#USERS[@]} usuário(s)...${RESET}"
 _poll_all_stats
-for u in "${USERS[@]}"; do
+for u in "${USERS[@]:-}"; do
+    [ -n "${u:-}" ] || continue
     last_down["$u"]="${cur_down["$u"]:-0}"
     last_up["$u"]="${cur_up["$u"]:-0}"
     last_seen["$u"]=0
+    delta_total["$u"]=0
+    known_user["$u"]=1
 done
 
 sleep 1
@@ -155,16 +187,30 @@ while true; do
     now="$(date +%s)"
     cycle=$(( cycle + 1 ))
 
-    if (( cycle % 5 == 1 )); then
+    if [ $(( cycle % 5 )) -eq 1 ]; then
         systemctl is-active --quiet xray 2>/dev/null && xray_ok=true || xray_ok=false
+        _refresh_api_port
         _load_users
     fi
 
     _poll_all_stats
+    _poll_ssh_users
 
-    for u in "${USERS[@]}"; do
+    for u in "${USERS[@]:-}"; do
+        [ -n "${u:-}" ] || continue
         d="${cur_down["$u"]:-0}"
         up="${cur_up["$u"]:-0}"
+
+        # Usuário recém-criado ou recém-desbloqueado: captura baseline sem falso positivo
+        if [ -z "${known_user["$u"]:-}" ]; then
+            last_down["$u"]="$d"
+            last_up["$u"]="$up"
+            last_seen["$u"]=0
+            delta_total["$u"]=0
+            known_user["$u"]=1
+            continue
+        fi
+
         prev_d="${last_down["$u"]:-0}"
         prev_u="${last_up["$u"]:-0}"
 
@@ -184,51 +230,84 @@ while true; do
         last_up["$u"]="$up"
     done
 
-    # Renderiza tela
-    clear
-    echo -e "${CYAN}================================================${RESET}"
-    echo -e "${CYAN}      MONITOR DE USUÁRIOS ONLINE (API)         ${RESET}"
-    echo -e "${CYAN}================================================${RESET}"
-    echo -e " Janela: ${YELLOW}${WINDOW}s${RESET}  Poll: ${YELLOW}${SLEEP}s${RESET}  Timeout API: ${YELLOW}${API_TIMEOUT}s${RESET}  Ciclo: ${DIM}#${cycle}${RESET}"
-
-    if [ "$xray_ok" = false ]; then
-        echo -e " ${RED}⚠  Xray não está ativo — stats podem estar zeradas!${RESET}"
-    fi
-
-    echo -e " Hora: $(date '+%H:%M:%S')  Usuários monitorados: ${#USERS[@]}"
-    echo -e "${CYAN}------------------------------------------------${RESET}"
-    printf " ${CYAN}%-14s${RESET} | ${CYAN}%-12s${RESET} | ${CYAN}%s${RESET}\n" "USUÁRIO" "DELTA CICLO" "STATUS"
-    echo -e "${CYAN}------------------------------------------------${RESET}"
-
+    online_rows=()
+    offline_rows=()
     online_count=0
-    for u in "${USERS[@]}"; do
+
+    for u in "${USERS[@]:-}"; do
+        [ -n "${u:-}" ] || continue
         seen="${last_seen["$u"]:-0}"
         age=$(( now - seen ))
         dt="${delta_total["$u"]:-0}"
+        has_ssh="${ssh_active["$u"]:-0}"
 
+        xray_online=0
         if [ "$seen" -gt 0 ] && [ "$age" -le "$WINDOW" ]; then
-            delta_h="$(bytes_human "$dt")"
-            printf " ${GREEN}%-14s${RESET} | ${YELLOW}%-12s${RESET} | ${GREEN}● Online${RESET} ${DIM}(há ${age}s)${RESET}\n" \
-                "$u" "$delta_h"
+            xray_online=1
+        fi
+
+        if [ "$xray_online" -eq 1 ] || [ "$has_ssh" -eq 1 ]; then
             online_count=$(( online_count + 1 ))
+            proto_tag="Xray"
+            if [ "$xray_online" -eq 1 ] && [ "$has_ssh" -eq 1 ]; then
+                proto_tag="Xray+SSH"
+            elif [ "$has_ssh" -eq 1 ]; then
+                proto_tag="SSH/SOCKS"
+            fi
+
+            if [ "$dt" -gt 0 ]; then
+                rate=$(( dt / SLEEP ))
+                [ "$rate" -lt 1 ] && rate=1
+                traffic_col="$(bytes_human "$rate")/s"
+            else
+                traffic_col="conectado"
+            fi
+
+            row=$(printf " ${GREEN}%-14s${RESET} | ${YELLOW}%-12s${RESET} | ${GREEN}● Online${RESET} ${CYAN}[%s]${RESET}" \
+                "$u" "$traffic_col" "$proto_tag")
+            online_rows+=("$row")
         else
             if [ "$seen" -gt 0 ]; then
-                printf " ${DIM}%-14s${RESET} | ${DIM}%-12s${RESET} | ${DIM}○ Inativo (há ${age}s)${RESET}\n" \
-                    "$u" "-"
+                row=$(printf " ${DIM}%-14s${RESET} | ${DIM}%-12s${RESET} | ${DIM}○ Inativo (há ${age}s)${RESET}" \
+                    "$u" "-")
             else
-                printf " ${DIM}%-14s${RESET} | ${DIM}%-12s${RESET} | ${DIM}○ Sem atividade${RESET}\n" \
-                    "$u" "-"
+                row=$(printf " ${DIM}%-14s${RESET} | ${DIM}%-12s${RESET} | ${DIM}○ Sem atividade${RESET}" \
+                    "$u" "-")
             fi
+            offline_rows+=("$row")
         fi
     done
 
-    echo -e "${CYAN}------------------------------------------------${RESET}"
+    # Renderiza tela
+    clear
+    echo -e "${CYAN}======================================================${RESET}"
+    echo -e "${CYAN}         MONITOR DE USUÁRIOS ONLINE (V1.2)            ${RESET}"
+    echo -e "${CYAN}======================================================${RESET}"
+    echo -e " Janela: ${YELLOW}${WINDOW}s${RESET}  Poll: ${YELLOW}${SLEEP}s${RESET}  API: ${YELLOW}:${API_PORT}${RESET}  Ciclo: ${DIM}#${cycle}${RESET}"
+
+    if [ "$xray_ok" = false ]; then
+        echo -e " ${RED}⚠  Xray não está ativo — stats do Xray podem estar zeradas!${RESET}"
+    fi
+
+    echo -e " Hora: $(date '+%H:%M:%S')  Usuários ativos no cadastro: ${#USERS[@]}"
+    echo -e "${CYAN}------------------------------------------------------${RESET}"
+    printf " ${CYAN}%-14s${RESET} | ${CYAN}%-12s${RESET} | ${CYAN}%s${RESET}\n" "USUÁRIO" "TAXA / CICLO" "STATUS"
+    echo -e "${CYAN}------------------------------------------------------${RESET}"
+
+    for row in "${online_rows[@]:-}"; do
+        [ -n "$row" ] && echo -e "$row"
+    done
+    for row in "${offline_rows[@]:-}"; do
+        [ -n "$row" ] && echo -e "$row"
+    done
+
+    echo -e "${CYAN}------------------------------------------------------${RESET}"
     if [ "$online_count" -eq 0 ]; then
         echo -e " ${RED}Nenhum usuário ativo na janela de ${WINDOW}s.${RESET}"
     else
         echo -e " ${GREEN}${online_count} usuário(s) online agora.${RESET}"
     fi
-    echo -e "${CYAN}================================================${RESET}"
+    echo -e "${CYAN}======================================================${RESET}"
     echo -e " ${DIM}CTRL+C para sair${RESET}"
 
     sleep "$SLEEP"
