@@ -1,11 +1,11 @@
 """
-botxray.py - TURBONET XRAY V1.4.1 (PRO + HÍBRIDO)
-Correções V1.4.1:
-- save_config(): ajusta grupo via os.chown(..., -1, target_gid) antes do os.replace() (compatível com User=botxray)
-- generate_link(): lê /opt/XrayTools/active_domain e preset.json quando tlsSettings.serverName está vazio (perfil SSHorizon)
-- sync_ssh_user(): delega useradd/chpasswd/userdel/usermod/chage/pkill/passwd ao wrapper setuid /usr/local/bin/wrap_ssh_sync
-- Suporte completo a VLESS (xhttp, ws, grpc, tcp, vision, httpupgrade, h2) e Trojan no reload_xray_user e generate_link
-- Validação de intervalo de dias (1..3650), sanitização estrita de nicknames e criação de USER_DB com chmod 0600
+botxray.py - TURBONET XRAY V1.4.2 (PRO + HÍBRIDO)
+Correções V1.4.2:
+- Permissões 0o660 em save_config() e USER_DB + tratamento de OSError em load_config()
+- generate_link() respeita xhttpSettings.host (quando configurado) e codifica path (%2F)
+- core_create_user() verifica duplicidade também em config.json antes de inserir
+- core_renew_user() valida retorno de save_config() antes de recarregar usuário via API
+- Limpeza garantida de arquivos temporários em /tmp no backup_start via try...finally
 """
 
 from __future__ import annotations
@@ -20,10 +20,11 @@ import re
 import shutil
 import subprocess
 import tempfile
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -89,7 +90,7 @@ def _is_valid_nick(nick: str, strict_create: bool = False) -> bool:
     return bool(re.match(r"^[a-z0-9_-]{2,32}$", nick))
 
 
-def _ensure_private_file(path: str, mode: int = 0o600) -> None:
+def _ensure_private_file(path: str, mode: int = 0o660) -> None:
     if not os.path.exists(path):
         fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, mode)
         os.close(fd)
@@ -97,6 +98,27 @@ def _ensure_private_file(path: str, mode: int = 0o600) -> None:
         os.chmod(path, mode)
     except OSError:
         pass
+
+
+def _write_user_db_atomic(lines: list[str]) -> None:
+    db_dir = os.path.dirname(USER_DB)
+    tmp_db = os.path.join(db_dir, f".users.db.tmp.{os.getpid()}")
+    try:
+        with open(tmp_db, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        os.chmod(tmp_db, 0o660)
+        try:
+            bot_gid = grp.getgrnam("botxray").gr_gid
+            os.chown(tmp_db, -1, bot_gid)
+        except (KeyError, OSError):
+            pass
+        os.replace(tmp_db, USER_DB)
+    finally:
+        if os.path.exists(tmp_db):
+            try:
+                os.remove(tmp_db)
+            except OSError:
+                pass
 
 
 def sync_ssh_user(action: str, nick: str, password: str = "") -> bool:
@@ -159,13 +181,13 @@ def _get_inbound_profile(data: dict) -> Tuple[str, str]:
     return proto, net
 
 
-def _build_client_obj(nick: str, cred: str, proto: str, net: str) -> dict:
+def _build_client_obj(nick: str, cred: str, proto: str, net: str, data: Optional[dict] = None) -> dict:
     if proto == "trojan":
         return {"password": cred, "email": nick, "level": 0}
     if net == "tcp":
-        data = load_config()
-        if data:
-            inb = next((i for i in data.get("inbounds", []) if i.get("tag") == "inbound-turbonet"), {})
+        cfg = data if data is not None else load_config()
+        if cfg:
+            inb = next((i for i in cfg.get("inbounds", []) if i.get("tag") == "inbound-turbonet"), {})
             existing = inb.get("settings", {}).get("clients", [])
             if any(c.get("flow") == "xtls-rprx-vision" for c in existing):
                 return {"id": cred, "email": nick, "level": 0, "flow": "xtls-rprx-vision"}
@@ -193,7 +215,7 @@ def reload_xray_user(action: str, nick: str, user_cred: str, inbound_tag: str = 
 
         if action == "add":
             proto, net = _get_inbound_profile(data)
-            user_json = json.dumps(_build_client_obj(nick, user_cred, proto, net))
+            user_json = json.dumps(_build_client_obj(nick, user_cred, proto, net, data))
             cmd = [
                 xray_bin, "api", "adduser",
                 f"-server=127.0.0.1:{api_port}",
@@ -232,7 +254,10 @@ def load_config() -> Optional[dict]:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
     except json.JSONDecodeError as e:
-        logger.error("JSON corrompido: %s", e)
+        logger.error("JSON corrompido em %s: %s", CONFIG_PATH, e)
+        return None
+    except OSError as e:
+        logger.error("Erro de leitura em %s: %s", CONFIG_PATH, e)
         return None
 
 
@@ -252,7 +277,7 @@ def save_config(data: dict) -> bool:
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        os.chmod(tmp_path, 0o640)
+        os.chmod(tmp_path, 0o660)
         if target_gid != -1:
             try:
                 os.chown(tmp_path, -1, target_gid)
@@ -376,12 +401,13 @@ def generate_link(client_cred: str, client_email: str) -> str:
             )
 
         if network == "ws":
-            path    = stream.get("wsSettings", {}).get("path", "/")
-            ws_host = sni if sni else host
+            raw_path = stream.get("wsSettings", {}).get("path", "/")
+            enc_path = urllib.parse.quote(raw_path, safe="")
+            ws_host  = sni if sni else host
             return (
                 f"vless://{client_cred}@{host}:{port}"
                 f"?{sec_param}&encryption=none&type=ws"
-                f"&host={ws_host}&path={path}&sni={sni}#{client_email}"
+                f"&host={ws_host}&path={enc_path}&sni={sni}#{client_email}"
             )
 
         if network == "grpc":
@@ -393,29 +419,34 @@ def generate_link(client_cred: str, client_email: str) -> str:
             )
 
         if network == "xhttp":
-            path = stream.get("xhttpSettings", {}).get("path", "/")
+            xhttp_cfg  = stream.get("xhttpSettings", {})
+            raw_path   = xhttp_cfg.get("path", "/")
+            enc_path   = urllib.parse.quote(raw_path, safe="")
+            xhttp_host = (xhttp_cfg.get("host") or "").strip() or host
             return (
                 f"vless://{client_cred}@{host}:{port}"
                 f"?mode=auto&{sec_param}&encryption=none&type=xhttp"
-                f"&host={host}&path={path}&sni={sni}#{client_email}"
+                f"&host={xhttp_host}&path={enc_path}&sni={sni}#{client_email}"
             )
 
         if network == "httpupgrade":
-            path    = stream.get("httpupgradeSettings", {}).get("path", "/")
-            hu_host = sni if sni else host
+            raw_path = stream.get("httpupgradeSettings", {}).get("path", "/")
+            enc_path = urllib.parse.quote(raw_path, safe="")
+            hu_host  = sni if sni else host
             return (
                 f"vless://{client_cred}@{host}:{port}"
                 f"?{sec_param}&encryption=none&type=httpupgrade"
-                f"&host={hu_host}&path={path}&sni={sni}#{client_email}"
+                f"&host={hu_host}&path={enc_path}&sni={sni}#{client_email}"
             )
 
         if network == "h2":
-            path    = stream.get("httpSettings", {}).get("path", "/")
-            h2_host = sni if sni else host
+            raw_path = stream.get("httpSettings", {}).get("path", "/")
+            enc_path = urllib.parse.quote(raw_path, safe="")
+            h2_host  = sni if sni else host
             return (
                 f"vless://{client_cred}@{host}:{port}"
                 f"?security=tls&encryption=none&type=h2"
-                f"&host={h2_host}&path={path}&sni={sni}#{client_email}"
+                f"&host={h2_host}&path={enc_path}&sni={sni}#{client_email}"
             )
 
         return "❌ Protocolo não suportado para geração de link."
@@ -527,7 +558,7 @@ def core_create_user(nick: str, days: str) -> Tuple[bool, str]:
     if not _is_valid_nick(nick, strict_create=True):
         return False, "❌ Nome de usuário inválido."
 
-    _ensure_private_file(USER_DB, 0o600)
+    _ensure_private_file(USER_DB, 0o660)
     with open(USER_DB, "r", encoding="utf-8", errors="replace") as f:
         if any(line.startswith(f"{nick}|") for line in f):
             return False, "❌ Usuário já existe!"
@@ -543,11 +574,17 @@ def core_create_user(nick: str, days: str) -> Tuple[bool, str]:
     if not inbound:
         return False, "❌ inbound-turbonet não encontrado."
 
-    proto, net = _get_inbound_profile(data)
+    existing_emails = {
+        c.get("email", "") for c in inbound.get("settings", {}).get("clients", [])
+    }
+    if nick in existing_emails or f"LOCKED_{nick}" in existing_emails:
+        return False, "❌ Usuário já cadastrado no config.json."
+
+    proto, net  = _get_inbound_profile(data)
     user_cred   = uuid.uuid4().hex if proto == "trojan" else str(uuid.uuid4())
     expiry_date = (datetime.now() + timedelta(days=int(days))).strftime("%Y-%m-%d")
 
-    inbound["settings"]["clients"].append(_build_client_obj(nick, user_cred, proto, net))
+    inbound["settings"]["clients"].append(_build_client_obj(nick, user_cred, proto, net, data))
 
     if not save_config(data):
         return False, "❌ Falha ao salvar config.json."
@@ -600,11 +637,7 @@ def core_delete_user(nick: str) -> str:
                 found = True
             else:
                 new_lines.append(line)
-        tmp_db = USER_DB + f".tmp.{os.getpid()}"
-        with open(tmp_db, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
-        os.chmod(tmp_db, 0o600)
-        os.replace(tmp_db, USER_DB)
+        _write_user_db_atomic(new_lines)
 
     if not found:
         return "❌ Usuário não encontrado no sistema."
@@ -736,12 +769,7 @@ def core_renew_user(nick: str, days_to_add: str) -> str:
     if not found:
         return "❌ Usuário não encontrado no banco de dados."
 
-    tmp_db = USER_DB + f".tmp.{os.getpid()}"
-    with open(tmp_db, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-    os.chmod(tmp_db, 0o600)
-    os.replace(tmp_db, USER_DB)
-
+    _write_user_db_atomic(lines)
     sync_ssh_user("renew", nick)
 
     data = load_config()
@@ -760,9 +788,11 @@ def core_renew_user(nick: str, days_to_add: str) -> str:
                         was_locked = True
                         break
     if was_locked and data and real_cred:
-        save_config(data)
-        reload_xray_user("remove", f"LOCKED_{nick}", "")
-        reload_xray_user("add", nick, real_cred)
+        if save_config(data):
+            reload_xray_user("remove", f"LOCKED_{nick}", "")
+            reload_xray_user("add", nick, real_cred)
+        else:
+            logger.error("core_renew_user: falha ao salvar desbloqueio de %s", nick)
 
     return f"🔄 Usuário `{nick}` RENOVADO com sucesso!\nNova data: {new_expiry}"
 
@@ -805,7 +835,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data.clear()
     await update.message.reply_text(
-        "🐉 *PAINEL TURBONET XRAY V1.4.1 (PRO)*\n_Integração Híbrida SSH Ativa_",
+        "🐉 *PAINEL TURBONET XRAY V1.4.2 (PRO)*\n_Integração Híbrida SSH Ativa_",
         reply_markup=build_menu(),
         parse_mode="Markdown",
     )
@@ -901,7 +931,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("📦 Gerando Backup...", parse_mode="Markdown")
 
         date_str = datetime.now().strftime("%Y%m%d_%H%M")
-        bkp_file = f"/tmp/backup_{date_str}.tar.gz"
+        bkp_file = f"/tmp/backup_{date_str}_{os.getpid()}.tar.gz"
         sha_file = bkp_file + ".sha256"
 
         tmpdir = tempfile.mkdtemp()
@@ -931,51 +961,57 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        if os.path.exists(bkp_file) and os.path.getsize(bkp_file) > 0:
-            sha256_hash = hashlib.sha256()
-            with open(bkp_file, "rb") as f_hash:
-                for byte_block in iter(lambda: f_hash.read(4096), b""):
-                    sha256_hash.update(byte_block)
-            digest = sha256_hash.hexdigest()
+        try:
+            if os.path.exists(bkp_file) and os.path.getsize(bkp_file) > 0:
+                sha256_hash = hashlib.sha256()
+                with open(bkp_file, "rb") as f_hash:
+                    for byte_block in iter(lambda: f_hash.read(4096), b""):
+                        sha256_hash.update(byte_block)
+                digest = sha256_hash.hexdigest()
 
-            with open(sha_file, "w", encoding="utf-8") as sf:
-                sf.write(f"{digest}  {os.path.basename(bkp_file)}\n")
+                with open(sha_file, "w", encoding="utf-8") as sf:
+                    sf.write(f"{digest}  backup_{date_str}.tar.gz\n")
 
-            close_btn = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🗑 Fechar Backup", callback_data="close_file")]]
-            )
-            with open(bkp_file, "rb") as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=os.path.basename(bkp_file),
-                    caption=(
-                        "🔐 *Backup do Sistema*\n\n"
-                        "_Inclui Xray, Banco de Dados e SSL_\n"
-                        f"SHA256: `{digest[:16]}...`"
-                    ),
+                close_btn = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🗑 Fechar Backup", callback_data="close_file")]]
+                )
+                with open(bkp_file, "rb") as f:
+                    await context.bot.send_document(
+                        chat_id=update.effective_chat.id,
+                        document=f,
+                        filename=f"backup_{date_str}.tar.gz",
+                        caption=(
+                            "🔐 *Backup do Sistema*\n\n"
+                            "_Inclui Xray, Banco de Dados e SSL_\n"
+                            f"SHA256: `{digest[:16]}...`"
+                        ),
+                        parse_mode="Markdown",
+                        reply_markup=close_btn,
+                    )
+                with open(sha_file, "rb") as f:
+                    await context.bot.send_document(
+                        chat_id=update.effective_chat.id,
+                        document=f,
+                        filename=f"backup_{date_str}.tar.gz.sha256",
+                        caption="🔑 Hash SHA256 do backup acima",
+                    )
+                await query.edit_message_text(
+                    "✅ *Backup enviado abaixo!*",
                     parse_mode="Markdown",
-                    reply_markup=close_btn,
+                    reply_markup=build_menu(),
                 )
-            with open(sha_file, "rb") as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=os.path.basename(sha_file),
-                    caption="🔑 Hash SHA256 do backup acima",
+            else:
+                await query.edit_message_text(
+                    "❌ Falha ao criar backup. Verifique os logs.",
+                    reply_markup=build_menu(),
                 )
-            os.remove(bkp_file)
-            os.remove(sha_file)
-            await query.edit_message_text(
-                "✅ *Backup enviado abaixo!*",
-                parse_mode="Markdown",
-                reply_markup=build_menu(),
-            )
-        else:
-            await query.edit_message_text(
-                "❌ Falha ao criar backup. Verifique os logs.",
-                reply_markup=build_menu(),
-            )
+        finally:
+            for tmpf in (bkp_file, sha_file):
+                if os.path.exists(tmpf):
+                    try:
+                        os.remove(tmpf)
+                    except OSError:
+                        pass
         return SELECTING_ACTION
 
     await query.edit_message_text("Reiniciando...", reply_markup=build_menu())
@@ -1129,7 +1165,7 @@ def main():
         allow_reentry=True,
     )
     app.add_handler(conv)
-    logger.info("TURBONET XRAY Bot V1.4.1 iniciado. Admin ID: %d", ADMIN_ID)
+    logger.info("TURBONET XRAY Bot V1.4.2 iniciado. Admin ID: %d", ADMIN_ID)
     app.run_polling()
 
 
