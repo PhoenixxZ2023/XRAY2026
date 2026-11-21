@@ -1,9 +1,9 @@
 #!/bin/bash
-# botxray.sh - TURBONET XRAY V1.3.4 (PRO + HÍBRIDO)
-# Correções V1.3.4:
-#   - Verificação via `python3 -c "import ensurepip, venv"` + instalação garantida de `python3-venv` / `python3.X-venv`
-#   - Testa `/opt/XrayTools/venv/bin/python -m pip --version` e recria o venv automaticamente se estiver incompleto
-#   - Usa `/opt/XrayTools/venv/bin/python -m pip install` (evita erro 127 se `bin/pip` estiver ausente)
+# botxray.sh - TURBONET XRAY V1.3.5 (PRO + HÍBRIDO)
+# Correções V1.3.5:
+#   - Permissões 2770/660 em /usr/local/etc/xray e /opt/XrayTools para escrita atômica do bot sem root
+#   - Garante `usermod -aG ${XRAY_GRP} botxray` na instalação, no restore e ao iniciar o serviço
+#   - Mantida verificação via `python3 -c "import ensurepip, venv"` e recriação automática de venv incompleto
 
 set -Eeuo pipefail
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (codigo: $?)"; read -rp "Enter...";' ERR
@@ -57,6 +57,47 @@ _detect_xray_group() {
     id -gn "$svc_user"
 }
 
+_apply_bot_runtime_perms() {
+    local xray_grp
+    xray_grp="$(_detect_xray_group)"
+
+    if id -u botxray &>/dev/null; then
+        usermod -aG "$xray_grp" botxray 2>/dev/null || true
+    fi
+
+    if [ -d /usr/local/etc/xray ]; then
+        chown -R "root:${xray_grp}" /usr/local/etc/xray
+        chmod 2770 /usr/local/etc/xray
+        chmod 660 /usr/local/etc/xray/*.json 2>/dev/null || true
+    fi
+
+    mkdir -p /opt/XrayTools /opt/XrayTools/backups /opt/XrayTools/users /root/backups
+    if id -u botxray &>/dev/null; then
+        chown root:botxray /opt/XrayTools
+        chmod 2770 /opt/XrayTools
+
+        chown botxray:botxray /opt/XrayTools/backups /opt/XrayTools/users
+        chmod 0750 /opt/XrayTools/backups /opt/XrayTools/users
+
+        [ -f /opt/XrayTools/.bot_env ] && { chown root:botxray /opt/XrayTools/.bot_env; chmod 0640 /opt/XrayTools/.bot_env; }
+        [ -f /opt/XrayTools/botxray.py ] && { chown root:botxray /opt/XrayTools/botxray.py; chmod 0640 /opt/XrayTools/botxray.py; }
+        chown -R botxray:botxray /opt/XrayTools/venv 2>/dev/null || true
+
+        for db in users.db limits.db usage.db session.db; do
+            [ -f "/opt/XrayTools/$db" ] && {
+                chown botxray:botxray "/opt/XrayTools/$db"
+                chmod 0660 "/opt/XrayTools/$db"
+            }
+        done
+        for info in active_domain connection_info.txt; do
+            [ -f "/opt/XrayTools/$info" ] && {
+                chown root:botxray "/opt/XrayTools/$info"
+                chmod 0640 "/opt/XrayTools/$info"
+            }
+        done
+    fi
+}
+
 _wait_service_active() {
     local svc="$1" tries=5
     while [ "$tries" -gt 0 ]; do
@@ -74,7 +115,7 @@ func_install_bot() {
     : > "$LOG_FILE"
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}     INSTALADOR BOT TELEGRAM - V1.3.4 (PRO)      ${RESET}"
+    echo -e "${AMARELO}     INSTALADOR BOT TELEGRAM - V1.3.5 (PRO)      ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
     echo ""
 
@@ -85,7 +126,6 @@ func_install_bot() {
     ensure_pkg gcc        gcc
     ensure_pkg tar        tar
 
-    # Verifica ensurepip + venv (no Ubuntu/Debian, python3 -m venv --help funciona sem python3-venv)
     if ! python3 -c "import ensurepip, venv" >/dev/null 2>&1; then
         _detect_pkg_manager
         local py_ver
@@ -346,26 +386,43 @@ svc_user="${svc_user:-nobody}"
 id "$svc_user" &>/dev/null || svc_user="root"
 xray_grp=$(id -gn "$svc_user")
 
-chmod 750 /usr/local/etc/xray 2>/dev/null || true
-chown "root:${xray_grp}" /usr/local/etc/xray 2>/dev/null || true
-[ -f /usr/local/etc/xray/config.json ] && {
-    chmod 0640 /usr/local/etc/xray/config.json 2>/dev/null || true
-    chown "root:${xray_grp}" /usr/local/etc/xray/config.json 2>/dev/null || true
-}
-[ -f /usr/local/etc/xray/preset.json ] && {
-    chmod 0640 /usr/local/etc/xray/preset.json 2>/dev/null || true
-    chown "root:${xray_grp}" /usr/local/etc/xray/preset.json 2>/dev/null || true
-}
+if id -u botxray &>/dev/null; then
+    usermod -aG "$xray_grp" botxray 2>/dev/null || true
+    chmod 2770 /usr/local/etc/xray 2>/dev/null || true
+    chown -R "root:${xray_grp}" /usr/local/etc/xray 2>/dev/null || true
+    chmod 0660 /usr/local/etc/xray/*.json 2>/dev/null || true
 
-chown root:botxray /opt/XrayTools 2>/dev/null || true
-chmod 0750 /opt/XrayTools 2>/dev/null || true
+    chown root:botxray /opt/XrayTools 2>/dev/null || true
+    chmod 2770 /opt/XrayTools 2>/dev/null || true
 
-for db in users.db limits.db usage.db session.db; do
-    [ -f "/opt/XrayTools/$db" ] && {
-        chown botxray:botxray "/opt/XrayTools/$db" 2>/dev/null || true
-        chmod 0600 "/opt/XrayTools/$db" 2>/dev/null || true
+    for db in users.db limits.db usage.db session.db; do
+        [ -f "/opt/XrayTools/$db" ] && {
+            chown botxray:botxray "/opt/XrayTools/$db" 2>/dev/null || true
+            chmod 0660 "/opt/XrayTools/$db" 2>/dev/null || true
+        }
+    done
+else
+    chmod 750 /usr/local/etc/xray 2>/dev/null || true
+    chown "root:${xray_grp}" /usr/local/etc/xray 2>/dev/null || true
+    [ -f /usr/local/etc/xray/config.json ] && {
+        chmod 0640 /usr/local/etc/xray/config.json 2>/dev/null || true
+        chown "root:${xray_grp}" /usr/local/etc/xray/config.json 2>/dev/null || true
     }
-done
+    [ -f /usr/local/etc/xray/preset.json ] && {
+        chmod 0640 /usr/local/etc/xray/preset.json 2>/dev/null || true
+        chown "root:${xray_grp}" /usr/local/etc/xray/preset.json 2>/dev/null || true
+    }
+
+    chown root:root /opt/XrayTools 2>/dev/null || true
+    chmod 0750 /opt/XrayTools 2>/dev/null || true
+
+    for db in users.db limits.db usage.db session.db; do
+        [ -f "/opt/XrayTools/$db" ] && {
+            chown root:root "/opt/XrayTools/$db" 2>/dev/null || true
+            chmod 0600 "/opt/XrayTools/$db" 2>/dev/null || true
+        }
+    done
+fi
 
 for info in active_domain connection_info.txt; do
     [ -f "/opt/XrayTools/$info" ] && {
@@ -429,44 +486,7 @@ RSTEOF
 
     # --- PERMISSÕES DO DIRETÓRIO ---
     XRAY_GRP="$(_detect_xray_group)"
-
-    if [ -d /usr/local/etc/xray ]; then
-        chmod 750 /usr/local/etc/xray
-        chown "root:${XRAY_GRP}" /usr/local/etc/xray
-    fi
-
-    if [ -f /usr/local/etc/xray/config.json ]; then
-        chmod 640 /usr/local/etc/xray/config.json
-        chown "root:${XRAY_GRP}" /usr/local/etc/xray/config.json
-    fi
-
-    mkdir -p /opt/XrayTools/backups /opt/XrayTools/users /root/backups
-    chown botxray:botxray /opt/XrayTools/backups
-    chmod 0750 /opt/XrayTools/backups
-    chown botxray:botxray /opt/XrayTools/users
-    chmod 0750 /opt/XrayTools/users
-
-    chown root:botxray /opt/XrayTools
-    chmod 0750 /opt/XrayTools
-
-    chown root:botxray "$ENV_FILE"
-    chmod 0640 "$ENV_FILE"
-    chown root:botxray "$BOT_PY"
-    chmod 0640 "$BOT_PY"
-
-    chown -R botxray:botxray /opt/XrayTools/venv 2>/dev/null || true
-    for db in users.db limits.db usage.db session.db; do
-        [ -f "/opt/XrayTools/$db" ] && {
-            chown botxray:botxray "/opt/XrayTools/$db"
-            chmod 0600 "/opt/XrayTools/$db"
-        }
-    done
-    for info in active_domain connection_info.txt; do
-        [ -f "/opt/XrayTools/$info" ] && {
-            chown root:botxray "/opt/XrayTools/$info"
-            chmod 0640 "/opt/XrayTools/$info"
-        }
-    done
+    _apply_bot_runtime_perms
 
     # --- SYSTEMD SERVICE ---
     cat > /etc/systemd/system/botxray.service << SVCEOF
@@ -512,6 +532,7 @@ SVCEOF
 # ==========================================
 func_start_bot() {
     echo -e "\nIniciando o Bot..."
+    _apply_bot_runtime_perms
     systemctl enable botxray >/dev/null 2>&1 || true
     systemctl start  botxray >/dev/null 2>&1 || true
     if _wait_service_active botxray; then
@@ -545,7 +566,7 @@ func_view_logs() {
 while true; do
     clear
     echo -e "${AZUL}==================================================${RESET}"
-    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.3.4      ${RESET}"
+    echo -e "${AMARELO}      GERENCIADOR DO BOT TELEGRAM V1.3.5      ${RESET}"
     echo -e "${AZUL}==================================================${RESET}"
 
     status_msg="${VERMELHO}NÃO INSTALADO${RESET}"
