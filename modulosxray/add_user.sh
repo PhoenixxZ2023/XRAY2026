@@ -1,18 +1,18 @@
 #!/bin/bash
-# add_user.sh - TURBONET XRAY V1.5 (PRO)
-# Correções aplicadas V1.5:
-#   - Proteção contra colisão/sobrescrita de contas reais do Linux (bloqueio de nomes reservados + checagem de shell /bin/false e UID >= 1000)
-#   - Garante /bin/false em /etc/shells para compatibilidade total com OpenSSH, Dropbear e SOCKS5
-#   - Checagem de duplicidade no config.json inclui entradas bloqueadas (LOCKED_<nick>)
-#   - Leitura dinâmica do path do XHTTP/WS/HTTPUpgrade/H2 no config.json ao gerar o link
-#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner) e validação `xray run -test`
+# add_user.sh - TURBONET XRAY V1.5.1 (PRO + Compatibilidade Bot Telegram)
+# Atualizações V1.5.1:
+#   - _apply_config_perms e _apply_xraytools_perms preservam permissões 2770/0660 quando o usuário `botxray` existe
+#   - generate_link() lê xhttpSettings.host do config.json (quando definido) antes de usar domain como fallback
+#   - Hot-reload via API interna do Xray (`xray api adduser`) sem derrubar conexões ativas, com fallback para restart
+#   - Mantidas proteções de contas Linux (/bin/false em /etc/shells, bloqueio de nomes reservados e UID >= 1000)
 
 set -Eeuo pipefail
 
 CONFIG_PATH="/usr/local/etc/xray/config.json"
-USER_DB="/opt/XrayTools/users.db"
+XRAYTOOLS_DIR="/opt/XrayTools"
+USER_DB="${XRAYTOOLS_DIR}/users.db"
 PRESET_FILE="/usr/local/etc/xray/preset.json"
-CONN_INFO_DIR="/opt/XrayTools/users"
+CONN_INFO_DIR="${XRAYTOOLS_DIR}/users"
 LOG_FILE="/tmp/add_user.log"
 
 XRAY_USER="nobody"
@@ -35,8 +35,10 @@ fi
 
 # --- CLEANUP CENTRALIZADO ---
 _tmp_cfg=""
+_tmp_api_json=""
 _cleanup() {
     [ -n "${_tmp_cfg:-}" ] && rm -f "$_tmp_cfg"
+    [ -n "${_tmp_api_json:-}" ] && rm -f "$_tmp_api_json"
 }
 trap '_cleanup' EXIT
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
@@ -55,25 +57,57 @@ _detect_xray_owner() {
     XRAY_GROUP="$(id -gn "$XRAY_USER")"
 }
 
+_apply_xraytools_perms() {
+    mkdir -p "$XRAYTOOLS_DIR" "$CONN_INFO_DIR"
+    if id -u botxray &>/dev/null; then
+        chown root:botxray "$XRAYTOOLS_DIR"
+        chmod 2770 "$XRAYTOOLS_DIR"
+
+        chown root:botxray "$CONN_INFO_DIR"
+        chmod 0750 "$CONN_INFO_DIR"
+
+        if [ -f "$USER_DB" ]; then
+            chown botxray:botxray "$USER_DB"
+            chmod 0660 "$USER_DB"
+        fi
+    else
+        chmod 0750 "$XRAYTOOLS_DIR"
+        chmod 0700 "$CONN_INFO_DIR"
+        if [ -f "$USER_DB" ]; then
+            chown root:root "$USER_DB"
+            chmod 0600 "$USER_DB"
+        fi
+    fi
+}
+
 _apply_config_perms() {
     _detect_xray_owner
     local cfg_dir
     cfg_dir="$(dirname "$CONFIG_PATH")"
 
+    local dir_mode="750"
+    local file_mode="0640"
+    if id -u botxray &>/dev/null; then
+        dir_mode="2770"
+        file_mode="0660"
+    fi
+
     if [ -d "$cfg_dir" ]; then
         chown "root:${XRAY_GROUP}" "$cfg_dir"
-        chmod 750 "$cfg_dir"
+        chmod "$dir_mode" "$cfg_dir"
     fi
 
     if [ -f "$CONFIG_PATH" ]; then
         chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
-        chmod 0640 "$CONFIG_PATH"
+        chmod "$file_mode" "$CONFIG_PATH"
     fi
 
     if [ -f "$PRESET_FILE" ]; then
         chown "root:${XRAY_GROUP}" "$PRESET_FILE"
-        chmod 0640 "$PRESET_FILE"
+        chmod "$file_mode" "$PRESET_FILE"
     fi
+
+    _apply_xraytools_perms
 }
 
 _test_xray_config() {
@@ -119,7 +153,7 @@ ensure_cmd() {
 # --- VALIDAÇÃO DE CONTA LINUX / SHELL ---
 _is_reserved_username() {
     case "$1" in
-        root|admin|ubuntu|debian|centos|oracle|fedora|alpine|arch|nobody|nogroup|daemon|games|proxy|sshd|dropbear|xray|postgres|mysql|redis|docker|systemd|sysadmin|operator|guest)
+        root|admin|ubuntu|debian|centos|oracle|fedora|alpine|arch|nobody|nogroup|daemon|games|proxy|sshd|dropbear|xray|botxray|postgres|mysql|redis|docker|systemd|sysadmin|operator|guest)
             return 0 ;;
         *)
             return 1 ;;
@@ -192,6 +226,22 @@ _get_stream_path_encoded() {
     jq -rn --arg p "$raw_path" '$p | @uri'
 }
 
+_get_xhttp_host() {
+    local fallback_dom="$1"
+    local cfg_host=""
+    if [ -s "$CONFIG_PATH" ]; then
+        cfg_host=$(jq -r '
+            .inbounds[]? | select(.tag=="inbound-turbonet") | .streamSettings.xhttpSettings.host // ""
+        ' "$CONFIG_PATH" 2>/dev/null | head -1)
+    fi
+    cfg_host="$(echo "${cfg_host:-}" | tr -d '[:space:][:cntrl:]')"
+    if [ -n "$cfg_host" ]; then
+        echo "$cfg_host"
+    else
+        echo "$fallback_dom"
+    fi
+}
+
 # --- GERAÇÃO DO LINK A PARTIR DO PRESET ---
 generate_link() {
     local cred="$1" nick="$2"
@@ -230,7 +280,11 @@ generate_link() {
     case "$network" in
         grpc)        link="vless://${cred}@${domain}:${port}?security=${sec}&encryption=none&type=grpc&serviceName=gRPC&sni=${domain}#${nick}" ;;
         ws)          link="vless://${cred}@${domain}:${port}?path=${enc_path}&security=${sec}&encryption=none&host=${domain}&type=ws&sni=${domain}#${nick}" ;;
-        xhttp)       link="vless://${cred}@${domain}:${port}?mode=auto&path=${enc_path}&security=${sec}&encryption=none&host=${domain}&type=xhttp&sni=${domain}#${nick}" ;;
+        xhttp)
+            local xhttp_host
+            xhttp_host=$(_get_xhttp_host "$domain")
+            link="vless://${cred}@${domain}:${port}?mode=auto&path=${enc_path}&security=${sec}&encryption=none&host=${xhttp_host}&type=xhttp&sni=${domain}#${nick}"
+            ;;
         vision)      link="vless://${cred}@${domain}:${port}?security=tls&encryption=none&flow=xtls-rprx-vision&type=tcp&sni=${domain}#${nick}" ;;
         httpupgrade) link="vless://${cred}@${domain}:${port}?path=${enc_path}&security=${sec}&encryption=none&host=${domain}&type=httpupgrade&sni=${domain}#${nick}" ;;
         h2)          link="vless://${cred}@${domain}:${port}?path=${enc_path}&security=tls&encryption=none&host=${domain}&type=h2&sni=${domain}#${nick}" ;;
@@ -238,6 +292,39 @@ generate_link() {
         *)           link="vless://${cred}@${domain}:${port}?security=${sec}&encryption=none&type=tcp&sni=${domain}#${nick}" ;;
     esac
     echo "$link"
+}
+
+# --- HOT-RELOAD VIA API INTERNA DO XRAY ---
+_hot_reload_add_user() {
+    local proto="$1" net="$2" nick="$3" cred="$4"
+    [ ! -x /usr/local/bin/xray ] && return 1
+    systemctl is-active --quiet xray 2>/dev/null || return 1
+
+    local api_port
+    api_port=$(jq -r '.inbounds[]? | select(.tag=="api") | .port // ""' "$CONFIG_PATH" 2>/dev/null | head -1)
+    [ -z "$api_port" ] && return 1
+
+    _tmp_api_json=$(mktemp /tmp/xray_adduser_XXXXXX.json)
+    if [ "$proto" = "trojan" ]; then
+        jq -n --arg pwd "$cred" --arg nick "$nick" \
+            '{inbounds:[{tag:"inbound-turbonet",settings:{clients:[{password:$pwd,email:$nick,level:0}]}}]}' > "$_tmp_api_json"
+    elif [ "$net" = "vision" ]; then
+        jq -n --arg uuid "$cred" --arg nick "$nick" \
+            '{inbounds:[{tag:"inbound-turbonet",settings:{clients:[{id:$uuid,email:$nick,level:0,flow:"xtls-rprx-vision"}]}}]}' > "$_tmp_api_json"
+    else
+        jq -n --arg uuid "$cred" --arg nick "$nick" \
+            '{inbounds:[{tag:"inbound-turbonet",settings:{clients:[{id:$uuid,email:$nick,level:0}]}}]}' > "$_tmp_api_json"
+    fi
+
+    if /usr/local/bin/xray api adduser -s "127.0.0.1:${api_port}" "$_tmp_api_json" >>"$LOG_FILE" 2>&1; then
+        rm -f "$_tmp_api_json"
+        _tmp_api_json=""
+        return 0
+    fi
+
+    rm -f "$_tmp_api_json"
+    _tmp_api_json=""
+    return 1
 }
 
 # --- VERIFICAÇÃO DE XRAY ATIVO COM RETRY ---
@@ -254,10 +341,9 @@ _wait_xray_active() {
 # --- INICIALIZAÇÃO ---
 : > "$LOG_FILE"
 ensure_cmd jq jq
-mkdir -p "$(dirname "$USER_DB")" "$CONN_INFO_DIR"
-chmod 0700 "$(dirname "$USER_DB")" "$CONN_INFO_DIR"
+mkdir -p "$XRAYTOOLS_DIR" "$CONN_INFO_DIR"
 touch "$USER_DB"
-chmod 0600 "$USER_DB"
+_apply_xraytools_perms
 
 if [ ! -s "$CONFIG_PATH" ]; then
     echo -e "${TXT_RED}❌ Config não encontrada: $CONFIG_PATH${RESET}"
@@ -382,7 +468,7 @@ mv -f "$_tmp_cfg" "$CONFIG_PATH"
 _tmp_cfg=""
 _apply_config_perms
 
-# --- VALIDA E REINICIA O XRAY ---
+# --- VALIDA E APLICA NO XRAY (HOT-RELOAD COM FALLBACK) ---
 if ! _test_xray_config "$CONFIG_PATH" >>"$LOG_FILE" 2>&1; then
     echo -e "${TXT_RED}❌ Falha na validação do config.json pelo Xray. Revertendo...${RESET}"
     mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
@@ -392,7 +478,9 @@ if ! _test_xray_config "$CONFIG_PATH" >>"$LOG_FILE" 2>&1; then
 fi
 
 echo -e "${TXT_YELLOW}Aplicando usuário no Xray...${RESET}"
-if ! systemctl restart xray >>"$LOG_FILE" 2>&1 || ! _wait_xray_active; then
+if _hot_reload_add_user "$inbound_proto" "$preset_net" "$nick" "$uuid"; then
+    echo -e "${TXT_GREEN}⚡ Usuário injetado via API sem derrubar conexões ativas.${RESET}"
+elif ! systemctl restart xray >>"$LOG_FILE" 2>&1 || ! _wait_xray_active; then
     echo -e "${TXT_RED}❌ Falha ao iniciar/recarregar Xray. Revertendo config...${RESET}"
     mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
     _apply_config_perms
@@ -404,8 +492,7 @@ fi
 
 # --- GRAVA NO DB ---
 echo "${nick}|${uuid}|${expiry}|${user_pass}|${conn_limit}" >> "$USER_DB"
-chmod 0600 "$USER_DB"
-chown root:root "$USER_DB"
+_apply_xraytools_perms
 
 link=$(generate_link "$uuid" "$nick")
 
@@ -426,8 +513,13 @@ user_file="${CONN_INFO_DIR}/${nick}.txt"
     echo "LIMITE=${limit_display}"
     [ -n "$link" ] && echo "LINK=${link}"
 } > "$user_file"
-chmod 0600 "$user_file"
-chown root:root "$user_file"
+if id -u botxray &>/dev/null; then
+    chown root:botxray "$user_file"
+    chmod 0640 "$user_file"
+else
+    chown root:root "$user_file"
+    chmod 0600 "$user_file"
+fi
 
 # --- INTEGRAÇÃO SSH/SOCKS5/CHECKUSER: CRIAR CONTA LOCAL RESTRITA ---
 _sync_linux_account "$nick" "$user_pass"
