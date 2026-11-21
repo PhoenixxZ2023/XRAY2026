@@ -1,17 +1,17 @@
 #!/bin/bash
-# unblock_user.sh - TURBONET XRAY V1.1
-# Correções aplicadas:
-#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
-#   - Permissões 750/640 root:$XRAY_GROUP aplicadas no diretório e no config.json
-#   - Validação com `xray run -test` sob o usuário do serviço antes de reiniciar
-#   - Substituído try-reload-or-restart por restart direto no fallback
-#   - Suporte completo a credenciais Trojan (32 hex chars em .password) além de UUID
-#   - Desbloqueio da conta Linux para Dropbear e SOCKS5
+# unblock_user.sh - TURBONET XRAY V1.2 (PRO + Compatibilidade Bot Telegram)
+# Atualizações V1.2:
+#   - _apply_config_perms e _apply_xraytools_perms preservam permissões 2770/0660 quando o usuário `botxray` existe
+#   - Hot-reload via API interna (`xray api removeuser -email=...` + `xray api adduser`) sem derrubar clientes ativos
+#   - Desbloqueio completo da conta Linux (`usermod -U`, `chage -E -1`, `passwd -u`) com proteção para contas do sistema (UID < 1000)
+#   - Verificação de root (EUID) no início e suporte completo a VLESS, Vision e Trojan
 
 set -Eeuo pipefail
 
-USER_DB="/opt/XrayTools/users.db"
+XRAYTOOLS_DIR="/opt/XrayTools"
+USER_DB="${XRAYTOOLS_DIR}/users.db"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
+PRESET_FILE="/usr/local/etc/xray/preset.json"
 LOG_FILE="/tmp/unblock_user.log"
 
 XRAY_USER="nobody"
@@ -25,10 +25,17 @@ RESET='\033[0m'
 
 export DEBIAN_FRONTEND=noninteractive
 
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo -e "${TXT_RED}❌ Execute como root!${RESET}"
+    exit 1
+fi
+
 # --- CLEANUP CENTRALIZADO ---
 _tmp_cfg=""
+_tmp_api_json=""
 _cleanup() {
     [ -n "${_tmp_cfg:-}" ] && rm -f "$_tmp_cfg"
+    [ -n "${_tmp_api_json:-}" ] && rm -f "$_tmp_api_json"
 }
 trap '_cleanup' EXIT
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
@@ -47,20 +54,53 @@ _detect_xray_owner() {
     XRAY_GROUP="$(id -gn "$XRAY_USER")"
 }
 
+_apply_xraytools_perms() {
+    mkdir -p "$XRAYTOOLS_DIR"
+    if id -u botxray &>/dev/null; then
+        chown root:botxray "$XRAYTOOLS_DIR"
+        chmod 2770 "$XRAYTOOLS_DIR"
+
+        if [ -f "$USER_DB" ]; then
+            chown botxray:botxray "$USER_DB"
+            chmod 0660 "$USER_DB"
+        fi
+    else
+        chmod 0750 "$XRAYTOOLS_DIR"
+        if [ -f "$USER_DB" ]; then
+            chown root:root "$USER_DB"
+            chmod 0600 "$USER_DB"
+        fi
+    fi
+}
+
 _apply_config_perms() {
     _detect_xray_owner
     local cfg_dir
     cfg_dir="$(dirname "$CONFIG_PATH")"
 
+    local dir_mode="750"
+    local file_mode="0640"
+    if id -u botxray &>/dev/null; then
+        dir_mode="2770"
+        file_mode="0660"
+    fi
+
     if [ -d "$cfg_dir" ]; then
         chown "root:${XRAY_GROUP}" "$cfg_dir"
-        chmod 750 "$cfg_dir"
+        chmod "$dir_mode" "$cfg_dir"
     fi
 
     if [ -f "$CONFIG_PATH" ]; then
         chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
-        chmod 0640 "$CONFIG_PATH"
+        chmod "$file_mode" "$CONFIG_PATH"
     fi
+
+    if [ -f "$PRESET_FILE" ]; then
+        chown "root:${XRAY_GROUP}" "$PRESET_FILE"
+        chmod "$file_mode" "$PRESET_FILE"
+    fi
+
+    _apply_xraytools_perms
 }
 
 _test_xray_config() {
@@ -119,9 +159,91 @@ _wait_xray_active() {
     return 1
 }
 
+# --- HOT-RELOAD VIA API INTERNA DO XRAY ---
+_xray_api_port() {
+    jq -r '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
+}
+
+_hot_reload_unblock_user() {
+    local nick="$1" locked_nick="$2" real_cred="$3"
+    [ ! -x /usr/local/bin/xray ] && return 1
+    systemctl is-active --quiet xray 2>/dev/null || return 1
+
+    local api_port
+    api_port=$(_xray_api_port)
+    [ -z "${api_port:-}" ] && return 1
+
+    /usr/local/bin/xray api removeuser \
+        -server="127.0.0.1:${api_port}" \
+        -inboundTag="inbound-turbonet" \
+        -email="$locked_nick" >>"$LOG_FILE" 2>&1 || true
+
+    local proto has_vision preset_net
+    proto=$(jq -r '.inbounds[]? | select(.tag=="inbound-turbonet") | .protocol // "vless"' "$CONFIG_PATH" 2>/dev/null | head -1)
+    preset_net=$(jq -r '.network // ""' "$PRESET_FILE" 2>/dev/null || echo "")
+    has_vision=$(jq -r '
+        [.inbounds[]? | select(.tag=="inbound-turbonet") | .settings.clients[]? | select(.flow=="xtls-rprx-vision")] | length
+    ' "$CONFIG_PATH" 2>/dev/null || echo 0)
+
+    _tmp_api_json=$(mktemp /tmp/xray_unblockuser_XXXXXX.json)
+    if [ "$proto" = "trojan" ]; then
+        jq -n --arg pwd "$real_cred" --arg em "$nick" \
+            '{inbounds:[{tag:"inbound-turbonet",settings:{clients:[{password:$pwd,email:$em,level:0}]}}]}' > "$_tmp_api_json"
+    elif [ "$preset_net" = "vision" ] || [ "${has_vision:-0}" -gt 0 ]; then
+        jq -n --arg id "$real_cred" --arg em "$nick" \
+            '{inbounds:[{tag:"inbound-turbonet",settings:{clients:[{id:$id,email:$em,level:0,flow:"xtls-rprx-vision"}]}}]}' > "$_tmp_api_json"
+    else
+        jq -n --arg id "$real_cred" --arg em "$nick" \
+            '{inbounds:[{tag:"inbound-turbonet",settings:{clients:[{id:$id,email:$em,level:0}]}}]}' > "$_tmp_api_json"
+    fi
+
+    if /usr/local/bin/xray api adduser -s "127.0.0.1:${api_port}" "$_tmp_api_json" >>"$LOG_FILE" 2>&1; then
+        rm -f "$_tmp_api_json"
+        _tmp_api_json=""
+        return 0
+    fi
+
+    rm -f "$_tmp_api_json"
+    _tmp_api_json=""
+    return 1
+}
+
+_fallback_reload() {
+    if ! systemctl restart xray >>"$LOG_FILE" 2>&1 || ! _wait_xray_active; then
+        echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}"
+        mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
+        _apply_config_perms
+        systemctl restart xray >/dev/null 2>&1 || true
+        journalctl -u xray -n 15 --no-pager 2>/dev/null || true
+        echo -e "${TXT_YELLOW}Config revertido.${RESET}"
+        sleep 3; return 1
+    fi
+    return 0
+}
+
+_unlock_linux_account() {
+    local nick="$1"
+    if [ -f /etc/shells ] && ! grep -qxF "/bin/false" /etc/shells 2>/dev/null; then
+        echo "/bin/false" >> /etc/shells
+    fi
+    if getent passwd "$nick" >/dev/null 2>&1; then
+        local uid shell
+        uid=$(id -u "$nick" 2>/dev/null || echo 0)
+        shell=$(getent passwd "$nick" | cut -d: -f7)
+        if [ "$uid" -lt 1000 ] || [ "$shell" != "/bin/false" ]; then
+            echo -e "${TXT_YELLOW}⚠  Conta Linux '${nick}' pertence ao sistema — não alterada.${RESET}"
+            return 0
+        fi
+        usermod -U "$nick" 2>/dev/null || true
+        chage -E -1 "$nick" 2>/dev/null || true
+        passwd -u "$nick" 2>/dev/null || true
+    fi
+}
+
 # --- INICIALIZAÇÃO ---
 : > "$LOG_FILE"
 ensure_cmd jq jq
+_apply_xraytools_perms
 
 if [ ! -s "$CONFIG_PATH" ]; then
     echo -e "${TXT_RED}❌ config.json não encontrado.${RESET}"
@@ -248,40 +370,17 @@ if ! _test_xray_config "$CONFIG_PATH" >>"$LOG_FILE" 2>&1; then
     sleep 3; exit 1
 fi
 
-# --- HELPER: porta da API do Xray ---
-_xray_api_port() {
-    jq -r '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
-}
-_api_remove() {
-    local email="$1"
-    systemctl is-active --quiet xray 2>/dev/null || return 1
-    local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
-    /usr/local/bin/xray api rmu -server="127.0.0.1:${p}" \
-        -inboundTag="inbound-turbonet" "$email" >/dev/null 2>&1
-}
-_fallback_reload() {
-    if ! systemctl restart xray >>"$LOG_FILE" 2>&1 || ! _wait_xray_active; then
-        echo -e "${TXT_RED}❌ Falha ao reiniciar Xray. Revertendo config...${RESET}"
-        mv -f "${CONFIG_PATH}.bak" "$CONFIG_PATH"
-        _apply_config_perms
-        systemctl restart xray >/dev/null 2>&1 || true
-        journalctl -u xray -n 15 --no-pager 2>/dev/null || true
-        echo -e "${TXT_YELLOW}Config revertido.${RESET}"
-        sleep 3; return 1
-    fi
-    return 0
-}
-
-# Remove sessão bloqueada via API e reinicia para efetivar credencial original
-_api_remove "LOCKED_${user_input}" 2>/dev/null || true
-_fallback_reload || exit 1
+# Aplica reativação (hot-reload via API interna com fallback para restart)
+if _hot_reload_unblock_user "$user_input" "$LOCKED_NAME" "$REAL_CRED"; then
+    echo -e "${TXT_GREEN}⚡ Credencial reativada via API sem derrubar conexões ativas.${RESET}"
+else
+    _fallback_reload || exit 1
+fi
 
 CRED_DISPLAY="${REAL_CRED:0:8}...${REAL_CRED: -4}"
 
-# Desbloquear conta local automaticamente (Dropbear / SOCKS5)
-if id "$user_input" &>/dev/null; then
-    passwd -u "$user_input" 2>/dev/null || true
-fi
+# Desbloquear conta local automaticamente (SSH / Dropbear / SOCKS5)
+_unlock_linux_account "$user_input"
 
 echo ""
 echo -e "${TXT_GREEN}✅ Usuário '${user_input}' reativado com sucesso!${RESET}"
