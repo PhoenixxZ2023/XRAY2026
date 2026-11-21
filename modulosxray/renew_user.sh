@@ -1,11 +1,10 @@
 #!/bin/bash
-# renew_user.sh - TURBONET XRAY V1.3 (PRO)
-# Correções aplicadas:
-#   - Detecção dinâmica do usuário/grupo do xray.service (_detect_xray_owner)
-#   - Permissões 750/640 root:$XRAY_GROUP aplicadas no diretório e no config.json
-#   - Validação com `xray run -test` sob o usuário do serviço e rollback automático
-#   - Suporte completo a credenciais Trojan (.password) além de VLESS/VMess (.id)
-#   - Validação numérica de dias (1-3650) e de bytes no usage.db
+# renew_user.sh - TURBONET XRAY V1.4 (PRO + Hot-Reload API + Compatibilidade Bot Telegram)
+# Atualizações V1.4:
+#   - _apply_config_perms e _apply_xraytools_perms preservam permissões 2770/0660 quando o usuário `botxray` existe
+#   - Hot-reload via API interna (`xray api removeuser -email=...` + `xray api adduser`) ao reativar suspensos sem derrubar clientes ativos
+#   - Desbloqueio completo da conta Linux (`usermod -U`, `chage -E -1`, `passwd -u`) com proteção para contas do sistema (UID < 1000)
+#   - Validação estrita do nick (`^[a-zA-Z0-9]{5,9}$`) e sincronização via flock com limiterxray.sh
 
 set -Eeuo pipefail
 
@@ -15,15 +14,21 @@ _cleanup() {
     for f in "${_TMP_FILES[@]:-}"; do
         [ -n "$f" ] && rm -f "$f" 2>/dev/null || true
     done
+    flock -u 9 2>/dev/null || true
 }
 trap '_cleanup' EXIT
 trap 'echo -e "\n\033[1;31m[ERRO]\033[0m Falha na linha $LINENO (código: $?)"; sleep 2' ERR
 
-USER_DB="/opt/XrayTools/users.db"
-USAGE_DB="/opt/XrayTools/usage.db"
-SESSION_DB="/opt/XrayTools/session.db"
+XRAYTOOLS_DIR="/opt/XrayTools"
+USER_DB="${XRAYTOOLS_DIR}/users.db"
+USAGE_DB="${XRAYTOOLS_DIR}/usage.db"
+SESSION_DB="${XRAYTOOLS_DIR}/session.db"
+LIMITS_DB="${XRAYTOOLS_DIR}/limits.db"
+CONN_INFO_DIR="${XRAYTOOLS_DIR}/users"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
+PRESET_FILE="/usr/local/etc/xray/preset.json"
 XRAY_BIN="/usr/local/bin/xray"
+LOCK_FILE="/tmp/limiterxray.lock"
 
 XRAY_USER="nobody"
 XRAY_GROUP="nogroup"
@@ -53,6 +58,8 @@ command -v awk >/dev/null 2>&1 || { echo -e "${TXT_RED}❌ 'awk' não instalado.
 # Carrega sanitização se disponível
 [ -f "/usr/local/bin/sanitize.sh" ] && source /usr/local/bin/sanitize.sh
 
+validate_nick() { [[ "${1:-}" =~ ^[a-zA-Z0-9]{5,9}$ ]]; }
+
 # --- DETECÇÃO DINÂMICA DE DONO E PERMISSÕES ---
 _detect_xray_owner() {
     local svc_user=""
@@ -67,20 +74,61 @@ _detect_xray_owner() {
     XRAY_GROUP="$(id -gn "$XRAY_USER")"
 }
 
+_apply_xraytools_perms() {
+    mkdir -p "$XRAYTOOLS_DIR" "$CONN_INFO_DIR"
+    if id -u botxray &>/dev/null; then
+        chown root:botxray "$XRAYTOOLS_DIR"
+        chmod 2770 "$XRAYTOOLS_DIR"
+
+        chown root:botxray "$CONN_INFO_DIR"
+        chmod 0750 "$CONN_INFO_DIR"
+
+        for db in "$USER_DB" "$USAGE_DB" "$SESSION_DB" "$LIMITS_DB"; do
+            if [ -f "$db" ]; then
+                chown botxray:botxray "$db"
+                chmod 0660 "$db"
+            fi
+        done
+    else
+        chmod 0750 "$XRAYTOOLS_DIR"
+        chmod 0700 "$CONN_INFO_DIR"
+        for db in "$USER_DB" "$USAGE_DB" "$SESSION_DB" "$LIMITS_DB"; do
+            if [ -f "$db" ]; then
+                chown root:root "$db"
+                chmod 0600 "$db"
+            fi
+        done
+    fi
+}
+
 _apply_config_perms() {
     _detect_xray_owner
     local cfg_dir
     cfg_dir="$(dirname "$CONFIG_PATH")"
 
+    local dir_mode="750"
+    local file_mode="0640"
+    if id -u botxray &>/dev/null; then
+        dir_mode="2770"
+        file_mode="0660"
+    fi
+
     if [ -d "$cfg_dir" ]; then
         chown "root:${XRAY_GROUP}" "$cfg_dir"
-        chmod 750 "$cfg_dir"
+        chmod "$dir_mode" "$cfg_dir"
     fi
 
     if [ -f "$CONFIG_PATH" ]; then
         chown "root:${XRAY_GROUP}" "$CONFIG_PATH"
-        chmod 0640 "$CONFIG_PATH"
+        chmod "$file_mode" "$CONFIG_PATH"
     fi
+
+    if [ -f "$PRESET_FILE" ]; then
+        chown "root:${XRAY_GROUP}" "$PRESET_FILE"
+        chmod "$file_mode" "$PRESET_FILE"
+    fi
+
+    _apply_xraytools_perms
 }
 
 _test_xray_config() {
@@ -104,36 +152,100 @@ _wait_xray_active() {
     return 1
 }
 
-# --- HELPERS DA API XRAY ---
+# --- HELPERS DA API XRAY (HOT-RELOAD) ---
 _xray_api_port() {
     jq -r '.inbounds[]? | select(.tag=="api" or .protocol=="dokodemo-door") | .port // empty' "$CONFIG_PATH" 2>/dev/null | head -1
 }
 
-_api_remove() {
-    local email="$1"
+_hot_reload_unblock_user() {
+    local nick="$1" locked_nick="$2" real_cred="$3"
+    [ ! -x "$XRAY_BIN" ] && return 1
     systemctl is-active --quiet xray 2>/dev/null || return 1
-    local p; p=$(_xray_api_port); [ -z "${p:-}" ] && return 1
-    "$XRAY_BIN" api rmu -server="127.0.0.1:${p}" \
-        -inboundTag="inbound-turbonet" "$email" >/dev/null 2>&1
+
+    local api_port
+    api_port=$(_xray_api_port)
+    [ -z "${api_port:-}" ] && return 1
+
+    "$XRAY_BIN" api removeuser \
+        -server="127.0.0.1:${api_port}" \
+        -inboundTag="inbound-turbonet" \
+        -email="$locked_nick" >/dev/null 2>&1 || true
+
+    local proto has_vision preset_net tmp_api_json
+    proto=$(jq -r '.inbounds[]? | select(.tag=="inbound-turbonet") | .protocol // "vless"' "$CONFIG_PATH" 2>/dev/null | head -1)
+    preset_net=$(jq -r '.network // ""' "$PRESET_FILE" 2>/dev/null || echo "")
+    has_vision=$(jq -r '
+        [.inbounds[]? | select(.tag=="inbound-turbonet") | .settings.clients[]? | select(.flow=="xtls-rprx-vision")] | length
+    ' "$CONFIG_PATH" 2>/dev/null || echo 0)
+
+    tmp_api_json=$(mktemp /tmp/xray_renew_api_XXXXXX.json)
+    _TMP_FILES+=("$tmp_api_json")
+
+    if [ "$proto" = "trojan" ]; then
+        jq -n --arg pwd "$real_cred" --arg em "$nick" \
+            '{inbounds:[{tag:"inbound-turbonet",settings:{clients:[{password:$pwd,email:$em,level:0}]}}]}' > "$tmp_api_json"
+    elif [ "$preset_net" = "vision" ] || [ "${has_vision:-0}" -gt 0 ]; then
+        jq -n --arg id "$real_cred" --arg em "$nick" \
+            '{inbounds:[{tag:"inbound-turbonet",settings:{clients:[{id:$id,email:$em,level:0,flow:"xtls-rprx-vision"}]}}]}' > "$tmp_api_json"
+    else
+        jq -n --arg id "$real_cred" --arg em "$nick" \
+            '{inbounds:[{tag:"inbound-turbonet",settings:{clients:[{id:$id,email:$em,level:0}]}}]}' > "$tmp_api_json"
+    fi
+
+    if "$XRAY_BIN" api adduser -s "127.0.0.1:${api_port}" "$tmp_api_json" >/dev/null 2>&1; then
+        rm -f "$tmp_api_json"
+        return 0
+    fi
+
+    rm -f "$tmp_api_json"
+    return 1
 }
+
+_unlock_linux_account() {
+    local nick="$1"
+    if [ -f /etc/shells ] && ! grep -qxF "/bin/false" /etc/shells 2>/dev/null; then
+        echo "/bin/false" >> /etc/shells
+    fi
+    if getent passwd "$nick" >/dev/null 2>&1; then
+        local uid shell
+        uid=$(id -u "$nick" 2>/dev/null || echo 0)
+        shell=$(getent passwd "$nick" | cut -d: -f7)
+        if [ "$uid" -lt 1000 ] || [ "$shell" != "/bin/false" ]; then
+            echo -e "  ↳ ${TXT_YELLOW}Conta Linux '${nick}' pertence ao sistema — não alterada.${RESET}"
+            return 1
+        fi
+        usermod -U "$nick" 2>/dev/null || true
+        chage -E -1 "$nick" 2>/dev/null || true
+        passwd -u "$nick" 2>/dev/null || true
+        return 0
+    fi
+    return 1
+}
+
+_apply_xraytools_perms
 
 # --- INTERFACE ---
 clear
-echo -e "${TITLE_BAR}   RENOVAR USUÁRIO (V1.3 PRO)   ${RESET}"
+echo -e "${TITLE_BAR}   RENOVAR USUÁRIO (V1.4 PRO)   ${RESET}"
 echo ""
 
 read -rp "Nick do usuário (0 para voltar): " nick_raw
 [ "${nick_raw:-0}" = "0" ] || [ -z "${nick_raw:-}" ] && exit 0
 
-nick=$(echo "$nick_raw" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
+if ! validate_nick "$nick_raw"; then
+    echo -e "${TXT_RED}❌ Nick inválido. Use de 5 a 9 letras/números.${RESET}"
+    sleep 2; exit 1
+fi
 
-if [ -z "$nick" ] || ! grep -q "^${nick}|" "$USER_DB" 2>/dev/null; then
+nick=$(echo "$nick_raw" | tr '[:upper:]' '[:lower:]')
+
+db_line=$(awk -F'|' -v n="$nick" '$1==n {print $0; exit}' "$USER_DB" 2>/dev/null || true)
+if [ -z "$db_line" ]; then
     echo -e "${TXT_RED}❌ Usuário '${nick}' não encontrado no sistema.${RESET}"
     sleep 2; exit 1
 fi
 
-# Extrai os dados do DB
-IFS='|' read -r db_nick db_uuid data_atual db_pass db_limit _rest < <(grep "^${nick}|" "$USER_DB" | head -1)
+IFS='|' read -r db_nick db_uuid data_atual db_pass db_limit _rest <<< "$db_line"
 
 # Verifica se está suspenso/bloqueado no config.json
 is_locked=false
@@ -177,7 +289,7 @@ echo ""
 
 # Reset de Consumo de Dados (Integração Limiter)
 reset_usage="n"
-if [ -f "$USAGE_DB" ] && grep -q "^${nick}|" "$USAGE_DB" 2>/dev/null; then
+if [ -f "$USAGE_DB" ] && awk -F'|' -v n="$nick" '$1==n{found=1} END{exit found?0:1}' "$USAGE_DB" 2>/dev/null; then
     uso_bytes=$(awk -F'|' -v n="$nick" '$1==n {print $2; exit}' "$USAGE_DB" 2>/dev/null || echo 0)
     [[ "${uso_bytes:-0}" =~ ^[0-9]+$ ]] || uso_bytes=0
     uso_mb=$(( uso_bytes / 1048576 ))
@@ -193,13 +305,15 @@ read -rp "Confirmar renovação? [s/N]: " confirm
 echo ""
 echo "Aplicando renovação..."
 
+exec 9>"$LOCK_FILE"
+flock -w 10 9 || true
+
 # 1. Atualiza Banco de Dados de Forma Atômica
 tmp_db=$(mktemp "${USER_DB}.tmp.XXXXXX")
 _TMP_FILES+=("$tmp_db")
 awk -F'|' -v n="$nick" -v nd="$nova_data" 'BEGIN {OFS="|"} $1==n {$3=nd} {print $0}' "$USER_DB" > "$tmp_db"
 mv -f "$tmp_db" "$USER_DB"
-chmod 0600 "$USER_DB"
-chown root:root "$USER_DB"
+_apply_xraytools_perms
 
 # 2. Desbloqueio Xray - Caso estivesse suspenso
 if [ "$is_locked" = true ]; then
@@ -226,8 +340,9 @@ if [ "$is_locked" = true ]; then
         _apply_config_perms
 
         if _test_xray_config "$CONFIG_PATH" >/dev/null 2>&1; then
-            _api_remove "LOCKED_${nick}" 2>/dev/null || true
-            if systemctl restart xray >/dev/null 2>&1 && _wait_xray_active; then
+            if _hot_reload_unblock_user "$nick" "LOCKED_${nick}" "$db_uuid"; then
+                echo -e "  ↳ ${TXT_GREEN}⚡ Acesso Xray restaurado via API sem derrubar conexões ativas.${RESET}"
+            elif systemctl restart xray >/dev/null 2>&1 && _wait_xray_active; then
                 echo -e "  ↳ ${TXT_GREEN}Acesso Xray restaurado com sucesso.${RESET}"
             else
                 echo -e "  ↳ ${TXT_RED}Falha ao reiniciar Xray. Revertendo config...${RESET}"
@@ -252,29 +367,33 @@ if [[ "${reset_usage}" =~ ^[Ss]$ ]]; then
         _TMP_FILES+=("$tmp_usage")
         awk -F'|' -v n="$nick" '$1!=n {print}' "$USAGE_DB" > "$tmp_usage"
         mv -f "$tmp_usage" "$USAGE_DB"
-        chmod 0600 "$USAGE_DB"
     fi
     if [ -f "$SESSION_DB" ]; then
         tmp_session=$(mktemp "${SESSION_DB}.tmp.XXXXXX")
         _TMP_FILES+=("$tmp_session")
         awk -F'|' -v n="$nick" '$1!=n {print}' "$SESSION_DB" > "$tmp_session"
         mv -f "$tmp_session" "$SESSION_DB"
-        chmod 0600 "$SESSION_DB"
     fi
+    _apply_xraytools_perms
     echo -e "  ↳ ${TXT_GREEN}Consumo de dados zerado.${RESET}"
 fi
 
-# 4. Desbloqueio SSH/SOCKS5 Local
-if id "$nick" &>/dev/null; then
-    passwd -u "$nick" 2>/dev/null || true
+# 4. Desbloqueio SSH/Dropbear/SOCKS5 Local
+if _unlock_linux_account "$nick"; then
     echo -e "  ↳ ${TXT_GREEN}Acesso SSH/SOCKS5 local habilitado.${RESET}"
 fi
 
 # 5. Atualiza Arquivo de Conexão Individual
-user_file="/opt/XrayTools/users/${nick}.txt"
+user_file="${CONN_INFO_DIR}/${nick}.txt"
 if [ -f "$user_file" ]; then
     sed -i "s/^EXPIRA=.*/EXPIRA=${nova_data}/" "$user_file"
+    if id -u botxray &>/dev/null; then
+        chown root:botxray "$user_file"
+        chmod 0640 "$user_file"
+    fi
 fi
+
+flock -u 9 2>/dev/null || true
 
 echo ""
 echo -e "${TXT_GREEN}✅ Usuário '${nick}' renovado com sucesso!${RESET}"
